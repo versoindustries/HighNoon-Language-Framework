@@ -145,6 +145,10 @@ class HPOSearchSpace:
     - embedding_dim: max 4096
     - num_reasoning_blocks: max 24
     - num_moe_experts: max 12
+
+    Memory-Aware Shrinking:
+    When memory_failure_count > 0, the sampler automatically reduces
+    architecture sizes to prevent repeated OOM/swap failures.
     """
 
     # Training hyperparameters
@@ -177,6 +181,34 @@ class HPOSearchSpace:
     lambda_da: tuple[float, float] | None = None  # Domain adaptation weight
     unfreeze_schedule: list[str] | None = None  # Unfreezing strategy
     unfreeze_interval: tuple[int, int] | None = None  # Steps between unfreezing
+
+    # Memory-aware shrinking: count of consecutive memory failures
+    # When > 0, sample() reduces architecture sizes to prevent OOM
+    memory_failure_count: int = 0
+
+    def record_memory_failure(self) -> None:
+        """Record a memory-related trial failure (OOM, swap spike, etc.).
+
+        Increments memory_failure_count which causes subsequent samples to use
+        smaller architectures to prevent repeated failures.
+        """
+        self.memory_failure_count += 1
+        logger.warning(
+            f"[HPO Manager] Memory failure recorded. "
+            f"Shrink level now: {self.memory_failure_count}"
+        )
+
+    def record_trial_success(self) -> None:
+        """Record a successful trial completion.
+
+        Resets memory_failure_count since the current config fits in memory.
+        """
+        if self.memory_failure_count > 0:
+            logger.info(
+                f"[HPO Manager] Trial succeeded. Resetting memory shrink level "
+                f"from {self.memory_failure_count} to 0"
+            )
+            self.memory_failure_count = 0
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> HPOSearchSpace:
@@ -290,18 +322,65 @@ class HPOSearchSpace:
 
         random.seed(trial_id)  # Deterministic for reproducibility
 
+        # Memory-aware shrinking: reduce architecture when previous trials failed due to OOM
+        # Each memory failure decreases max allowed sizes to avoid repeated OOM
+        memory_shrink_level = getattr(self, "memory_failure_count", 0)
+
+        if memory_shrink_level >= 3:
+            # Severe memory pressure: use minimum viable config
+            max_blocks = 4
+            max_experts = 4
+            max_dim = 256
+            max_batch = 8
+            logger.warning(
+                f"[HPO Manager] Memory shrink level {memory_shrink_level}: "
+                "Using minimum viable config (4 blocks, 4 experts, 256 dim)"
+            )
+        elif memory_shrink_level >= 2:
+            # High memory pressure: significantly reduced
+            max_blocks = 6
+            max_experts = 6
+            max_dim = 512
+            max_batch = 16
+            logger.warning(
+                f"[HPO Manager] Memory shrink level {memory_shrink_level}: "
+                "Using reduced config (6 blocks, 6 experts, 512 dim)"
+            )
+        elif memory_shrink_level >= 1:
+            # Moderate memory pressure: slightly reduced
+            max_blocks = 8
+            max_experts = 8
+            max_dim = 768
+            max_batch = 32
+            logger.info(
+                f"[HPO Manager] Memory shrink level {memory_shrink_level}: "
+                "Using conservative config (8 blocks, 8 experts, 768 dim)"
+            )
+        else:
+            # No memory pressure: use full search space
+            max_blocks = 24
+            max_experts = 12
+            max_dim = 4096
+            max_batch = 128
+
+        # Filter search space by memory constraints
+        filtered_blocks = [b for b in self.num_reasoning_blocks if b <= max_blocks] or [4]
+        filtered_experts = [e for e in self.num_moe_experts if e <= max_experts] or [4]
+        filtered_dims = [d for d in self.embedding_dim if d <= max_dim] or [256]
+        filtered_batch = [b for b in self.batch_size if b <= max_batch] or [8]
+
         config = {
             # Training hyperparameters
             "learning_rate": random.uniform(*self.learning_rate),
-            "batch_size": random.choice(self.batch_size),
+            "batch_size": random.choice(filtered_batch),
             "optimizer": random.choice(self.optimizer),
             "warmup_steps": random.randint(*self.warmup_steps),
             "weight_decay": random.uniform(*self.weight_decay),
-            # Model architecture params
-            "num_reasoning_blocks": random.choice(self.num_reasoning_blocks),
-            "hidden_dim": random.choice(self.hidden_dim),
-            "embedding_dim": random.choice(self.embedding_dim),
-            "num_moe_experts": random.choice(self.num_moe_experts),
+            # Model architecture params (memory-aware)
+            "num_reasoning_blocks": random.choice(filtered_blocks),
+            "hidden_dim": random.choice(filtered_dims),
+            "embedding_dim": random.choice(filtered_dims),
+            "num_moe_experts": random.choice(filtered_experts),
             # HSMN-specific params
             "mamba_state_dim": random.choice(self.mamba_state_dim),
             "moe_top_k": random.choice(self.moe_top_k),
@@ -549,6 +628,21 @@ class HPOTrialManager:
             if error_message:
                 status.error_message = error_message
             self.metrics_collector.update_trial_status(status)
+
+        # Memory-aware shrinking: track memory failures to shrink future configs
+        if not success and error_message:
+            # Detect memory-related failures (swap spike, OOM, memory critical)
+            memory_keywords = ["memory", "swap", "oom", "resourceexhausted"]
+            is_memory_failure = any(kw in error_message.lower() for kw in memory_keywords)
+            if is_memory_failure:
+                self.search_space.record_memory_failure()
+                logger.info(
+                    f"[HPO Manager] Memory failure detected in trial {trial_id}, "
+                    f"next trials will use smaller configs"
+                )
+        elif success:
+            # Reset memory failure count on successful trial
+            self.search_space.record_trial_success()
 
         logger.info(
             f"[HPO Manager] Trial {trial_id} {'completed' if success else 'failed'}"

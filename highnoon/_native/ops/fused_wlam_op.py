@@ -168,8 +168,24 @@ def fused_wlam(
             use_cross_attn=use_cross_attn,
         )
 
-        def grad(grad_output):
-            """Compute gradients using C++ grad op or fallback."""
+        def grad(grad_output, variables=None):
+            """Compute gradients using C++ grad op or fallback.
+
+            Args:
+                grad_output: Gradient from downstream operations.
+                variables: Optional list of captured tf.Variables from the forward
+                    pass. Required by TensorFlow's custom_gradient when the
+                    decorated function captures layer variables.
+
+            Returns:
+                Tuple of gradients for each input tensor, plus a list of gradients
+                for any captured variables (zeros since gradients are computed
+                analytically for explicit weight inputs).
+            """
+            # Compute gradients for captured variables (if any)
+            # These are external layer variables that TensorFlow detected
+            var_grads = [tf.zeros_like(v) for v in variables] if variables else []
+
             if _fused_wlam_grad_op is not None:
                 # Compute cached values for backward pass
                 batch_size = tf.shape(x_in)[0]
@@ -202,7 +218,7 @@ def fused_wlam(
                 )
                 # grads: grad_x, grad_h, grad_g, grad_hs, grad_gs,
                 #        grad_gamma, grad_beta, grad_predict, grad_update
-                return (
+                input_grads = (
                     grads[0],  # grad_x
                     grads[1],  # grad_h_filter
                     grads[2],  # grad_g_filter
@@ -220,7 +236,7 @@ def fused_wlam(
                 )
             else:
                 # Fallback: identity gradient for x, zeros for others
-                return (
+                input_grads = (
                     grad_output,  # grad_x (identity passthrough)
                     tf.zeros_like(h_f),
                     tf.zeros_like(g_f),
@@ -236,6 +252,9 @@ def fused_wlam(
                     tf.zeros_like(cav),
                     tf.zeros_like(cao),
                 )
+
+            # Return input gradients and variable gradients
+            return input_grads, var_grads
 
         return output, grad
 

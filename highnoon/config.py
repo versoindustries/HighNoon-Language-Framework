@@ -767,7 +767,7 @@ THOUGHT_MEMORY_SIZE: int = 8  # Number of compressed thought slots
 
 # Phase 12.3: Hierarchical WLAM (Enhanced in WLAM C++ Integration)
 WLAM_NUM_LEVELS: int = 3  # Number of wavelet decomposition levels (1-5)
-WLAM_USE_LIFTING: bool = True  # Use lifting scheme instead of Conv1D DWT
+WLAM_USE_LIFTING: bool = True  # Lifting scheme: learnable predict/update wavelets (C++ op)
 WLAM_SCATTERING_LAYERS: int = 0  # Scattering transform layers (0=disabled)
 WLAM_SCATTERING_POOL: int = 4  # Scattering average pooling size
 WLAM_USE_CROSS_ATTN: bool = True  # Cross-frequency attention

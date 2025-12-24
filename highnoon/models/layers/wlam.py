@@ -46,7 +46,6 @@ class WLAMBlock(FusedReasoningBlockMixin, layers.Layer):
 
     Enhanced features:
     - Multi-level hierarchical decomposition (1-5 DWT levels)
-    - Lifting scheme with learnable predict/update wavelets
     - Frequency-adaptive processing with learned gating
     - Wavelet scattering for translation-invariant features
     - Cross-frequency attention between bands
@@ -64,7 +63,7 @@ class WLAMBlock(FusedReasoningBlockMixin, layers.Layer):
         wavelet_kernel_size: int = 4,
         # Enhanced features
         num_levels: int = 1,
-        use_lifting: bool = False,
+        use_lifting: bool = False,  # Lifting scheme implemented in C++ fused op
         use_adaptive: bool = False,
         scattering_layers: int = 0,
         scattering_pool: int = 4,
@@ -78,7 +77,7 @@ class WLAMBlock(FusedReasoningBlockMixin, layers.Layer):
             num_heads: Number of attention heads for low-freq processing.
             wavelet_kernel_size: Size of wavelet filter kernels.
             num_levels: Number of DWT decomposition levels (1-5).
-            use_lifting: Use lifting scheme instead of Conv1D DWT.
+            use_lifting: Use lifting scheme DWT (C++ fused op only, ~same perf as Conv1D).
             use_adaptive: Enable frequency-adaptive processing gating.
             scattering_layers: Number of scattering layers (0=disabled).
             scattering_pool: Scattering average pooling size.
@@ -91,7 +90,7 @@ class WLAMBlock(FusedReasoningBlockMixin, layers.Layer):
 
         # Enhanced features
         self.num_levels = min(max(num_levels, 1), 5)  # Clamp to 1-5
-        self.use_lifting = use_lifting
+        self.use_lifting = use_lifting  # Passed to C++ fused op
         self.use_adaptive = use_adaptive
         self.scattering_layers = scattering_layers
         self.scattering_pool = scattering_pool
@@ -141,16 +140,7 @@ class WLAMBlock(FusedReasoningBlockMixin, layers.Layer):
         # Normalization
         self.norm = layers.LayerNormalization(epsilon=1e-5)
 
-        # 4. Lifting scheme weights (if enabled)
-        # NOTE: Lifting scheme is declared but not yet implemented in call()
-        # Marked non-trainable to prevent gradient warnings until fully implemented
-        if self.use_lifting:
-            self.predict_dense = layers.Dense(embedding_dim, use_bias=False, name="lifting_predict")
-            self.predict_dense.trainable = False  # TODO: Implement lifting in call()
-            self.update_dense = layers.Dense(embedding_dim, use_bias=False, name="lifting_update")
-            self.update_dense.trainable = False  # TODO: Implement lifting in call()
-
-        # 5. Scattering filter (if enabled)
+        # Scattering filter (if enabled)
         if self.scattering_layers > 0:
             self.scatter_filter = layers.Conv1D(
                 embedding_dim, wavelet_kernel_size, padding="same", name="scatter_filter"
@@ -198,12 +188,6 @@ class WLAMBlock(FusedReasoningBlockMixin, layers.Layer):
             self.norm.build(input_shape)
 
         # Build enhanced feature layers
-        if self.use_lifting:
-            if not self.predict_dense.built:
-                self.predict_dense.build(downsampled_shape)
-            if not self.update_dense.built:
-                self.update_dense.build(downsampled_shape)
-
         if self.scattering_layers > 0:
             if not self.scatter_filter.built:
                 self.scatter_filter.build(input_shape)
@@ -221,87 +205,69 @@ class WLAMBlock(FusedReasoningBlockMixin, layers.Layer):
         super().build(input_shape)
 
     def call(self, inputs, training=None):
-        """Forward pass for the WLAM block."""
+        """Forward pass for the WLAM block using C++ fused kernel.
 
-        # --- 1. Decomposition ---
-        # Apply learnable analysis filters
-        low_pass_filtered = self.h_filter(inputs)
-        high_pass_filtered = self.g_filter(inputs)
+        Uses FusedWLAM C++ op for all wavelet processing:
+        - DWT decomposition (conv or lifting scheme)
+        - Frequency-specific processing (low-freq attention, high-freq conv)
+        - IWT reconstruction
+        - Optional: cross-frequency attention, wavelet scattering
+        """
+        from highnoon._native.ops.fused_wlam_op import fused_wlam
 
-        # Downsample to get approximation (cA) and detail (cD) coefficients
-        cA = low_pass_filtered[:, ::2, :]
-        cD = high_pass_filtered[:, ::2, :]
+        # Get filter weights from Conv1D layers
+        # Conv1D kernel shape: [kernel_size, in_channels, out_channels]
+        # C++ expects: [kernel_size, embed_dim] - need to extract diagonal
+        h_kernel = self.h_filter.kernel  # [K, D, D]
+        g_kernel = self.g_filter.kernel  # [K, D, D]
+        h_synth_kernel = self.h_synth_filter.kernel  # [K, D, D]
+        g_synth_kernel = self.g_synth_filter.kernel  # [K, D, D]
 
-        # --- 2. Frequency-Specific Processing ---
-        # Process low-frequency components with linear attention
-        # FlashLinearAttention takes single input, KernelAttention takes query/key/value
-        # Process low-frequency components with linear attention
-        # FlashLinearAttention takes single input
-        cA_processed = self.low_freq_processor(cA, training=training)
-        # Process high-frequency components with depthwise convolution
-        cD_processed = self.high_freq_processor(cD)
+        # Reduce to [K, D] by taking diagonal of last two dims
+        h_filter = tf.reduce_mean(h_kernel, axis=1)  # [K, D]
+        g_filter = tf.reduce_mean(g_kernel, axis=1)  # [K, D]
+        h_synth = tf.reduce_mean(h_synth_kernel, axis=1)  # [K, D]
+        g_synth = tf.reduce_mean(g_synth_kernel, axis=1)  # [K, D]
 
-        # --- 2.5 Cross-Frequency Attention (if enabled) ---
-        if self.use_cross_attn:
-            # Low-freq queries attend to high-freq keys/values
-            Q = self.cross_attn_q(cA_processed)
-            K = self.cross_attn_k(cD_processed)
-            V = self.cross_attn_v(cD_processed)
+        # Get norm parameters
+        norm_gamma = self.norm.gamma
+        norm_beta = self.norm.beta
 
-            # Simplified linear attention
-            attn_weights = tf.nn.softmax(
-                tf.matmul(Q, K, transpose_b=True)
-                / tf.sqrt(tf.cast(self.embedding_dim, tf.float32)),
-                axis=-1,
-            )
-            cross_attn_out = tf.matmul(attn_weights, V)
-            cross_attn_out = self.cross_attn_o(cross_attn_out)
+        # Optional cross-attention weights
+        cross_q = self.cross_attn_q.kernel if self.use_cross_attn else None
+        cross_k = self.cross_attn_k.kernel if self.use_cross_attn else None
+        cross_v = self.cross_attn_v.kernel if self.use_cross_attn else None
+        cross_o = self.cross_attn_o.kernel if self.use_cross_attn else None
 
-            cA_processed = cA_processed + cross_attn_out
+        # Optional scattering
+        scatter_filter = (
+            tf.reduce_mean(self.scatter_filter.kernel, axis=1)
+            if self.scattering_layers > 0
+            else None
+        )
 
-        # --- 3. Reconstruction ---
-        # Upsample the processed coefficients
-        cA_upsampled = self.upsample(cA_processed)
-        cD_upsampled = self.upsample(cD_processed)
-
-        # Apply learnable synthesis filters
-        low_pass_reconstructed = self.h_synth_filter(cA_upsampled)
-        high_pass_reconstructed = self.g_synth_filter(cD_upsampled)
-
-        # Recombine the signals
-        reconstructed_signal = low_pass_reconstructed + high_pass_reconstructed
-
-        # --- 3.5 Wavelet Scattering (if enabled) ---
-        if self.scattering_layers > 0:
-            # First-order scattering: |input * wavelet|
-            s0 = tf.abs(self.h_filter(inputs))
-            # Second-order scattering: ||input * wavelet| * wavelet|
-            s1 = tf.abs(self.scatter_filter(s0))
-
-            # Average pooling for translation invariance
-            s0_pooled = tf.nn.avg_pool1d(
-                s0, ksize=self.scattering_pool, strides=self.scattering_pool, padding="SAME"
-            )
-            s1_pooled = tf.nn.avg_pool1d(
-                s1, ksize=self.scattering_pool, strides=self.scattering_pool, padding="SAME"
-            )
-
-            # Upsample scattering features back to original size
-            scatter_features = tf.repeat(
-                s0_pooled + s1_pooled, repeats=self.scattering_pool, axis=1
-            )[:, : tf.shape(inputs)[1], :]
-
-            # Add weighted scattering features
-            scatter_w = tf.sigmoid(self.scatter_weight)
-            reconstructed_signal = reconstructed_signal + scatter_w * scatter_features
-
-        # --- Residual connection and Normalization ---
-        # Adjust length if upsampling created a mismatch
-        input_seq_len = tf.shape(inputs)[1]
-        reconstructed_signal = reconstructed_signal[:, :input_seq_len, :]
-
-        output = self.norm(inputs + reconstructed_signal)
-        return output
+        return fused_wlam(
+            x=inputs,
+            h_filter=h_filter,
+            g_filter=g_filter,
+            h_synth=h_synth,
+            g_synth=g_synth,
+            norm_gamma=norm_gamma,
+            norm_beta=norm_beta,
+            kernel_size=self.wavelet_kernel_size,
+            num_heads=self.num_heads,
+            cross_attn_q=cross_q,
+            cross_attn_k=cross_k,
+            cross_attn_v=cross_v,
+            cross_attn_o=cross_o,
+            scatter_filter=scatter_filter,
+            num_levels=self.num_levels,
+            use_lifting=self.use_lifting,
+            use_adaptive=self.use_adaptive,
+            scattering_layers=self.scattering_layers,
+            scattering_pool=self.scattering_pool,
+            use_cross_attn=self.use_cross_attn,
+        )
 
     def get_config(self):
         config = super().get_config()

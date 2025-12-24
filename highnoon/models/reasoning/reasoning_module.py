@@ -272,6 +272,9 @@ class ReasoningModule(tf.keras.layers.Layer):
             use_quantum_holographic_memory=use_quantum_holographic_memory,
         )
 
+        # Phase 30: Quantum Normalization flag (set early since it's used for layer_norm setup)
+        self.use_quantum_norm = USE_QUANTUM_NORM
+
         # Layer normalization and dropout
         # When use_quantum_norm=True, we use QNorm instead of LayerNorm in forward pass
         # but still create LayerNorm as fallback (marked non-trainable to avoid gradient warnings)
@@ -308,8 +311,7 @@ class ReasoningModule(tf.keras.layers.Layer):
                 self.use_unitary_residual = False
                 logger.warning("Phase 34: Unitary Residual disabled (ops not available)")
 
-        # Phase 30: Quantum Normalization (replaces LayerNorm when enabled)
-        self.use_quantum_norm = USE_QUANTUM_NORM
+        # Phase 30: Quantum Normalization weights (replaces LayerNorm when enabled)
         if self.use_quantum_norm:
             _load_quantum_ops_lazy()
             if _quantum_ops_loaded:

@@ -1,6 +1,6 @@
 # Hardware Specification Report
 
-**Generated**: 2025-12-24T01:40:30.106041
+**Generated**: 2025-12-24T12:38:04.592253
 
 ---
 
@@ -13,7 +13,7 @@
 | **Architecture** | x86_64 |
 | **Physical Cores** | 8 |
 | **Logical Cores** | 16 |
-| **Base Frequency** | 3486 MHz |
+| **Base Frequency** | 2585 MHz |
 | **Max Frequency** | 3700 MHz |
 | **L1d Cache** | 256 KB/core |
 | **L2 Cache** | 4 KB/core |
@@ -27,8 +27,8 @@
 | Specification | Value |
 |---------------|-------|
 | **Total RAM** | 62.7 GB |
-| **Available** | 51.2 GB |
-| **Used** | 11.5 GB |
+| **Available** | 50.1 GB |
+| **Used** | 12.6 GB |
 | **Type** | Unknown |
 | **Speed** | 0 MT/s |
 | **Swap Total** | 8.0 GB |

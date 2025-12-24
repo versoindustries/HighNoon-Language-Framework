@@ -273,10 +273,16 @@ class ReasoningModule(tf.keras.layers.Layer):
         )
 
         # Layer normalization and dropout
+        # When use_quantum_norm=True, we use QNorm instead of LayerNorm in forward pass
+        # but still create LayerNorm as fallback (marked non-trainable to avoid gradient warnings)
         self.layer_norms = [
             tf.keras.layers.LayerNormalization(epsilon=1e-6, name=f"layer_norm_{i}")
             for i in range(len(self.reasoning_blocks))
         ]
+        # Mark layer_norms as non-trainable when quantum norm is used to avoid gradient warnings
+        if self.use_quantum_norm:
+            for norm in self.layer_norms:
+                norm.trainable = False
         self.dropout_layers = [
             tf.keras.layers.Dropout(dropout, name=f"dropout_{i}")
             for i in range(len(self.reasoning_blocks))

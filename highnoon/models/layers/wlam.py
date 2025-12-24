@@ -142,9 +142,13 @@ class WLAMBlock(FusedReasoningBlockMixin, layers.Layer):
         self.norm = layers.LayerNormalization(epsilon=1e-5)
 
         # 4. Lifting scheme weights (if enabled)
+        # NOTE: Lifting scheme is declared but not yet implemented in call()
+        # Marked non-trainable to prevent gradient warnings until fully implemented
         if self.use_lifting:
             self.predict_dense = layers.Dense(embedding_dim, use_bias=False, name="lifting_predict")
+            self.predict_dense.trainable = False  # TODO: Implement lifting in call()
             self.update_dense = layers.Dense(embedding_dim, use_bias=False, name="lifting_update")
+            self.update_dense.trainable = False  # TODO: Implement lifting in call()
 
         # 5. Scattering filter (if enabled)
         if self.scattering_layers > 0:

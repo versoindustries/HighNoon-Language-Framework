@@ -261,8 +261,9 @@ class FlashLinearAttention(layers.Layer):
                 trainable=True,
             )
 
-        # RALA augmentation vectors
-        if self.use_rala:
+        # RALA augmentation vectors - only create if RALA will actually be used
+        # (GLA and hybrid take precedence over RALA in call())
+        if self.use_rala and not self.use_gating and self.hybrid_window == 0:
             self.rala_u = self.add_weight(
                 name="rala_u",
                 shape=(self.num_heads, self.rala_rank, self.head_dim),
@@ -275,6 +276,9 @@ class FlashLinearAttention(layers.Layer):
                 initializer="glorot_uniform",
                 trainable=True,
             )
+            self._use_rala_in_forward = True
+        else:
+            self._use_rala_in_forward = False
 
         # Hybrid mixing coefficient per head
         if self.hybrid_window > 0:
@@ -360,7 +364,7 @@ class FlashLinearAttention(layers.Layer):
                 window_size=self.hybrid_window,
                 eps=self.eps,
             )
-        elif self.use_rala:
+        elif getattr(self, "_use_rala_in_forward", False):
             # RALA: Rank-Augmented Linear Attention
             output = fused_rala_attention(
                 q,

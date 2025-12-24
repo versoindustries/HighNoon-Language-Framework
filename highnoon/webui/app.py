@@ -2139,6 +2139,114 @@ def create_app(debug: bool = False) -> FastAPI:
             "hf_dataset_name": hf_dataset_name,
             "curriculum_id": payload.curriculum_id,
             "curriculum_datasets": curriculum_datasets,
+            # =========================================================================
+            # Quantum Enhancement Parameters (Phases 26-36)
+            # =========================================================================
+            "use_quantum_embedding": payload.use_quantum_embedding,
+            "use_floquet_position": payload.use_floquet_position,
+            "use_quantum_feature_maps": payload.use_quantum_feature_maps,
+            "use_unitary_expert": payload.use_unitary_expert,
+            "neumann_cayley_terms": payload.neumann_cayley_terms,
+            "use_quantum_norm": payload.use_quantum_norm,
+            "use_superposition_bpe": payload.use_superposition_bpe,
+            "use_grover_qsg": payload.use_grover_qsg,
+            "qsg_quality_threshold": payload.qsg_quality_threshold,
+            "use_quantum_lm_head": payload.use_quantum_lm_head,
+            "use_unitary_residual": payload.use_unitary_residual,
+            "unitary_residual_init_angle": payload.unitary_residual_init_angle,
+            "use_quantum_state_bus": payload.use_quantum_state_bus,
+            # =========================================================================
+            # Quantum Training Loop (Phases T1-T6)
+            # =========================================================================
+            "use_quantum_natural_gradient": payload.use_quantum_natural_gradient,
+            "qng_damping": payload.qng_damping,
+            "use_tensor_galore": payload.use_tensor_galore,
+            "galore_rank": payload.galore_rank,
+            "barren_plateau_monitor": payload.barren_plateau_monitor,
+            "barren_plateau_threshold": payload.barren_plateau_threshold,
+            # =========================================================================
+            # Quantum Constant-Memory Training (Phases 1-7)
+            # =========================================================================
+            "use_unitary_mamba_gates": payload.use_unitary_mamba_gates,
+            "neumann_series_terms": payload.neumann_series_terms,
+            "use_sprk_timecrystal": payload.use_sprk_timecrystal,
+            "sprk_order": payload.sprk_order,
+            "use_qng_geodesic": payload.use_qng_geodesic,
+            "qng_geodesic_order": payload.qng_geodesic_order,
+            "entanglement_regularization": payload.entanglement_regularization,
+            # =========================================================================
+            # Phase 17 Hamiltonian Enhancements
+            # =========================================================================
+            "hamiltonian_basis_size": payload.hamiltonian_basis_size,
+            "hamiltonian_enable_superposition": payload.hamiltonian_enable_superposition,
+            "hamiltonian_integrator": payload.hamiltonian_integrator,
+            "hamiltonian_enable_nqs": payload.hamiltonian_enable_nqs,
+            "hamiltonian_nqs_hidden_dim": payload.hamiltonian_nqs_hidden_dim,
+            # =========================================================================
+            # QSG Parameters
+            # =========================================================================
+            "qsg_bond_dim": payload.qsg_bond_dim,
+            "qsg_grover_iterations": payload.qsg_grover_iterations,
+            "qsg_jacobi_iterations": payload.qsg_jacobi_iterations,
+            "qsg_hopfield_beta": payload.qsg_hopfield_beta,
+            # =========================================================================
+            # Quantum Control (Phase 2.1)
+            # =========================================================================
+            "use_rls_sysid": payload.use_rls_sysid,
+            "rls_forgetting_factor": payload.rls_forgetting_factor,
+            "use_hybrid_pid": payload.use_hybrid_pid,
+            "pid_learning_rate": payload.pid_learning_rate,
+            "use_tensor_network_kalman": payload.use_tensor_network_kalman,
+            "tnkf_max_rank": payload.tnkf_max_rank,
+            # =========================================================================
+            # QHPM Anti-Forgetting
+            # =========================================================================
+            "use_qhpm_crystallization": payload.use_qhpm_crystallization,
+            "qhpm_crystallization_threshold": payload.qhpm_crystallization_threshold,
+            "qhpm_max_directions": payload.qhpm_max_directions,
+            "qhpm_crystallization_decay": payload.qhpm_crystallization_decay,
+            # =========================================================================
+            # Phases 47-84: Quantum Enhancement v5.0
+            # =========================================================================
+            # Pillar 1: Foundation
+            "use_quantum_measurement_dropout": payload.use_quantum_measurement_dropout,
+            "qmd_drop_rate": payload.qmd_drop_rate,
+            "use_q_ssm_gating": payload.use_q_ssm_gating,
+            "use_intrinsic_plasticity": payload.use_intrinsic_plasticity,
+            "use_quantum_coherence_bus": payload.use_quantum_coherence_bus,
+            "qcb_num_nodes": payload.qcb_num_nodes,
+            # Pillar 2: I/O Enhancement
+            "use_hyperdimensional_embedding": payload.use_hyperdimensional_embedding,
+            "use_hypertokens": payload.use_hypertokens,
+            "use_majorana_position": payload.use_majorana_position,
+            "use_born_rule_loss": payload.use_born_rule_loss,
+            "use_quantum_fidelity_loss": payload.use_quantum_fidelity_loss,
+            # Pillar 3: Topological Reasoning
+            "use_qasa_attention": payload.use_qasa_attention,
+            "use_mpqr_reasoning": payload.use_mpqr_reasoning,
+            "mpqr_num_paths": payload.mpqr_num_paths,
+            "use_topological_wavelet": payload.use_topological_wavelet,
+            "use_td_moe": payload.use_td_moe,
+            "td_moe_tucker_rank": payload.td_moe_tucker_rank,
+            "use_symplectic_gnn_kalman": payload.use_symplectic_gnn_kalman,
+            # Pillar 4: Training & Optimization
+            "use_adiabatic_optimizer": payload.use_adiabatic_optimizer,
+            "use_geodesic_optimizer": payload.use_geodesic_optimizer,
+            "use_alphaqubit_decoder": payload.use_alphaqubit_decoder,
+            "use_vqem": payload.use_vqem,
+            "use_gradient_teleportation": payload.use_gradient_teleportation,
+            # Pillar 5: Memory & Continual Learning
+            "use_quantum_crystallization": payload.use_quantum_crystallization,
+            "use_neuromorphic_memory": payload.use_neuromorphic_memory,
+            # Pillar 6: Coherence Mesh
+            "use_multi_stage_hamiltonian": payload.use_multi_stage_hamiltonian,
+            "use_random_natural_gradient": payload.use_random_natural_gradient,
+            "rng_num_samples": payload.rng_num_samples,
+            # Pillar 7: Advanced QI
+            "use_spini_integrator": payload.use_spini_integrator,
+            "use_qcot_reasoning": payload.use_qcot_reasoning,
+            "qcot_reasoning_steps": payload.qcot_reasoning_steps,
+            "use_waveform_attention": payload.use_waveform_attention,
         }
         with open(config_file, "w") as f:
             json.dump(trial_config, f, indent=2)

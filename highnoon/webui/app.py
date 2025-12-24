@@ -214,6 +214,7 @@ class StartTrainingRequest(BaseModel):
 
     mode: TrainingMode = TrainingMode.QUICK_TRAIN
     curriculum_id: str | None = None
+    sweep_id: str | None = None  # HPO sweep ID to load best hyperparameters from
     output_dir: str = "./outputs"
     learning_rate: str | None = None
     batch_size: int | None = None
@@ -1730,9 +1731,9 @@ def create_app(debug: bool = False) -> FastAPI:
     async def start_training(payload: StartTrainingRequest):
         """Start a new training job.
 
-        Supports two modes:
+        Supports three modes:
         - quick_train: Uses baseline presets from TRAINING_PRESETS based on model_size
-        - auto_tune/full_sweep: Runs HPO first, then trains with optimized params
+        - auto_tune/full_sweep: If sweep_id provided, uses best_hyperparams from that HPO sweep
         """
         job_id = str(uuid.uuid4())[:8]
 
@@ -1741,13 +1742,56 @@ def create_app(debug: bool = False) -> FastAPI:
         preset = TRAINING_PRESETS.get(model_size, TRAINING_PRESETS["3b"])
         optimal_config = preset.get("optimal_config", {})
 
-        # Determine HPO trials based on mode
+        # Load best hyperparameters from HPO sweep if provided
+        best_hyperparams = None
+        if payload.sweep_id:
+            sweep = hpo_sweeps.get(payload.sweep_id)
+            if sweep and sweep.get("state") == "completed":
+                best_hyperparams = sweep.get("best_hyperparams", {})
+                print(f"[Training] Loading best hyperparams from HPO sweep {payload.sweep_id}")
+                print(f"[Training] Best hyperparams: {best_hyperparams}")
+            else:
+                print(
+                    f"[Training] Warning: HPO sweep {payload.sweep_id} not found or not completed"
+                )
+
+        # Determine config source priority:
+        # 1. HPO best_hyperparams (if sweep_id provided and sweep completed)
+        # 2. Payload values (if explicitly provided)
+        # 3. Preset defaults (for QUICK_TRAIN mode)
+        if best_hyperparams:
+            # Use HPO-optimized values
+            learning_rate = best_hyperparams.get("learning_rate", 1e-4)
+            batch_size = best_hyperparams.get("batch_size", 8)
+            num_reasoning_blocks = best_hyperparams.get("num_reasoning_blocks", 8)
+            optimizer = best_hyperparams.get("optimizer", "sophiag")
+            embedding_dim = best_hyperparams.get("embedding_dim", 512)
+            num_moe_experts = best_hyperparams.get("num_moe_experts", 8)
+            mamba_state_dim = best_hyperparams.get("mamba_state_dim", 64)
+        elif payload.mode == TrainingMode.QUICK_TRAIN:
+            learning_rate = optimal_config.get("learning_rate", 1e-4)
+            batch_size = optimal_config.get("batch_size", 8)
+            num_reasoning_blocks = optimal_config.get("num_reasoning_blocks", 8)
+            optimizer = optimal_config.get("optimizer", "sophiag")
+            embedding_dim = 512
+            num_moe_experts = 8
+            mamba_state_dim = 64
+        else:
+            learning_rate = float(payload.learning_rate) if payload.learning_rate else 1e-4
+            batch_size = payload.batch_size if payload.batch_size else 8
+            num_reasoning_blocks = 8
+            optimizer = "sophiag"
+            embedding_dim = 512
+            num_moe_experts = 8
+            mamba_state_dim = 64
+
+        # Determine HPO trials based on mode (0 if using completed sweep)
         hpo_trials = 0
-        if payload.mode == TrainingMode.AUTO_TUNE:
-            hpo_trials = 15  # Stage 1 only
-        elif payload.mode == TrainingMode.FULL_SWEEP:
-            hpo_trials = 50  # All 3 stages
-        # QUICK_TRAIN = 0 trials, uses preset config
+        if not best_hyperparams:
+            if payload.mode == TrainingMode.AUTO_TUNE:
+                hpo_trials = 15  # Stage 1 only
+            elif payload.mode == TrainingMode.FULL_SWEEP:
+                hpo_trials = 50  # All 3 stages
 
         # Resolve curriculum to HuggingFace datasets
         hf_dataset_name, curriculum_datasets = resolve_curriculum_to_datasets(
@@ -1755,16 +1799,6 @@ def create_app(debug: bool = False) -> FastAPI:
         )
         if hf_dataset_name:
             print(f"[Training] Using dataset from curriculum: {hf_dataset_name}")
-
-        # For Quick Train, use preset values; for HPO modes, use provided or defaults
-        if payload.mode == TrainingMode.QUICK_TRAIN:
-            learning_rate = optimal_config.get("learning_rate", 1e-4)
-            batch_size = optimal_config.get("batch_size", 8)
-            num_reasoning_blocks = optimal_config.get("num_reasoning_blocks", 8)
-        else:
-            learning_rate = float(payload.learning_rate) if payload.learning_rate else 1e-4
-            batch_size = payload.batch_size if payload.batch_size else 8
-            num_reasoning_blocks = 8
 
         job = {
             "job_id": job_id,
@@ -1784,12 +1818,16 @@ def create_app(debug: bool = False) -> FastAPI:
             "updated_at": datetime.utcnow().isoformat(),
             "hpo_trial_current": 0,
             "hpo_trial_total": hpo_trials,
-            "best_hyperparams": None,
+            "best_hyperparams": best_hyperparams,
+            "sweep_id": payload.sweep_id,
             "config": {
                 "learning_rate": learning_rate,
                 "batch_size": batch_size,
-                "optimizer": optimal_config.get("optimizer", "sophiag"),
+                "optimizer": optimizer,
                 "num_reasoning_blocks": num_reasoning_blocks,
+                "embedding_dim": embedding_dim,
+                "num_moe_experts": num_moe_experts,
+                "mamba_state_dim": mamba_state_dim,
                 "curriculum_id": payload.curriculum_id,
                 "hf_dataset_name": hf_dataset_name,
                 "curriculum_datasets": curriculum_datasets,
@@ -1797,7 +1835,10 @@ def create_app(debug: bool = False) -> FastAPI:
         }
         training_jobs[job_id] = job
 
-        print(f"[Training] Started job {job_id} in {payload.mode.value} mode")
+        if best_hyperparams:
+            print(f"[Training] Started job {job_id} using HPO sweep {payload.sweep_id}")
+        else:
+            print(f"[Training] Started job {job_id} in {payload.mode.value} mode")
         print(f"[Training] Model size: {preset['name']} ({preset['params']} params)")
         print(
             f"[Training] Config: lr={learning_rate}, bs={batch_size}, blocks={num_reasoning_blocks}"
@@ -1809,6 +1850,7 @@ def create_app(debug: bool = False) -> FastAPI:
             "mode": payload.mode.value,
             "model_size": model_size,
             "hpo_trials": hpo_trials,
+            "using_hpo_sweep": payload.sweep_id is not None,
         }
 
     @app.get("/api/training/{job_id}/status")

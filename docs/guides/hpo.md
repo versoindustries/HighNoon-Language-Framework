@@ -482,4 +482,162 @@ hpo = HPOTrialManager(
 
 ---
 
+## Efficiency-Aware Scoring
+
+HighNoon's HPO includes **efficiency-aware scoring** that optimizes for both accuracy AND model size. This helps find the smallest model that achieves your target accuracy.
+
+### How It Works
+
+Instead of ranking trials by loss alone, the system computes an **efficiency score**:
+
+```
+efficiency_score = loss × (1 + λ × (params / budget))
+```
+
+Where:
+- `λ` (lambda_efficiency) controls the preference for smaller models
+- `params` is the trial's estimated parameter count
+- `budget` is your target parameter budget
+
+### Configuration
+
+Add to your trial config:
+
+```json
+{
+  "param_budget": 1000000000,
+  "lambda_efficiency": 0.1
+}
+```
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `param_budget` | Model's size | Target max parameters (e.g., 1B = `1000000000`) |
+| `lambda_efficiency` | `0.1` | Efficiency weight (higher = favor smaller models more) |
+
+### Effect on Rankings
+
+With `param_budget=1B` and `lambda_efficiency=0.1`:
+
+| Trial | Loss | Params | Efficiency Score | Rank |
+|-------|------|--------|------------------|------|
+| A | 0.099 | 1B | 0.099 × 1.1 = 0.1089 | 2nd |
+| B | 0.100 | 500M | 0.100 × 1.05 = **0.105** | **1st** ✅ |
+
+Trial B wins because its lower parameter count more than compensates for slightly higher loss.
+
+### Tuning Lambda
+
+| λ Value | Effect |
+|---------|--------|
+| `0.05` | Slight preference for smaller models |
+| `0.1` | Balanced (default) - 10% bonus per 50% reduction |
+| `0.2` | Strong preference for efficiency |
+| `0.3+` | Aggressive - may sacrifice accuracy for size |
+
+---
+
+## Enterprise Memory Management
+
+HighNoon HPO includes **automatic memory management** that prevents OOM errors and cleans up resources efficiently. This is enabled by default and adapts to your system.
+
+### Features
+
+| Feature | Default | Description |
+|---------|---------|-------------|
+| **System Detection** | Enabled | Auto-detects total RAM |
+| **Warning Threshold** | 95% | Triggers warning when exceeded |
+| **Swap Monitoring** | Enabled | Detects swap spikes as OOM indicator |
+| **Trend Analysis** | Enabled | Tracks memory rising/falling/stable |
+| **Grace Period** | 10 steps | Steps before early stopping |
+| **Epoch Cleanup** | Enabled | `gc.collect()` after each epoch |
+| **Failure Cleanup** | Enabled | `tf.keras.backend.clear_session()` on error |
+
+### How It Works
+
+1. **System Memory Detection**: On startup, detects your total RAM and calculates thresholds
+2. **Per-Step Monitoring**: Each step checks system memory %, swap usage, and memory trend
+3. **Warning & Grace Period**: At 95% usage, warnings start but training continues for 10 steps
+4. **Smart Early Stop**: Only stops if memory is rising/stable; falling memory gets extended grace
+5. **Epoch Cleanup**: After each epoch, `gc.collect()` releases Python objects
+
+### Configuration
+
+Add to your trial config to customize thresholds:
+
+```json
+{
+  "memory_warning_pct": 0.95,
+  "memory_grace_steps": 10,
+  "prefetch_buffer_size": 2
+}
+```
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `memory_warning_pct` | `0.95` | Memory % to trigger warning (0.0-1.0) |
+| `memory_grace_steps` | `10` | Steps to wait before early stop |
+| `prefetch_buffer_size` | Auto | Fixed prefetch size (None = AUTOTUNE) |
+
+### System-Specific Recommendations
+
+| System RAM | Warning % | Grace Steps | Prefetch Buffer |
+|------------|-----------|-------------|-----------------|
+| 8GB | 0.85 | 5 | 1 |
+| 16GB | 0.90 | 8 | 2 |
+| 32GB | 0.95 | 10 | None (auto) |
+| 64GB+ | 0.95 | 15 | None (auto) |
+
+### Example: Memory-Constrained System (8GB)
+
+```json
+{
+  "memory_warning_pct": 0.85,
+  "memory_grace_steps": 5,
+  "prefetch_buffer_size": 1,
+  "batch_size": 4
+}
+```
+
+### Example: High-Memory Server (128GB+)
+
+```json
+{
+  "memory_warning_pct": 0.98,
+  "memory_grace_steps": 20,
+  "prefetch_buffer_size": null,
+  "batch_size": 32
+}
+```
+
+### Understanding Memory Logs
+
+During training, you'll see memory status in logs:
+
+```
+[Memory] EnterpriseMemoryManager: total=64197MB, warning_threshold=60987MB (95%)
+[Memory] WARNING (3/10): System memory at 96.2% (process=45123MB), trend=rising
+[Memory] Memory normalized: 82.1%, resetting warning count
+```
+
+| Log Message | Meaning |
+|-------------|---------|
+| `total=X, warning_threshold=Y` | System detected, thresholds set |
+| `WARNING (N/10)` | N steps of grace period used |
+| `trend=rising` | Memory increasing (concerning) |
+| `trend=falling` | Memory decreasing (good sign) |
+| `trend=stable` | Memory flat (watch closely) |
+| `Memory normalized` | Usage dropped below threshold |
+| `CRITICAL: Swap spike` | Swap usage spiked, immediate stop |
+
+### Early Stop Reasons
+
+| Reason | Description |
+|--------|-------------|
+| `swap_spike:XMB` | Swap increased by X MB (OOM pressure) |
+| `sustained_high_memory_rising:X%` | Memory at X% and rising |
+| `sustained_high_memory_stable:X%` | Memory at X% and not dropping |
+
+---
+
 [← Agent Tools](agent-tools.md) | [WebUI Guide →](webui.md)

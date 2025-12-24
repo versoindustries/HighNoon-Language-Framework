@@ -505,13 +505,19 @@ class HPOTrialManager:
             trial_id: Trial identifier
             config: Hyperparameter configuration
         """
+        # Compute estimated parameter count for efficiency scoring
+        param_count = estimate_model_params(config)
+
         status = TrialStatus(
             trial_id=trial_id,
             status="pending",
             hyperparameters=config,
+            param_count=param_count,
         )
         self.metrics_collector.update_trial_status(status)
-        logger.info(f"[HPO Manager] Initialized trial {trial_id}")
+        logger.info(
+            f"[HPO Manager] Initialized trial {trial_id} (~{param_count / 1e6:.1f}M params)"
+        )
 
     def start_trial(self, trial_id: str) -> None:
         """Mark a trial as running.

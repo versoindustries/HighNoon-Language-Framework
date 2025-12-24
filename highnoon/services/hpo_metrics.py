@@ -23,6 +23,44 @@ logger = logging.getLogger(__name__)
 # Default artifacts directory for HPO trials
 DEFAULT_HPO_ROOT = Path("artifacts/hpo_trials")
 
+# Default lambda for efficiency penalty (higher = favor smaller models more)
+DEFAULT_LAMBDA_EFFICIENCY = 0.1
+
+
+def compute_efficiency_score(
+    loss: float,
+    param_count: int,
+    param_budget: int,
+    lambda_efficiency: float = DEFAULT_LAMBDA_EFFICIENCY,
+) -> float:
+    """Compute efficiency-penalized loss score.
+
+    The efficiency score rewards smaller models that achieve similar accuracy.
+    Formula: loss × (1 + λ × (params / budget))
+
+    Args:
+        loss: Best loss achieved by the trial
+        param_count: Estimated parameter count of the model
+        param_budget: User's parameter budget constraint
+        lambda_efficiency: Penalty weight (higher = favor smaller models)
+
+    Returns:
+        Efficiency-penalized score (lower is better)
+
+    Example:
+        >>> # A 500M model using 50% of 1B budget gets 5% bonus
+        >>> compute_efficiency_score(0.1, 500_000_000, 1_000_000_000, 0.1)
+        0.105
+        >>> # A 1B model using 100% of budget gets no bonus
+        >>> compute_efficiency_score(0.1, 1_000_000_000, 1_000_000_000, 0.1)
+        0.11
+    """
+    if param_budget <= 0:
+        return loss  # No penalty if no budget set
+
+    norm_params = param_count / param_budget
+    return loss * (1 + lambda_efficiency * norm_params)
+
 
 @dataclass
 class TrialMetrics:
@@ -61,6 +99,9 @@ class TrialStatus:
     total_steps: int = 0
     error_message: str | None = None
     hyperparameters: dict[str, Any] = field(default_factory=dict)
+    # Efficiency tracking (Phase: HPO Efficiency-Aware Optimization)
+    param_count: int | None = None  # Estimated parameter count from config
+    efficiency_score: float | None = None  # loss × (1 + λ × norm_params)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to JSON-serializable dictionary."""
@@ -167,6 +208,8 @@ class HPOMetricsCollector:
                 total_steps=data.get("total_steps", 0),
                 error_message=data.get("error_message"),
                 hyperparameters=data.get("hyperparameters", {}),
+                param_count=data.get("param_count"),
+                efficiency_score=data.get("efficiency_score"),
             )
         except Exception as exc:
             logger.error(f"[HPO Metrics] Failed to load status for {trial_id}: {exc}")
@@ -235,30 +278,43 @@ class HPOMetricsCollector:
 
         return sorted(trials)
 
-    def get_best_trial(self) -> tuple[str, float] | None:
-        """Find the trial with the best (lowest) loss.
+    def get_best_trial(self, use_efficiency: bool = True) -> tuple[str, float] | None:
+        """Find the trial with the best (lowest) loss or efficiency score.
+
+        Args:
+            use_efficiency: If True and efficiency_score is available,
+                rank by efficiency_score instead of loss. This rewards
+                smaller models that achieve similar accuracy.
 
         Returns:
-            Tuple of (trial_id, best_loss) or None if no trials found
+            Tuple of (trial_id, best_score) or None if no trials found
         """
         trials = self.list_trials()
         if not trials:
             return None
 
         best_trial_id = None
-        best_loss = float("inf")
+        best_score = float("inf")
 
         for trial_id in trials:
             status = self.load_trial_status(trial_id)
-            if status and status.best_loss is not None:
-                if status.best_loss < best_loss:
-                    best_loss = status.best_loss
+            if status:
+                # Use efficiency_score if available and requested
+                if use_efficiency and status.efficiency_score is not None:
+                    score = status.efficiency_score
+                elif status.best_loss is not None:
+                    score = status.best_loss
+                else:
+                    continue
+
+                if score < best_score:
+                    best_score = score
                     best_trial_id = trial_id
 
         if best_trial_id is None:
             return None
 
-        return best_trial_id, best_loss
+        return best_trial_id, best_score
 
     def export_summary(self) -> dict[str, Any]:
         """Export a summary of all trials.

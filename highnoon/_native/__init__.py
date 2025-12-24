@@ -131,6 +131,23 @@ def _find_op_binary(op_name: str) -> Path | None:
     return None
 
 
+def resolve_op_library(caller_file: str, library_name: str) -> str:
+    """Resolve the path to a native operation library.
+
+    This function is used by individual op wrappers to find their corresponding
+    shared library files. It searches in the platform-specific bin directory.
+
+    Args:
+        caller_file: __file__ from the calling module (used for relative path resolution).
+        library_name: Name of the library file (e.g., '_highnoon_core.so').
+
+    Returns:
+        Absolute path to the library file (may not exist).
+    """
+    # Return path in the platform-specific bin directory
+    return str(_BIN_DIR / library_name)
+
+
 def _load_consolidated_binary() -> Any | None:
     """Load the consolidated core binary (singleton).
 
@@ -471,6 +488,7 @@ __all__ = [
     "get_edition",
     "get_binary_info",
     "check_enterprise_license",
+    "resolve_op_library",
     "load_moe_dispatch",
     "load_superposition_moe",
     "load_reasoning_stack",

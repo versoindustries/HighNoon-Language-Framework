@@ -82,6 +82,7 @@ def load_training_dataset(
     enable_superwords: bool | None = None,
     superword_min_frequency: int | None = None,
     superword_max_vocab: int | None = None,
+    prefetch_buffer_size: int | None = None,
 ) -> tuple[tf.data.Dataset, QWTTextTokenizer, SuperwordMerger | None]:
     """Load a training dataset with tokenization and optional superword merging.
 
@@ -108,6 +109,8 @@ def load_training_dataset(
         enable_superwords: Enable superword merging. Defaults to config.ENABLE_SUPERWORDS.
         superword_min_frequency: Min n-gram frequency. Defaults to config.SUPERWORD_MIN_FREQUENCY.
         superword_max_vocab: Max superwords to learn. Defaults to config.SUPERWORD_MAX_VOCAB_SIZE.
+        prefetch_buffer_size: Number of batches to prefetch. If None, uses tf.data.AUTOTUNE.
+            For memory-constrained HPO, set to 1-4. For high-throughput, use None (auto).
 
     Returns:
         Tuple of (dataset, tokenizer, merger) where:
@@ -362,8 +365,12 @@ def load_training_dataset(
         output_signature=output_signature,
     )
 
-    # Prefetch for performance
-    dataset = dataset.prefetch(tf.data.AUTOTUNE)
+    # Prefetch for performance (configurable for memory-constrained environments)
+    if prefetch_buffer_size is not None:
+        dataset = dataset.prefetch(prefetch_buffer_size)
+        logger.info(f"[Data Loaders] Using prefetch buffer size: {prefetch_buffer_size}")
+    else:
+        dataset = dataset.prefetch(tf.data.AUTOTUNE)
 
     return dataset, tokenizer, merger
 

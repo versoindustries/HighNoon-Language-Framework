@@ -18,6 +18,8 @@ import tensorflow as tf
 
 from highnoon.data.loaders import load_training_dataset
 from highnoon.models.reasoning.reasoning_module import ReasoningModule
+from highnoon.services.hpo_manager import estimate_model_params
+from highnoon.services.hpo_metrics import DEFAULT_LAMBDA_EFFICIENCY, compute_efficiency_score
 from highnoon.training.hpo_bridge import HPOReporter
 
 # Quantum control callback (optional - may not be available if native ops missing)
@@ -67,26 +69,83 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-class MemoryTracker:
-    """Tracks RSS memory usage during trial execution.
+class EnterpriseMemoryManager:
+    """Enterprise-grade memory management for HPO trials.
 
-    Uses psutil for cross-platform memory monitoring.
-    Falls back to TensorFlow memory tracking if psutil unavailable.
+    Features:
+    - System memory detection (total, available, cached)
+    - Swap usage monitoring
+    - Memory trend analysis (rising/falling)
+    - Intelligent early stopping with grace period
+    - Linux buffer/cache accounting
+
+    Memory thresholds are dynamically calculated based on system resources:
+    - WARNING_THRESHOLD: 95% of total memory consumed
+    - CRITICAL_THRESHOLD: Swap usage detected or memory sustained above warning
+
+    Args:
+        warning_threshold_pct: Memory usage percentage to trigger warning (default 95%)
+        grace_steps: Number of steps to allow high memory before early stop (default 10)
+        trend_window: Number of samples for trend analysis (default 5)
     """
 
-    def __init__(self):
-        """Initialize memory tracker."""
+    def __init__(
+        self,
+        warning_threshold_pct: float = 0.95,
+        grace_steps: int = 10,
+        trend_window: int = 5,
+    ):
+        """Initialize enterprise memory manager."""
+        self.warning_threshold_pct = warning_threshold_pct
+        self.grace_steps = grace_steps
+        self.trend_window = trend_window
+
+        # Memory tracking state
         self.peak_memory_mb: float = 0.0
         self._process = None
+        self._memory_history: list[float] = []
+        self._warning_count: int = 0
+        self._last_swap_mb: float = 0.0
+
+        # System memory info (detected once at init)
+        self.total_memory_mb: float = 0.0
+        self.warning_threshold_mb: float = 60_000.0  # Default fallback
 
         if PSUTIL_AVAILABLE:
             self._process = psutil.Process()
-            logger.debug("[Memory] Using psutil for memory tracking")
+            self._detect_system_memory()
+            logger.info(
+                f"[Memory] EnterpriseMemoryManager: total={self.total_memory_mb:.0f}MB, "
+                f"warning_threshold={self.warning_threshold_mb:.0f}MB ({warning_threshold_pct*100:.0f}%)"
+            )
         else:
-            logger.warning("[Memory] psutil not available, memory tracking limited")
+            logger.warning("[Memory] psutil not available, using fallback thresholds")
+
+    def _detect_system_memory(self) -> None:
+        """Detect system memory and set dynamic thresholds."""
+        try:
+            mem = psutil.virtual_memory()
+            self.total_memory_mb = mem.total / (1024 * 1024)
+
+            # Calculate warning threshold as percentage of total
+            # This accounts for the 95% warning point
+            self.warning_threshold_mb = self.total_memory_mb * self.warning_threshold_pct
+
+            # Log system memory details
+            available_mb = mem.available / (1024 * 1024)
+            cached_mb = getattr(mem, "cached", 0) / (1024 * 1024)
+            buffers_mb = getattr(mem, "buffers", 0) / (1024 * 1024)
+
+            logger.debug(
+                f"[Memory] System: total={self.total_memory_mb:.0f}MB, "
+                f"available={available_mb:.0f}MB, cached={cached_mb:.0f}MB, "
+                f"buffers={buffers_mb:.0f}MB"
+            )
+        except Exception as e:
+            logger.warning(f"[Memory] Failed to detect system memory: {e}")
 
     def get_current_memory_mb(self) -> float:
-        """Get current RSS memory usage in MB.
+        """Get current RSS memory usage of the process in MB.
 
         Returns:
             Current memory usage in megabytes
@@ -98,16 +157,41 @@ class MemoryTracker:
             except Exception:
                 pass
 
-        # Fallback: use TensorFlow GPU memory if available
-        try:
-            gpus = tf.config.list_physical_devices("GPU")
-            if gpus:
-                # CPU-only for Lite edition, but track if GPU present
-                return 0.0
-        except Exception:
-            pass
-
         return 0.0
+
+    def get_system_memory_pct(self) -> float:
+        """Get system-wide memory usage percentage (accounting for Linux cache).
+
+        On Linux, 'available' memory includes reclaimable cache/buffers,
+        which is a better indicator of actual pressure than 'used'.
+
+        Returns:
+            Memory usage as percentage (0.0 to 1.0)
+        """
+        if not PSUTIL_AVAILABLE:
+            return 0.0
+
+        try:
+            mem = psutil.virtual_memory()
+            # Use percent from psutil which accounts for available (cache-aware)
+            return mem.percent / 100.0
+        except Exception:
+            return 0.0
+
+    def get_swap_usage_mb(self) -> float:
+        """Get current swap usage in MB.
+
+        Returns:
+            Swap usage in megabytes
+        """
+        if not PSUTIL_AVAILABLE:
+            return 0.0
+
+        try:
+            swap = psutil.swap_memory()
+            return swap.used / (1024 * 1024)
+        except Exception:
+            return 0.0
 
     def update_peak(self) -> float:
         """Update and return peak memory usage.
@@ -120,35 +204,165 @@ class MemoryTracker:
             self.peak_memory_mb = current
         return self.peak_memory_mb
 
-    def check_oom_risk(self, threshold_mb: float = 60_000) -> bool:
-        """Check if memory usage is approaching OOM threshold.
+    def _update_history(self, current_mb: float) -> None:
+        """Update memory history for trend analysis."""
+        self._memory_history.append(current_mb)
+        if len(self._memory_history) > self.trend_window:
+            self._memory_history.pop(0)
+
+    def get_memory_trend(self) -> str:
+        """Analyze memory trend from recent history.
+
+        Returns:
+            "rising", "falling", or "stable"
+        """
+        if len(self._memory_history) < 2:
+            return "stable"
+
+        # Linear regression on recent history
+        n = len(self._memory_history)
+        x_mean = (n - 1) / 2
+        y_mean = sum(self._memory_history) / n
+
+        numerator = sum((i - x_mean) * (y - y_mean) for i, y in enumerate(self._memory_history))
+        denominator = sum((i - x_mean) ** 2 for i in range(n))
+
+        if denominator == 0:
+            return "stable"
+
+        slope = numerator / denominator
+
+        # Threshold for significant trend (MB per step)
+        if slope > 50:  # Rising more than 50MB per step
+            return "rising"
+        elif slope < -50:  # Falling more than 50MB per step
+            return "falling"
+        return "stable"
+
+    def check_memory_critical(self) -> tuple[bool, str]:
+        """Check if memory situation is critical and trial should stop.
+
+        This implements intelligent early stopping:
+        1. Triggers warning at 95% memory usage
+        2. Tracks warning count (grace period)
+        3. Detects swap usage spikes
+        4. Considers memory trend (don't stop if falling)
+
+        Returns:
+            Tuple of (should_stop, reason). should_stop is True if trial
+            should be terminated immediately.
+        """
+        if not PSUTIL_AVAILABLE:
+            return False, ""
+
+        current_mb = self.get_current_memory_mb()
+        self._update_history(current_mb)
+        self.update_peak()
+
+        system_pct = self.get_system_memory_pct()
+        swap_mb = self.get_swap_usage_mb()
+        swap_delta = swap_mb - self._last_swap_mb
+        self._last_swap_mb = swap_mb
+
+        trend = self.get_memory_trend()
+
+        # Check swap spike (significant new swap usage indicates OOM pressure)
+        if swap_delta > 500:  # More than 500MB new swap
+            logger.error(
+                f"[Memory] CRITICAL: Swap spike detected! "
+                f"Delta={swap_delta:.0f}MB, Total Swap={swap_mb:.0f}MB"
+            )
+            return True, f"swap_spike:{swap_delta:.0f}MB"
+
+        # Check system memory percentage
+        if system_pct >= self.warning_threshold_pct:
+            self._warning_count += 1
+            logger.warning(
+                f"[Memory] WARNING ({self._warning_count}/{self.grace_steps}): "
+                f"System memory at {system_pct*100:.1f}% (process={current_mb:.0f}MB), "
+                f"trend={trend}"
+            )
+
+            # Early stop if sustained high usage AND memory is rising or stable
+            if self._warning_count >= self.grace_steps:
+                if trend == "rising":
+                    return True, f"sustained_high_memory_rising:{system_pct*100:.1f}%"
+                elif trend == "stable":
+                    return True, f"sustained_high_memory_stable:{system_pct*100:.1f}%"
+                else:
+                    # Memory is falling, give it more grace
+                    logger.info("[Memory] High memory but trend falling, extending grace period")
+                    self._warning_count = self.grace_steps // 2
+        else:
+            # Reset warning count when memory drops
+            if self._warning_count > 0:
+                logger.info(
+                    f"[Memory] Memory normalized: {system_pct*100:.1f}%, "
+                    f"resetting warning count"
+                )
+            self._warning_count = 0
+
+        return False, ""
+
+    def check_oom_risk(self, threshold_mb: float | None = None) -> bool:
+        """Check if memory usage exceeds threshold (backward-compatible API).
 
         Args:
-            threshold_mb: Memory threshold in MB (default 60GB)
+            threshold_mb: Legacy threshold parameter (ignored, uses dynamic threshold)
 
         Returns:
-            True if memory exceeds threshold
+            True if memory exceeds warning threshold
         """
-        current = self.get_current_memory_mb()
-        if current > threshold_mb:
-            logger.warning(
-                f"[Memory] High memory usage: {current:.0f}MB > {threshold_mb:.0f}MB threshold"
-            )
-            return True
-        return False
+        system_pct = self.get_system_memory_pct()
+        return system_pct >= self.warning_threshold_pct
 
     def get_stats(self) -> dict[str, float]:
-        """Get memory statistics.
+        """Get comprehensive memory statistics.
 
         Returns:
-            Dictionary with current_mb and peak_mb
+            Dictionary with memory stats including system-wide info
         """
         current = self.get_current_memory_mb()
         self.update_peak()
-        return {
+
+        stats = {
             "current_mb": current,
             "peak_mb": self.peak_memory_mb,
+            "warning_count": float(self._warning_count),
         }
+
+        if PSUTIL_AVAILABLE:
+            try:
+                mem = psutil.virtual_memory()
+                swap = psutil.swap_memory()
+                stats.update(
+                    {
+                        "system_total_mb": mem.total / (1024 * 1024),
+                        "system_available_mb": mem.available / (1024 * 1024),
+                        "system_percent": mem.percent,
+                        "swap_used_mb": swap.used / (1024 * 1024),
+                        "swap_percent": swap.percent,
+                    }
+                )
+            except Exception:
+                pass
+
+        return stats
+
+    def cleanup(self) -> None:
+        """Perform memory cleanup (gc.collect).
+
+        Call this after each epoch or on trial failure to release Python objects.
+        """
+        import gc
+
+        collected = gc.collect()
+        if collected > 0:
+            logger.debug(f"[Memory] gc.collect() freed {collected} objects")
+
+
+# Backward compatibility alias
+MemoryTracker = EnterpriseMemoryManager
 
 
 def evaluate_qsg_generation(
@@ -490,7 +704,7 @@ def create_optimizer(
             weight_decay=weight_decay,
         )
     elif optimizer_name == "lion":
-        # Lion optimizer (if available, else AdamW)
+        # Lion optimizer - sign-based momentum, memory efficient
         try:
             from highnoon.training.optimizers import Lion
 
@@ -498,6 +712,7 @@ def create_optimizer(
                 learning_rate=lr_schedule,
                 weight_decay=weight_decay,
             )
+            logger.info("[HPO] Using Lion (EvoLved Sign Momentum) optimizer")
         except ImportError:
             logger.warning("[HPO] Lion not available, falling back to AdamW")
             optimizer = tf.keras.optimizers.AdamW(
@@ -615,9 +830,13 @@ def train_trial(
     sweep_id = trial_config.get("sweep_id") or os.getenv("HPO_SWEEP_ID")
     hpo_reporter = HPOReporter(sweep_id=sweep_id)
 
-    # Initialize memory tracker
-    memory_tracker = MemoryTracker()
-    oom_threshold_mb = trial_config.get("max_memory_mb", 60_000)  # Default 60GB
+    # Initialize enterprise memory manager with dynamic thresholds
+    warning_threshold_pct = trial_config.get("memory_warning_pct", 0.95)
+    memory_grace_steps = trial_config.get("memory_grace_steps", 10)
+    memory_manager = EnterpriseMemoryManager(
+        warning_threshold_pct=warning_threshold_pct,
+        grace_steps=memory_grace_steps,
+    )
 
     # Initialize quantum control callback for RLS, Hybrid PID, EKF, TNKF
     use_quantum_control = trial_config.get("use_quantum_control", True)
@@ -662,16 +881,24 @@ def train_trial(
 
     # Create tokenizer and load tokenized dataset
     try:
+        # Configurable prefetch buffer for memory management (None = auto-tune)
+        prefetch_buffer_size = trial_config.get("prefetch_buffer_size", None)
+
         train_dataset, tokenizer, merger = load_training_dataset(
             batch_size=batch_size,
             sequence_length=sequence_length,
             vocab_size=vocab_size,
             hf_dataset_name=hf_dataset_name,
+            prefetch_buffer_size=prefetch_buffer_size,
         )
         vocab_size = tokenizer.vocab_size  # Use actual tokenizer vocab size
         logger.info(f"[HPO] Dataset loaded with tokenizer: vocab_size={vocab_size}")
         if merger is not None:
             logger.info(f"[HPO] SuperwordMerger active: {merger.superword_count} superwords")
+            # CRITICAL: Extend vocab_size to include superword tokens
+            # SuperwordMerger assigns tokens with indices >= base vocab_size
+            vocab_size = vocab_size + merger.superword_count
+            logger.info(f"[HPO] Extended vocab_size to {vocab_size} (includes superwords)")
     except Exception as e:
         logger.error(f"[HPO] Failed to load dataset: {e}")
         raise
@@ -722,15 +949,18 @@ def train_trial(
                 current_loss = float(loss.numpy())
                 epoch_losses.append(current_loss)
 
-                # Check for OOM risk
-                if memory_tracker.check_oom_risk(oom_threshold_mb):
-                    logger.error(f"[HPO] OOM risk detected at step {global_step}")
-                    hpo_reporter.complete(success=False, error="OOM risk - memory limit exceeded")
+                # Check for critical memory situation (swap spike or sustained high memory)
+                should_stop, stop_reason = memory_manager.check_memory_critical()
+                if should_stop:
+                    logger.error(f"[HPO] Memory critical at step {global_step}: {stop_reason}")
+                    tf.keras.backend.clear_session()  # Clean up TF state
+                    memory_manager.cleanup()  # gc.collect()
+                    hpo_reporter.complete(success=False, error=f"Memory critical: {stop_reason}")
                     return float("inf")
 
                 # Report metrics periodically (with memory tracking)
                 if hpo_reporter.enabled and global_step % 10 == 0:
-                    mem_stats = memory_tracker.get_stats()
+                    mem_stats = memory_manager.get_stats()
                     hpo_reporter.report(
                         step=global_step,
                         loss=current_loss,
@@ -742,6 +972,8 @@ def train_trial(
                         ),
                         memory_mb=mem_stats["current_mb"],
                         peak_memory_mb=mem_stats["peak_mb"],
+                        system_memory_pct=mem_stats.get("system_percent", 0),
+                        swap_used_mb=mem_stats.get("swap_used_mb", 0),
                     )
 
                 # Trigger quantum control callback (RLS, Hybrid PID, EKF, TNKF)
@@ -766,6 +998,8 @@ def train_trial(
 
             except tf.errors.ResourceExhaustedError as e:
                 logger.error(f"[HPO] OOM error at epoch {epoch}, step {step}: {e}")
+                tf.keras.backend.clear_session()  # Clean up TF state
+                memory_manager.cleanup()  # gc.collect()
                 hpo_reporter.complete(success=False, error=str(e))
                 return float("inf")
 
@@ -775,11 +1009,17 @@ def train_trial(
 
             except Exception as e:
                 logger.error(f"[HPO] Error at epoch {epoch}, step {step}: {e}")
+                tf.keras.backend.clear_session()  # Clean up TF state
+                memory_manager.cleanup()  # gc.collect()
                 hpo_reporter.complete(success=False, error=str(e))
                 return float("inf")
 
         # Epoch complete - compute average loss
         epoch_loss = sum(epoch_losses) / len(epoch_losses) if epoch_losses else float("inf")
+
+        # Memory cleanup after each epoch
+        memory_manager.cleanup()  # gc.collect()
+
         logger.info(
             f"[HPO] Epoch {epoch + 1}/{epochs} complete, "
             f"avg_loss={epoch_loss:.6f}, best={best_loss:.6f}"
@@ -816,10 +1056,26 @@ def train_trial(
             )
             break
 
-    # Report completion
-    hpo_reporter.complete(success=True, final_loss=best_loss)
+    # Compute efficiency score for ranking
+    param_count = estimate_model_params(trial_config)
+    param_budget = trial_config.get("param_budget", param_count)  # Default to own size if no budget
+    lambda_efficiency = trial_config.get("lambda_efficiency", DEFAULT_LAMBDA_EFFICIENCY)
+    efficiency_score = compute_efficiency_score(
+        best_loss, param_count, param_budget, lambda_efficiency
+    )
 
-    logger.info(f"[HPO] Trial {trial_id} completed with best_loss={best_loss:.6f}")
+    # Report completion with efficiency metrics
+    hpo_reporter.complete(
+        success=True,
+        final_loss=best_loss,
+        param_count=param_count,
+        efficiency_score=efficiency_score,
+    )
+
+    logger.info(
+        f"[HPO] Trial {trial_id} completed with best_loss={best_loss:.6f}, "
+        f"efficiency={efficiency_score:.6f} (~{param_count / 1e6:.1f}M params)"
+    )
 
     return best_loss
 

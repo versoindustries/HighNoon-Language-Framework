@@ -114,6 +114,26 @@ def unitary_residual_backward(
     return _quantum_ops_module.unitary_residual_backward(grad_output, x, f_x, angle)
 
 
+# Register gradient for UnitaryResidualForward C++ op
+@tf.RegisterGradient("UnitaryResidualForward")
+def _unitary_residual_forward_grad(op, grad):
+    """Gradient registration for UnitaryResidualForward.
+
+    Connects the C++ forward op to its backward op for automatic differentiation.
+    """
+    x = op.inputs[0]
+    f_x = op.inputs[1]
+    angle = op.inputs[2]
+
+    # Load ops and call backward
+    _load_quantum_ops()
+    grad_x, grad_f_x, grad_angle = _quantum_ops_module.unitary_residual_backward(
+        grad, x, f_x, angle
+    )
+
+    return [grad_x, grad_f_x, grad_angle]
+
+
 # =============================================================================
 # Phase 30: Quantum Normalization
 # =============================================================================
@@ -157,6 +177,54 @@ def rms_norm_forward(
     """
     _load_quantum_ops()
     return _quantum_ops_module.rms_norm_forward(input_tensor, scale, eps=eps)
+
+
+def unitary_norm_backward(
+    grad_output: tf.Tensor,
+    input_tensor: tf.Tensor,
+    scale: tf.Tensor,
+    norms: tf.Tensor,
+    eps: float = 1e-6,
+) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
+    """Backward pass for unitary normalization.
+
+    Args:
+        grad_output: Gradient with respect to output.
+        input_tensor: Original input tensor.
+        scale: Scale parameter.
+        norms: Cached L2 norms from forward pass.
+        eps: Numerical stability epsilon.
+
+    Returns:
+        (grad_input, grad_scale, grad_bias)
+    """
+    _load_quantum_ops()
+    return _quantum_ops_module.unitary_norm_backward(
+        grad_output, input_tensor, scale, norms, eps=eps
+    )
+
+
+# Register gradient for UnitaryNormForward C++ op
+@tf.RegisterGradient("UnitaryNormForward")
+def _unitary_norm_forward_grad(op, grad_output, grad_norms):
+    """Gradient registration for UnitaryNormForward.
+
+    Connects the C++ forward op to its backward op for automatic differentiation.
+    The forward op outputs (normalized_output, norms) so we receive gradients for both.
+    We only need to propagate grad_output; grad_norms is typically None/zeros.
+    """
+    input_tensor = op.inputs[0]
+    scale = op.inputs[1]
+    norms = op.outputs[1]  # Cached norms from forward pass
+    eps = op.get_attr("eps")
+
+    # Load ops and call backward
+    _load_quantum_ops()
+    grad_input, grad_scale, grad_bias = _quantum_ops_module.unitary_norm_backward(
+        grad_output, input_tensor, scale, norms, eps=eps
+    )
+
+    return [grad_input, grad_scale, grad_bias]
 
 
 # =============================================================================
@@ -213,6 +281,57 @@ def quantum_activation(
     return _quantum_ops_module.quantum_activation(input_tensor, angle)
 
 
+def unitary_expert_backward(
+    grad_output: tf.Tensor,
+    input_tensor: tf.Tensor,
+    u1_weights: tf.Tensor,
+    u2_weights: tf.Tensor,
+    activation_angle: tf.Tensor,
+    hidden_cache: tf.Tensor,
+    d_ff: int,
+) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]:
+    """Backward pass for unitary expert.
+
+    Args:
+        grad_output: Gradient with respect to output.
+        input_tensor: Original input tensor.
+        u1_weights: First projection weights.
+        u2_weights: Second projection weights.
+        activation_angle: Quantum activation angle.
+        hidden_cache: Cached hidden activations from forward.
+        d_ff: Feedforward dimension.
+
+    Returns:
+        (grad_input, grad_u1, grad_u2, grad_angle)
+    """
+    _load_quantum_ops()
+    return _quantum_ops_module.unitary_expert_backward(
+        grad_output, input_tensor, u1_weights, u2_weights, activation_angle, hidden_cache, d_ff=d_ff
+    )
+
+
+# Register gradient for UnitaryExpertForward C++ op
+@tf.RegisterGradient("UnitaryExpertForward")
+def _unitary_expert_forward_grad(op, grad_output, grad_hidden_cache):
+    """Gradient registration for UnitaryExpertForward.
+
+    Forward op outputs (output, hidden_cache) so we receive gradients for both.
+    """
+    input_tensor = op.inputs[0]
+    u1_weights = op.inputs[1]
+    u2_weights = op.inputs[2]
+    activation_angle = op.inputs[3]
+    hidden_cache = op.outputs[1]  # Cached from forward pass
+    d_ff = op.get_attr("d_ff")
+
+    _load_quantum_ops()
+    grad_input, grad_u1, grad_u2, grad_angle = _quantum_ops_module.unitary_expert_backward(
+        grad_output, input_tensor, u1_weights, u2_weights, activation_angle, hidden_cache, d_ff=d_ff
+    )
+
+    return [grad_input, grad_u1, grad_u2, grad_angle]
+
+
 # =============================================================================
 # Phase 26: Quantum Embedding
 # =============================================================================
@@ -267,6 +386,44 @@ def haar_random_key_init(
     return _quantum_ops_module.haar_random_key_init(shape_tensor, seed=seed)
 
 
+def quantum_embedding_backward(
+    grad_output: tf.Tensor,
+    token_ids: tf.Tensor,
+    token_keys: tf.Tensor,
+    vocab_size: int,
+    dim: int,
+    num_bundles: int = 4,
+) -> tf.Tensor:
+    """Backward pass for quantum embedding.
+
+    Returns:
+        grad_store: Gradient w.r.t. holographic store
+    """
+    _load_quantum_ops()
+    return _quantum_ops_module.quantum_embedding_backward(
+        grad_output, token_ids, token_keys, vocab_size=vocab_size, dim=dim, num_bundles=num_bundles
+    )
+
+
+# Register gradient for QuantumEmbeddingForward C++ op
+@tf.RegisterGradient("QuantumEmbeddingForward")
+def _quantum_embedding_forward_grad(op, grad_output):
+    """Gradient registration for QuantumEmbeddingForward."""
+    token_ids = op.inputs[0]
+    token_keys = op.inputs[2]
+    vocab_size = op.get_attr("vocab_size")
+    dim = op.get_attr("dim")
+    num_bundles = op.get_attr("num_bundles")
+
+    _load_quantum_ops()
+    grad_store = _quantum_ops_module.quantum_embedding_backward(
+        grad_output, token_ids, token_keys, vocab_size=vocab_size, dim=dim, num_bundles=num_bundles
+    )
+
+    # No gradient for token_ids (discrete), return grad_store for holographic_store, None for token_keys
+    return [None, grad_store, None]
+
+
 # =============================================================================
 # Phase 27: Floquet Position Encoding
 # =============================================================================
@@ -312,6 +469,38 @@ def init_floquet_angles(
     )
 
 
+def floquet_position_encoding_backward(
+    grad_output: tf.Tensor,
+    base_embedding: tf.Tensor,
+    floquet_angles: tf.Tensor,
+) -> tf.Tensor:
+    """Backward pass for Floquet position encoding.
+
+    Returns:
+        grad_angles: Gradient w.r.t. floquet angles
+    """
+    _load_quantum_ops()
+    return _quantum_ops_module.floquet_position_encoding_backward(
+        grad_output, base_embedding, floquet_angles
+    )
+
+
+# Register gradient for FloquetPositionEncodingForward C++ op
+@tf.RegisterGradient("FloquetPositionEncodingForward")
+def _floquet_position_encoding_forward_grad(op, grad_output):
+    """Gradient registration for FloquetPositionEncodingForward."""
+    base_embedding = op.inputs[0]
+    floquet_angles = op.inputs[1]
+
+    _load_quantum_ops()
+    grad_angles = _quantum_ops_module.floquet_position_encoding_backward(
+        grad_output, base_embedding, floquet_angles
+    )
+
+    # No gradient for base_embedding (inputs flow through), only for learnable angles
+    return [None, grad_angles]
+
+
 # =============================================================================
 # Phase 33: Quantum LM Head
 # =============================================================================
@@ -340,6 +529,54 @@ def quantum_lm_head_forward(
     return _quantum_ops_module.quantum_lm_head_forward(
         hidden_states, rotation_params, token_weights, vocab_size=vocab_size, num_layers=num_layers
     )
+
+
+def quantum_lm_head_backward(
+    grad_logits: tf.Tensor,
+    hidden_states: tf.Tensor,
+    rotation_params: tf.Tensor,
+    token_weights: tf.Tensor,
+    vocab_size: int,
+    num_layers: int = 2,
+) -> tuple[tf.Tensor, tf.Tensor]:
+    """Backward pass for quantum LM head.
+
+    Returns:
+        (grad_rotation, grad_token_weights)
+    """
+    _load_quantum_ops()
+    return _quantum_ops_module.quantum_lm_head_backward(
+        grad_logits,
+        hidden_states,
+        rotation_params,
+        token_weights,
+        vocab_size=vocab_size,
+        num_layers=num_layers,
+    )
+
+
+# Register gradient for QuantumLMHeadForward C++ op
+@tf.RegisterGradient("QuantumLMHeadForward")
+def _quantum_lm_head_forward_grad(op, grad_logits):
+    """Gradient registration for QuantumLMHeadForward."""
+    hidden_states = op.inputs[0]
+    rotation_params = op.inputs[1]
+    token_weights = op.inputs[2]
+    vocab_size = op.get_attr("vocab_size")
+    num_layers = op.get_attr("num_layers")
+
+    _load_quantum_ops()
+    grad_rotation, grad_token_weights = _quantum_ops_module.quantum_lm_head_backward(
+        grad_logits,
+        hidden_states,
+        rotation_params,
+        token_weights,
+        vocab_size=vocab_size,
+        num_layers=num_layers,
+    )
+
+    # No gradient for hidden_states (computed elsewhere), only for learnable params
+    return [None, grad_rotation, grad_token_weights]
 
 
 # =============================================================================

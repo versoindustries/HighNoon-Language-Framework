@@ -227,7 +227,14 @@ class QIAO(tf.keras.optimizers.Optimizer):
         if not hasattr(self, "hessians") or not self.hessians:
             self.hessians = []
             for var in var_list:
-                self.hessians.append(self.add_variable_from_reference(var, "h"))
+                # CRITICAL FIX: Initialize Hessian to 1.0 instead of 0.0
+                # When update_hessian() is not called, the Hessian remains at its
+                # initial value. A zero Hessian causes division by epsilon (1e-12),
+                # amplifying gradients by 1e12 and causing immediate NaN.
+                # Initializing to 1.0 gives Adam-like behavior until update_hessian() is called.
+                h_slot = self.add_variable_from_reference(var, "h")
+                h_slot.assign(tf.ones_like(var))  # Initialize to 1.0 for stability
+                self.hessians.append(h_slot)
 
     def update_step(self, grad, var, learning_rate):
         """
@@ -269,7 +276,16 @@ class QIAO(tf.keras.optimizers.Optimizer):
             return
 
         def mixer_step():
-            """Performs an exploration step with gradient-orthogonal noise."""
+            """Performs an exploration step with gradient-orthogonal noise.
+
+            Note: For sparse gradients (IndexedSlices), we fall back to cost_step
+            since orthogonal noise projection is not well-defined for sparse tensors.
+            """
+            # For sparse gradients, mixer step is skipped - use cost step
+            if isinstance(grad, tf.IndexedSlices):
+                cost_step()
+                return
+
             # Generate random noise from a normal distribution
             noise = tf.random.normal(shape=tf.shape(var), dtype=var.dtype)
 
@@ -295,8 +311,13 @@ class QIAO(tf.keras.optimizers.Optimizer):
             var.assign_add(lr * self.mixer_strength * normalized_noise)
             return
 
-        # Use tf.cond to choose the step, ensuring graph compatibility
-        tf.cond(is_mixer_step, mixer_step, cost_step)
+        # For sparse gradients use cost_step directly, else tf.cond for graph mode
+        if isinstance(grad, tf.IndexedSlices):
+            # Sparse grads can't use mixer step's noise projection
+            cost_step()
+        else:
+            # Use tf.cond to choose the step, ensuring graph compatibility
+            tf.cond(is_mixer_step, mixer_step, cost_step)
 
     def update_hessian(self, loss_fn, data_batch):
         """
@@ -347,6 +368,114 @@ class QIAO(tf.keras.optimizers.Optimizer):
                 "rho": self.rho,
                 "mixer_frequency": self.mixer_frequency,
                 "mixer_strength": self.mixer_strength,
+            }
+        )
+        return config
+
+
+class Lion(tf.keras.optimizers.Optimizer):
+    """
+    Implementation of the Lion (EvoLved Sign Momentum) optimizer.
+
+    Lion uses the sign of the momentum to update weights, achieving memory
+    efficiency comparable to SGD while matching or exceeding AdamW performance.
+
+    Reference: https://arxiv.org/abs/2302.06675 (Google Brain, 2023)
+
+    Key properties:
+    - Memory efficient: no second moment (like SGD)
+    - Uses sign operation for updates (magnitude-invariant)
+    - EMA interpolation between gradient and momentum
+    """
+
+    def __init__(
+        self,
+        learning_rate=1e-4,
+        beta_1=0.9,
+        beta_2=0.99,
+        weight_decay=0.0,
+        name="Lion",
+        **kwargs,
+    ):
+        """Initialize Lion optimizer.
+
+        Args:
+            learning_rate: Learning rate (default 1e-4, typically lower than Adam)
+            beta_1: Coefficient for computing running average of gradient (default 0.9)
+            beta_2: Coefficient for computing EMA of gradient for next step (default 0.99)
+            weight_decay: Weight decay coefficient (default 0.0)
+            name: Optimizer name
+            **kwargs: Additional arguments passed to base class
+        """
+        super().__init__(
+            learning_rate=learning_rate, name=name, weight_decay=weight_decay, **kwargs
+        )
+        self.beta_1 = beta_1
+        self.beta_2 = beta_2
+
+        # Momentum storage
+        self.momentums = []
+
+    def build(self, var_list):
+        """Create slots for first moment (momentum)."""
+        super().build(var_list)
+        self.momentums = []
+        for var in var_list:
+            self.momentums.append(self.add_variable_from_reference(var, "m"))
+
+    def update_step(self, grad, var, learning_rate):
+        """
+        Lion update step using sign of interpolated momentum.
+
+        Update rule:
+        1. c_t = beta_1 * m_{t-1} + (1 - beta_1) * g_t  (interpolation for update)
+        2. theta_t = theta_{t-1} - lr * sign(c_t)       (sign-based update)
+        3. m_t = beta_2 * m_{t-1} + (1 - beta_2) * g_t  (momentum update for next step)
+        """
+        if grad is None:
+            return
+
+        lr = tf.cast(learning_rate, var.dtype.base_dtype)
+        beta_1_t = tf.cast(self.beta_1, var.dtype.base_dtype)
+        beta_2_t = tf.cast(self.beta_2, var.dtype.base_dtype)
+
+        var_index = self._get_variable_index(var)
+        m = self.momentums[var_index]
+
+        if isinstance(grad, tf.IndexedSlices):
+            # Sparse update for embeddings
+            m_slices = tf.gather(m, grad.indices)
+
+            # Compute interpolation for update direction
+            c_t = beta_1_t * m_slices + (1.0 - beta_1_t) * grad.values
+
+            # Sign-based update
+            update = lr * tf.sign(c_t)
+            var.scatter_add(tf.IndexedSlices(-update, grad.indices))
+
+            # Update momentum for next step
+            m_t_slices = beta_2_t * m_slices + (1.0 - beta_2_t) * grad.values
+            m_updated = tf.tensor_scatter_nd_update(
+                m, tf.expand_dims(grad.indices, axis=-1), m_t_slices
+            )
+            m.assign(m_updated)
+        else:
+            # Dense update
+            # Compute interpolation for update direction
+            c_t = beta_1_t * m + (1.0 - beta_1_t) * grad
+
+            # Sign-based update
+            var.assign_sub(lr * tf.sign(c_t))
+
+            # Update momentum for next step (different beta for state update)
+            m.assign(beta_2_t * m + (1.0 - beta_2_t) * grad)
+
+    def get_config(self):
+        config = super().get_config()
+        config.update(
+            {
+                "beta_1": self.beta_1,
+                "beta_2": self.beta_2,
             }
         )
         return config

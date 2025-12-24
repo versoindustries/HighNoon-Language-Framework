@@ -1,0 +1,205 @@
+/* HighNoon Dashboard - Design System Variables */
+/* Supports both light and dark modes */
+
+:root {
+  /* Base spacing scale */
+  --spacing-xs: 0.25rem;
+  --spacing-sm: 0.5rem;
+  --spacing-md: 1rem;
+  --spacing-lg: 1.5rem;
+  --spacing-xl: 2rem;
+  --spacing-2xl: 3rem;
+
+  /* Border radius */
+  --radius-sm: 0.25rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.75rem;
+  --radius-xl: 1rem;
+  --radius-full: 9999px;
+
+  /* Typography */
+  --font-sans: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-base: 1rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.25rem;
+  --text-2xl: 1.5rem;
+  --text-3xl: 1.875rem;
+  --text-4xl: 2.25rem;
+
+  --font-normal: 400;
+  --font-medium: 500;
+  --font-semibold: 600;
+  --font-bold: 700;
+
+  /* Line heights */
+  --leading-tight: 1.25;
+  --leading-normal: 1.5;
+  --leading-relaxed: 1.75;
+
+  /* Shadows */
+  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+  --shadow-xl: 0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1);
+
+  /* Transitions */
+  --transition-fast: 150ms ease;
+  --transition-base: 200ms ease;
+  --transition-slow: 300ms ease;
+
+  /* Z-index layers */
+  --z-dropdown: 100;
+  --z-sticky: 200;
+  --z-modal-backdrop: 9000;
+  --z-modal: 9100;
+  --z-toast: 9200;
+  --z-tooltip: 9300;
+
+  /* Glassmorphism */
+  --glass-blur: blur(12px);
+  --glass-saturate: saturate(180%);
+}
+
+/* Dark theme (default) */
+:root,
+[data-theme="dark"] {
+  --bg-base: #0a0a0f;
+  --bg-surface: #12121a;
+  --bg-elevated: #1a1a24;
+  --bg-muted: #24243a;
+  --bg-glass: rgba(26, 26, 36, 0.85);
+
+  --text-primary: #f4f4f6;
+  --text-secondary: #a0a0b8;
+  --text-muted: #606077;
+  --text-inverse: #0a0a0f;
+
+  --border-default: rgba(255, 255, 255, 0.08);
+  --border-subtle: rgba(255, 255, 255, 0.04);
+  --border-strong: rgba(255, 255, 255, 0.15);
+
+  /* Brand colors */
+  --color-primary: #6366f1;
+  --color-primary-hover: #818cf8;
+  --color-primary-active: #4f46e5;
+  --color-primary-muted: rgba(99, 102, 241, 0.15);
+
+  --color-secondary: #8b5cf6;
+  --color-secondary-hover: #a78bfa;
+  --color-secondary-active: #7c3aed;
+
+  --color-success: #10b981;
+  --color-success-hover: #34d399;
+  --color-success-muted: rgba(16, 185, 129, 0.15);
+
+  --color-warning: #f59e0b;
+  --color-warning-hover: #fbbf24;
+  --color-warning-muted: rgba(245, 158, 11, 0.15);
+
+  --color-danger: #ef4444;
+  --color-danger-hover: #f87171;
+  --color-danger-muted: rgba(239, 68, 68, 0.15);
+
+  --color-info: #3b82f6;
+  --color-info-hover: #60a5fa;
+  --color-info-muted: rgba(59, 130, 246, 0.15);
+
+  /* Chart colors */
+  --chart-1: #6366f1;
+  --chart-2: #8b5cf6;
+  --chart-3: #ec4899;
+  --chart-4: #f59e0b;
+  --chart-5: #10b981;
+  --chart-6: #3b82f6;
+  --chart-7: #f43f5e;
+  --chart-grid: rgba(255, 255, 255, 0.05);
+
+  /* Semantic colors */
+  --color-running: #3b82f6;
+  --color-paused: #f59e0b;
+  --color-completed: #10b981;
+  --color-failed: #ef4444;
+  --color-pending: #6b7280;
+
+  /* Input states */
+  --input-bg: rgba(255, 255, 255, 0.05);
+  --input-border: rgba(255, 255, 255, 0.1);
+  --input-border-focus: var(--color-primary);
+  --input-placeholder: var(--text-muted);
+}
+
+/* Light theme */
+[data-theme="light"] {
+  --bg-base: #f8fafc;
+  --bg-surface: #ffffff;
+  --bg-elevated: #ffffff;
+  --bg-muted: #f1f5f9;
+  --bg-glass: rgba(255, 255, 255, 0.85);
+
+  --text-primary: #0f172a;
+  --text-secondary: #475569;
+  --text-muted: #94a3b8;
+  --text-inverse: #f8fafc;
+
+  --border-default: rgba(0, 0, 0, 0.08);
+  --border-subtle: rgba(0, 0, 0, 0.04);
+  --border-strong: rgba(0, 0, 0, 0.15);
+
+  /* Brand colors - slightly adjusted for light mode */
+  --color-primary: #4f46e5;
+  --color-primary-hover: #6366f1;
+  --color-primary-active: #4338ca;
+  --color-primary-muted: rgba(79, 70, 229, 0.1);
+
+  --color-secondary: #7c3aed;
+  --color-secondary-hover: #8b5cf6;
+  --color-secondary-active: #6d28d9;
+
+  --color-success: #059669;
+  --color-success-hover: #10b981;
+  --color-success-muted: rgba(5, 150, 105, 0.1);
+
+  --color-warning: #d97706;
+  --color-warning-hover: #f59e0b;
+  --color-warning-muted: rgba(217, 119, 6, 0.1);
+
+  --color-danger: #dc2626;
+  --color-danger-hover: #ef4444;
+  --color-danger-muted: rgba(220, 38, 38, 0.1);
+
+  --color-info: #2563eb;
+  --color-info-hover: #3b82f6;
+  --color-info-muted: rgba(37, 99, 235, 0.1);
+
+  /* Chart colors */
+  --chart-1: #4f46e5;
+  --chart-2: #7c3aed;
+  --chart-3: #db2777;
+  --chart-4: #d97706;
+  --chart-5: #059669;
+  --chart-6: #2563eb;
+  --chart-7: #e11d48;
+  --chart-grid: rgba(0, 0, 0, 0.05);
+
+  /* Semantic colors */
+  --color-running: #2563eb;
+  --color-paused: #d97706;
+  --color-completed: #059669;
+  --color-failed: #dc2626;
+  --color-pending: #6b7280;
+
+  /* Input states */
+  --input-bg: rgba(0, 0, 0, 0.02);
+  --input-border: rgba(0, 0, 0, 0.1);
+  --input-border-focus: var(--color-primary);
+  --input-placeholder: var(--text-muted);
+
+  /* Adjusted shadows for light mode */
+  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.08), 0 2px 4px -2px rgb(0 0 0 / 0.05);
+  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.08), 0 4px 6px -4px rgb(0 0 0 / 0.05);
+}

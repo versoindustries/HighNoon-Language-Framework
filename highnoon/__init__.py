@@ -1,0 +1,115 @@
+# highnoon/__init__.py
+# Copyright 2025 Verso Industries (Author: Michael B. Zimmerman)
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""HighNoon Language Framework - Language Intelligence, Engineered.
+
+A lite, enterprise-grade release of the HSMN-Architecture focused on
+language modeling capabilities. This framework provides the complete
+architecture with enforced scale limits via tamper-proof compiled binaries.
+
+Example Usage:
+    import highnoon as hn
+
+    # Quick inference
+    model = hn.create_model("highnoon-3b")
+    response = model.generate("Explain quantum computing")
+
+    # With tool calling (Codex CLI)
+    runner = hn.CodexRunner(model)
+    result = runner.run("List Python files in current directory")
+
+    # Fine-tuning with curriculum learning
+    trainer = hn.Trainer(model)
+    trainer.add_curriculum_stage("code_instruction", datasets=["commitpackft"])
+    trainer.train(epochs=10)
+
+For community support, visit: https://www.versoindustries.com/messages
+For enterprise licensing, contact: sales@versoindustries.com
+"""
+
+__version__ = "1.0.0"
+__author__ = "Verso Industries"
+__license__ = "Apache-2.0 (Python) + Proprietary (Binaries)"
+__edition__ = "lite"
+
+
+# Lazy imports to avoid circular dependencies and improve startup time
+def __getattr__(name):
+    """Lazy import of framework components."""
+    if name == "LanguageModel":
+        from highnoon.models.hsmn import HSMN
+
+        return HSMN
+    elif name == "HSMN":
+        from highnoon.models.hsmn import HSMN
+
+        return HSMN
+    elif name == "create_model":
+        from highnoon.models import create_model
+
+        return create_model
+    elif name == "CodexRunner":
+        from highnoon.cli.runner import CodexRunner
+
+        return CodexRunner
+    elif name == "ToolManifest":
+        from highnoon.cli.manifest import ToolManifest
+
+        return ToolManifest
+    elif name == "Trainer":
+        from highnoon.training.trainer import Trainer
+
+        return Trainer
+    elif name == "CurriculumScheduler":
+        from highnoon.training.curriculum import CurriculumScheduler
+
+        return CurriculumScheduler
+    elif name == "Config":
+        from highnoon.config import Config
+
+        return Config
+    elif name == "ModelConfig":
+        from highnoon.config import ModelConfig
+
+        return ModelConfig
+    elif name == "TrainingConfig":
+        from highnoon.config import TrainingConfig
+
+        return TrainingConfig
+    elif name == "QWTTextTokenizer":
+        from highnoon.tokenization import QWTTextTokenizer
+
+        return QWTTextTokenizer
+    elif name == "HPOTrialManager":
+        from highnoon.services.hpo_manager import HPOTrialManager
+
+        return HPOTrialManager
+    raise AttributeError(f"module 'highnoon' has no attribute {name!r}")
+
+
+__all__ = [
+    "LanguageModel",
+    "HSMN",
+    "create_model",
+    "CodexRunner",
+    "ToolManifest",
+    "Trainer",
+    "CurriculumScheduler",
+    "Config",
+    "ModelConfig",
+    "TrainingConfig",
+    "QWTTextTokenizer",
+    "HPOTrialManager",
+]

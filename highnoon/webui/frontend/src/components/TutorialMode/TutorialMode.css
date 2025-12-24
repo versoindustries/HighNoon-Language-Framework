@@ -1,0 +1,348 @@
+/* TutorialMode Styles */
+
+.tutorial-modal {
+    position: relative;
+    padding: var(--spacing-lg);
+}
+
+.tutorial-close {
+    position: absolute;
+    top: var(--spacing-md);
+    right: var(--spacing-md);
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg-muted);
+    border: none;
+    border-radius: var(--radius-full);
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: all var(--transition-fast);
+}
+
+.tutorial-close:hover {
+    background: var(--bg-surface);
+    color: var(--text-primary);
+}
+
+/* Progress Indicator */
+.tutorial-progress {
+    margin-bottom: var(--spacing-xl);
+}
+
+.tutorial-progress-bar {
+    height: 4px;
+    background: var(--bg-muted);
+    border-radius: var(--radius-full);
+    overflow: hidden;
+    margin-bottom: var(--spacing-md);
+}
+
+.tutorial-progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--color-primary), var(--color-secondary));
+    border-radius: var(--radius-full);
+    transition: width var(--transition-normal);
+}
+
+.tutorial-progress-steps {
+    display: flex;
+    justify-content: space-between;
+}
+
+.tutorial-progress-step {
+    width: 24px;
+    height: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg-muted);
+    border: 2px solid var(--border-default);
+    border-radius: var(--radius-full);
+    font-size: 11px;
+    font-weight: var(--font-bold);
+    color: var(--text-muted);
+    transition: all var(--transition-fast);
+}
+
+.tutorial-progress-step.completed {
+    background: var(--color-primary);
+    border-color: var(--color-primary);
+    color: #fff;
+}
+
+.tutorial-progress-step.active {
+    border-color: var(--color-primary);
+    color: var(--color-primary);
+    transform: scale(1.1);
+}
+
+/* Header */
+.tutorial-header {
+    display: flex;
+    gap: var(--spacing-lg);
+    align-items: flex-start;
+    margin-bottom: var(--spacing-xl);
+}
+
+.tutorial-icon {
+    width: 72px;
+    height: 72px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(135deg, var(--color-primary), var(--color-secondary));
+    border-radius: var(--radius-xl);
+    color: #fff;
+    flex-shrink: 0;
+}
+
+.tutorial-titles h2 {
+    font-size: var(--text-2xl);
+    font-weight: var(--font-bold);
+    color: var(--text-primary);
+    margin: 0 0 var(--spacing-xs);
+}
+
+.tutorial-titles p {
+    font-size: var(--text-base);
+    color: var(--text-secondary);
+    margin: 0;
+}
+
+/* Body */
+.tutorial-body {
+    min-height: 280px;
+    margin-bottom: var(--spacing-xl);
+}
+
+/* Welcome Step */
+.tutorial-welcome p {
+    font-size: var(--text-base);
+    color: var(--text-secondary);
+    line-height: 1.6;
+    margin: 0 0 var(--spacing-md);
+}
+
+.tutorial-welcome strong {
+    color: var(--text-primary);
+}
+
+/* Content Section */
+.tutorial-content-section p {
+    font-size: var(--text-base);
+    color: var(--text-secondary);
+    line-height: 1.6;
+    margin: 0 0 var(--spacing-md);
+}
+
+.tutorial-content-section strong {
+    color: var(--color-primary);
+}
+
+.tutorial-feature-list {
+    list-style: none;
+    padding: 0;
+    margin: 0 0 var(--spacing-lg);
+}
+
+.tutorial-feature-list li {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-sm);
+    padding: var(--spacing-sm) 0;
+    font-size: var(--text-sm);
+    color: var(--text-primary);
+}
+
+.tutorial-feature-list li svg {
+    color: var(--color-success);
+    flex-shrink: 0;
+}
+
+/* Highlight Box */
+.tutorial-highlight-box {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-md);
+    padding: var(--spacing-md);
+    background: var(--color-primary-muted);
+    border: 1px solid var(--color-primary);
+    border-radius: var(--radius-lg);
+    margin-top: var(--spacing-lg);
+}
+
+.tutorial-highlight-box svg {
+    color: var(--color-primary);
+    flex-shrink: 0;
+}
+
+.tutorial-highlight-box span {
+    font-size: var(--text-sm);
+    color: var(--text-primary);
+}
+
+/* Pro Tip */
+.tutorial-tip {
+    padding: var(--spacing-sm) var(--spacing-md);
+    background: var(--bg-muted);
+    border-left: 3px solid var(--color-warning);
+    border-radius: 0 var(--radius-md) var(--radius-md) 0;
+    font-size: var(--text-sm);
+    color: var(--text-secondary);
+}
+
+.tutorial-tip strong {
+    color: var(--color-warning);
+}
+
+/* Complete Step */
+.tutorial-complete {
+    text-align: center;
+}
+
+.tutorial-complete-icon {
+    width: 80px;
+    height: 80px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(135deg, var(--color-success), #10b981);
+    border-radius: var(--radius-full);
+    color: #fff;
+    margin: 0 auto var(--spacing-lg);
+}
+
+.tutorial-complete h3 {
+    font-size: var(--text-xl);
+    font-weight: var(--font-bold);
+    color: var(--text-primary);
+    margin: 0 0 var(--spacing-sm);
+}
+
+.tutorial-complete > p {
+    font-size: var(--text-base);
+    color: var(--text-secondary);
+    margin: 0 0 var(--spacing-lg);
+}
+
+/* Workflow List */
+.tutorial-workflow {
+    list-style: none;
+    padding: 0;
+    margin: 0 0 var(--spacing-xl);
+    text-align: left;
+    max-width: 400px;
+    margin-left: auto;
+    margin-right: auto;
+}
+
+.tutorial-workflow li {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-md);
+    padding: var(--spacing-sm) 0;
+    font-size: var(--text-sm);
+    color: var(--text-primary);
+}
+
+.tutorial-workflow .step-number {
+    width: 24px;
+    height: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--color-primary);
+    border-radius: var(--radius-full);
+    color: #fff;
+    font-size: 12px;
+    font-weight: var(--font-bold);
+    flex-shrink: 0;
+}
+
+/* CTA */
+.tutorial-cta {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--spacing-sm);
+    padding: var(--spacing-md) var(--spacing-lg);
+    background: linear-gradient(135deg, var(--color-primary), var(--color-secondary));
+    border-radius: var(--radius-lg);
+    color: #fff;
+    font-weight: var(--font-semibold);
+}
+
+/* Footer */
+.tutorial-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-top: var(--spacing-lg);
+    border-top: 1px solid var(--border-subtle);
+}
+
+.tutorial-footer-left,
+.tutorial-footer-right {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-sm);
+}
+
+.tutorial-footer-center {
+    flex: 1;
+    text-align: center;
+}
+
+.tutorial-step-counter {
+    font-size: var(--text-sm);
+    color: var(--text-muted);
+}
+
+/* Trigger Button (for Sidebar) */
+.tutorial-trigger {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-sm);
+    width: 100%;
+    padding: var(--spacing-sm) var(--spacing-md);
+    background: var(--bg-muted);
+    border: 1px dashed var(--border-default);
+    border-radius: var(--radius-md);
+    color: var(--text-secondary);
+    font-size: var(--text-sm);
+    cursor: pointer;
+    transition: all var(--transition-fast);
+}
+
+.tutorial-trigger:hover {
+    background: var(--color-primary-muted);
+    border-color: var(--color-primary);
+    border-style: solid;
+    color: var(--color-primary);
+}
+
+/* Responsive */
+@media (max-width: 640px) {
+    .tutorial-header {
+        flex-direction: column;
+        align-items: center;
+        text-align: center;
+    }
+
+    .tutorial-footer {
+        flex-direction: column;
+        gap: var(--spacing-md);
+    }
+
+    .tutorial-footer-left,
+    .tutorial-footer-right {
+        width: 100%;
+        justify-content: center;
+    }
+
+    .tutorial-footer-center {
+        order: -1;
+    }
+}

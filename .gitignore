@@ -1,0 +1,179 @@
+# =============================================================================
+# HighNoon Language Framework - Lite Edition
+# =============================================================================
+# This .gitignore excludes proprietary source code and licensing-restricted
+# content from commits. The Lite edition distributes pre-compiled binaries only.
+# =============================================================================
+
+# =============================================================================
+# Python Virtual Environments
+# =============================================================================
+venv/
+.venv/
+ENV/
+env/
+.env/
+.python-version
+
+# =============================================================================
+# C++ Source Code (Proprietary - Pro/Enterprise Only)
+# =============================================================================
+# All C++ source files are excluded from the Lite edition
+*.cpp
+*.cc
+*.cxx
+*.c++
+*.C
+
+# C/C++ Header Files
+*.h
+*.hpp
+*.hxx
+*.h++
+*.hh
+
+# C++ Implementation Files
+*.ii
+*.ixx
+*.ipp
+*.tpp
+*.txx
+
+# =============================================================================
+# Build Artifacts and Object Files
+# =============================================================================
+*.o
+*.obj
+*.a
+*.lib
+*.lo
+*.la
+*.lai
+*.slo
+*.dylib
+*.dll
+*.pdb
+*.ilk
+*.exp
+
+# Build Directories
+build/
+build_release/
+build_debug/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+*.make
+
+# =============================================================================
+# Internal Documentation (Proprietary)
+# =============================================================================
+internal_docs/
+
+# =============================================================================
+# Tests (Development Only)
+# =============================================================================
+tests/
+test/
+*_test.py
+test_*.py
+conftest.py
+.pytest_cache/
+pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.nox/
+.tox/
+
+# =============================================================================
+# Python Bytecode & Cache
+# =============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+*.pyo
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.ruff_cache/
+
+# =============================================================================
+# Jupyter Notebooks (Exclude Checkpoints)
+# =============================================================================
+.ipynb_checkpoints/
+*.ipynb_checkpoints/
+
+# =============================================================================
+# IDE and Editor Files
+# =============================================================================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+*.sublime-project
+*.sublime-workspace
+.spyderproject
+.spyproject
+
+# =============================================================================
+# Distribution and Packaging
+# =============================================================================
+dist/
+*.egg-info/
+*.egg
+eggs/
+*.whl
+pip-wheel-metadata/
+share/python-wheels/
+MANIFEST
+
+# =============================================================================
+# Logs and Temporary Files
+# =============================================================================
+*.log
+*.tmp
+*.temp
+*.bak
+.DS_Store
+Thumbs.db
+
+# =============================================================================
+# Artifacts and Generated Files
+# =============================================================================
+artifacts/
+*.so
+*.pyd
+
+# =============================================================================
+# Benchmark Results (Generated)
+# =============================================================================
+benchmark_results.json
+benchmarks/reports/*.json
+benchmarks/results/
+
+# =============================================================================
+# Agent and AI Configuration (Local Only)
+# =============================================================================
+.agent/
+.claude/
+.roadmap/
+CLAUDE.md
+GEMINI.md
+.pre-commit-config.yaml
+# =============================================================================
+# Pre-compiled Native Binaries Exception
+# =============================================================================
+# The Lite edition distributes pre-compiled .so binaries for Linux x86_64.
+# These exceptions allow the native binaries to be committed.
+!highnoon/_native/bin/x86_64/*.so

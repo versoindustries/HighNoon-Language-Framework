@@ -1,0 +1,2 @@
+highnoon/_native/build/*.so filter=lfs diff=lfs merge=lfs -text
+highnoon/_native/bin/**/*.so filter=lfs diff=lfs merge=lfs -text

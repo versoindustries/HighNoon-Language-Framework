@@ -1,0 +1,228 @@
+# highnoon/_native/ops/fused_tensor_layers_op.py
+# Copyright 2025 Verso Industries (Author: Michael B. Zimmerman)
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Python wrapper for Fused Tensor Layer C++ kernels.
+
+Provides access to optimized Tucker and Tensor-Ring operations.
+"""
+
+from __future__ import annotations
+
+import logging
+
+import tensorflow as tf
+
+from highnoon._native import get_op
+
+logger = logging.getLogger(__name__)
+
+_tensor_layers_module = None
+
+
+def _get_ops():
+    global _tensor_layers_module
+    if _tensor_layers_module is None:
+        _tensor_layers_module = get_op("fused_tensor_layers")
+        if _tensor_layers_module is not None:
+            logger.info(f"Loaded fused_tensor_layers. Available ops: {dir(_tensor_layers_module)}")
+            print(f"--- Fused Tensor Layers Ops: {dir(_tensor_layers_module)} ---")
+    return _tensor_layers_module
+
+
+def fused_tensor_layers_available() -> bool:
+    """Check if Tensor Layer C++ ops are available."""
+    return _get_ops() is not None
+
+
+def _tucker_forward_reference(
+    x: tf.Tensor,
+    u_in: tf.Tensor,
+    core: tf.Tensor,
+    u_out: tf.Tensor,
+    bias: tf.Tensor | None,
+) -> tf.Tensor:
+    x_proj = tf.matmul(x, u_in)
+    core_proj = tf.matmul(x_proj, tf.transpose(core))
+    y = tf.matmul(core_proj, tf.transpose(u_out))
+    if bias is not None:
+        y = tf.nn.bias_add(y, bias)
+    return y
+
+
+def _tensor_ring_forward_reference(
+    inputs: list[tf.Tensor],
+    cores: list[tf.Tensor],
+    bias: tf.Tensor | None,
+    ring_rank: int,
+    local_dims_in: list[int],
+    local_dims_out: list[int],
+) -> tf.Tensor:
+    batch_size = tf.shape(inputs[0])[0]
+    num_cores = len(cores)
+
+    batch_matrices = []
+    for i in range(num_cores):
+        d_out_i = local_dims_out[i]
+        d_in_i = local_dims_in[i]
+        core = tf.reshape(cores[i], [ring_rank, d_out_i, d_in_i, ring_rank])
+        site = tf.einsum("aoib,ci->caob", core, inputs[i])
+        batch_matrices.append(site)
+
+    b_sums = [tf.reduce_sum(m, axis=2) for m in batch_matrices]
+
+    eye = tf.eye(ring_rank, batch_shape=[batch_size])
+    prefixes = [eye]
+    for m in range(num_cores):
+        prefixes.append(tf.matmul(prefixes[-1], b_sums[m]))
+
+    suffixes = [eye]
+    for m in range(num_cores - 1, -1, -1):
+        suffixes.insert(0, tf.matmul(b_sums[m], suffixes[0]))
+
+    output_parts = []
+    for m in range(num_cores):
+        part = tf.einsum("bij,bjok,bki->bo", prefixes[m], batch_matrices[m], suffixes[m + 1])
+        output_parts.append(part)
+
+    output = tf.concat(output_parts, axis=-1)
+    if bias is not None:
+        output = tf.nn.bias_add(output, bias)
+    return output
+
+
+def fused_tucker_forward(
+    x: tf.Tensor,
+    u_in: tf.Tensor,
+    core: tf.Tensor,
+    u_out: tf.Tensor,
+    bias: tf.Tensor | None = None,
+) -> tf.Tensor:
+    """Fused Tucker decomposition forward pass.
+
+    y = ((x @ U_in) @ G^T) @ U_out^T + b
+
+    Args:
+        x: Input tensor [batch, D_in]
+        u_in: Input factor [D_in, R_in]
+        core: Core tensor [R_out, R_in]
+        u_out: Output factor [D_out, R_out]
+        bias: Optional bias [D_out]
+
+    Returns:
+        Output tensor [batch, D_out]
+    """
+    ops = _get_ops()
+    if ops is None:
+        return _tucker_forward_reference(x, u_in, core, u_out, bias)
+
+    bias_provided = bias is not None
+    if bias is None:
+        bias = tf.zeros([tf.shape(u_out)[0]], dtype=x.dtype)
+
+    @tf.custom_gradient
+    def _fused_tucker_inner(x_in, u_in_in, core_in, u_out_in, bias_in):
+        output = ops.fused_tucker_forward(x_in, u_in_in, core_in, u_out_in, bias_in)
+
+        def grad(dy):
+            with tf.GradientTape() as tape:
+                tape.watch([x_in, u_in_in, core_in, u_out_in])
+                if bias_provided:
+                    tape.watch(bias_in)
+                ref = _tucker_forward_reference(
+                    x_in, u_in_in, core_in, u_out_in, bias_in if bias_provided else None
+                )
+            watched = [x_in, u_in_in, core_in, u_out_in]
+            if bias_provided:
+                watched.append(bias_in)
+            grads = tape.gradient(ref, watched, output_gradients=dy)
+            if bias_provided:
+                grad_x, grad_u_in, grad_core, grad_u_out, grad_bias = grads
+            else:
+                grad_x, grad_u_in, grad_core, grad_u_out = grads
+                grad_bias = None
+            return grad_x, grad_u_in, grad_core, grad_u_out, grad_bias
+
+        return output, grad
+
+    return _fused_tucker_inner(x, u_in, core, u_out, bias)
+
+
+def fused_tensor_ring_forward(
+    inputs: list[tf.Tensor],
+    cores: list[tf.Tensor],
+    bias: tf.Tensor | None,
+    ring_rank: int,
+    local_dims_in: list[int],
+    local_dims_out: list[int],
+) -> tf.Tensor:
+    """Fused Tensor-Ring decomposition forward pass with proper trace contraction.
+
+    Args:
+        inputs: List of input tensors [batch, local_d_in]
+        cores: List of ring cores [ring_rank, local_d_out*local_d_in, ring_rank]
+        bias: Optional bias [total_D_out]
+        ring_rank: Bond dimension R
+        local_dims_in: List of d_in_i
+        local_dims_out: List of d_out_i
+
+    Returns:
+        Output tensor [batch, total_D_out]
+    """
+    ops = _get_ops()
+    if ops is None:
+        raise RuntimeError("FusedTensorRingForward requires C++ ops for proper trace contraction.")
+
+    bias_provided = bias is not None
+    if bias is None:
+        total_D_out = sum(local_dims_out)
+        bias = tf.zeros([total_D_out], dtype=inputs[0].dtype)
+
+    @tf.custom_gradient
+    def _fused_tensor_ring_inner(inputs_in, cores_in, bias_in):
+        output = ops.fused_tensor_ring_forward(
+            inputs=inputs_in,
+            cores=cores_in,
+            bias=bias_in,
+            local_dims_in=local_dims_in,
+            local_dims_out=local_dims_out,
+            ring_rank=ring_rank,
+        )
+
+        def grad(dy):
+            with tf.GradientTape() as tape:
+                tape.watch(inputs_in)
+                tape.watch(cores_in)
+                if bias_provided:
+                    tape.watch(bias_in)
+                ref = _tensor_ring_forward_reference(
+                    inputs_in,
+                    cores_in,
+                    bias_in if bias_provided else None,
+                    ring_rank,
+                    local_dims_in,
+                    local_dims_out,
+                )
+            watched = [inputs_in, cores_in]
+            if bias_provided:
+                watched.append(bias_in)
+            grads = tape.gradient(ref, watched, output_gradients=dy)
+            grad_inputs = grads[0]
+            grad_cores = grads[1]
+            grad_bias = grads[2] if bias_provided else None
+            return grad_inputs, grad_cores, grad_bias
+
+        return output, grad
+
+    return _fused_tensor_ring_inner(inputs, cores, bias)

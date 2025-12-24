@@ -1,0 +1,256 @@
+# HighNoon Language Framework License
+
+**Copyright 2025 Verso Industries (Author: Michael B. Zimmerman)**
+
+This project uses a **dual-license structure** with different terms for different components.
+
+---
+
+## Summary
+
+| Component | License | Modifiable | Redistributable |
+|-----------|---------|------------|-----------------|
+| **Python Layer** (`highnoon/*.py`) | Apache 2.0 + Attribution | ✅ Yes | ✅ Yes (with attribution) |
+| **WebUI** (`highnoon/webui/`) | Apache 2.0 + Attribution | ✅ Yes | ✅ Yes (with attribution) |
+| **Compiled Binaries** (`_native/*.so`) | Proprietary | ❌ No | ❌ No (bundled only) |
+| **Documentation** (`docs/`) | CC BY-SA 4.0 | ✅ Yes | ✅ Yes (with attribution) |
+
+---
+
+## Part 1: Python Layer License (Apache 2.0 with Attribution)
+
+The Python source code in this repository is licensed under the Apache License 2.0
+with the following additional attribution requirements.
+
+### Attribution Requirements (MANDATORY)
+
+By using this software, you agree to the following attribution requirements:
+
+1. **Powered by HSMN Notice**
+
+   Any software, application, service, or derivative work that performs inference
+   using models trained or run with this framework MUST display the following
+   attribution in a user-visible location:
+
+   ```
+   Powered by HSMN
+   ```
+
+   This notice must appear in at least ONE of the following locations:
+   - Application "About" dialog or settings page
+   - Application footer or credits section
+   - API response headers (e.g., `X-Powered-By: HSMN`)
+   - Documentation or README of the derivative work
+
+2. **Architecture Diagram Requirements**
+
+   When publicly discussing, presenting, or documenting the architecture of models
+   built with this framework, you MUST:
+
+   - Use official Verso Industries architecture diagrams, OR
+   - Clearly reference "HSMN Architecture by Verso Industries" in any custom diagrams
+   - Link to the official documentation at https://versoindustries.com/hsmn
+
+   You may NOT create derivative architecture diagrams that misrepresent the
+   HSMN architecture or remove Verso Industries attribution.
+
+3. **License Preservation**
+
+   All copies or substantial portions of the Software must include:
+   - This license file in its entirety
+   - Copyright notices in source files
+   - Attribution notices in any documentation
+
+### Apache License 2.0 Terms
+
+```
+                                 Apache License
+                           Version 2.0, January 2004
+                        http://www.apache.org/licenses/
+
+   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+
+   1. Definitions.
+
+      "License" shall mean the terms and conditions for use, reproduction,
+      and distribution as defined by Sections 1 through 9 of this document.
+
+      "Licensor" shall mean the copyright owner or entity authorized by
+      the copyright owner that is granting the License.
+
+      "Legal Entity" shall mean the union of the acting entity and all
+      other entities that control, are controlled by, or are under common
+      control with that entity. For the purposes of this definition,
+      "control" means (i) the power, direct or indirect, to cause the
+      direction or management of such entity, whether by contract or
+      otherwise, or (ii) ownership of fifty percent (50%) or more of the
+      outstanding shares, or (iii) beneficial ownership of such entity.
+
+      "You" (or "Your") shall mean an individual or Legal Entity
+      exercising permissions granted by this License.
+
+      "Source" form shall mean the preferred form for making modifications,
+      including but not limited to software source code, documentation
+      source, and configuration files.
+
+      "Object" form shall mean any form resulting from mechanical
+      transformation or translation of a Source form, including but
+      not limited to compiled object code, generated documentation,
+      and conversions to other media types.
+
+      "Work" shall mean the work of authorship, whether in Source or
+      Object form, made available under the License, as indicated by a
+      copyright notice that is included in or attached to the work.
+
+      "Derivative Works" shall mean any work, whether in Source or Object
+      form, that is based on (or derived from) the Work and for which the
+      editorial revisions, annotations, elaborations, or other modifications
+      represent, as a whole, an original work of authorship.
+
+      "Contribution" shall mean any work of authorship, including
+      the original version of the Work and any modifications or additions
+      to that Work or Derivative Works thereof, that is intentionally
+      submitted to the Licensor for inclusion in the Work.
+
+      "Contributor" shall mean Licensor and any individual or Legal Entity
+      on behalf of whom a Contribution has been received by Licensor and
+      subsequently incorporated within the Work.
+
+   2. Grant of Copyright License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      copyright license to reproduce, prepare Derivative Works of,
+      publicly display, publicly perform, sublicense, and distribute the
+      Work and such Derivative Works in Source or Object form.
+
+   3. Grant of Patent License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      patent license to make, have made, use, offer to sell, sell, import,
+      and otherwise transfer the Work.
+
+   4. Redistribution. You may reproduce and distribute copies of the
+      Work or Derivative Works thereof in any medium, with or without
+      modifications, and in Source or Object form, provided that You
+      meet the following conditions:
+
+      (a) You must give any other recipients of the Work or
+          Derivative Works a copy of this License; and
+
+      (b) You must cause any modified files to carry prominent notices
+          stating that You changed the files; and
+
+      (c) You must retain, in the Source form of any Derivative Works
+          that You distribute, all copyright, patent, trademark, and
+          attribution notices from the Source form of the Work; and
+
+      (d) You must comply with the Attribution Requirements specified
+          in Part 1 of this license.
+
+   5. Submission of Contributions. Unless You explicitly state otherwise,
+      any Contribution intentionally submitted for inclusion in the Work
+      by You to the Licensor shall be under the terms and conditions of
+      this License, without any additional terms or conditions.
+
+   6. Trademarks. This License does not grant permission to use the trade
+      names, trademarks, service marks, or product names of the Licensor,
+      except as required for reasonable and customary use in describing the
+      origin of the Work and reproducing the content of the NOTICE file.
+
+   7. Disclaimer of Warranty. Unless required by applicable law or
+      agreed to in writing, Licensor provides the Work on an "AS IS" BASIS,
+      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+      implied, including, without limitation, any warranties or conditions
+      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
+      PARTICULAR PURPOSE.
+
+   8. Limitation of Liability. In no event and under no legal theory,
+      whether in tort (including negligence), contract, or otherwise,
+      unless required by applicable law or agreed to in writing, shall
+      any Contributor be liable to You for damages, including any direct,
+      indirect, special, incidental, or consequential damages of any
+      character arising as a result of this License or out of the use or
+      inability to use the Work.
+
+   9. Accepting Warranty or Additional Liability. While redistributing
+      the Work or Derivative Works thereof, You may choose to offer,
+      and charge a fee for, acceptance of support, warranty, indemnity,
+      or other liability obligations consistent with this License.
+
+   END OF APACHE 2.0 TERMS
+```
+
+---
+
+## Part 2: Compiled Binary License (Proprietary)
+
+The compiled binary files (`.so`, `.dll`, `.dylib`) located in the `_native/`
+directory are **proprietary software** owned by Verso Industries.
+
+### Prohibited Actions
+
+You may NOT:
+
+1. **Disassemble, decompile, or reverse engineer** the binary files
+2. **Modify or create derivative works** of the binary files
+3. **Redistribute the binary files separately** from this framework
+4. **Remove, alter, or obscure** any proprietary notices or labels
+5. **Circumvent any technological measures** that control access to the binaries
+6. **Use the binaries in ways that exceed the Lite edition limits**
+
+### Permitted Actions
+
+You MAY:
+
+1. **Use the binaries** as part of the complete HighNoon Language Framework
+2. **Distribute the complete framework** including binaries (with attribution)
+3. **Build and deploy models** within the Lite edition limits
+4. **Use trained models** for commercial purposes (with attribution)
+
+### Limit Enforcement
+
+The compiled binaries enforce the following Lite edition limits:
+
+| Dimension | Lite Limit |
+|-----------|------------|
+| Max Parameters | 20,000,000,000 (20B) |
+| Max Context Length | 5,000,000 tokens |
+| Max Reasoning Blocks | 24 |
+| Max MoE Experts | 12 |
+
+Attempts to exceed these limits will result in a `LimitExceededError`.
+
+### Enterprise License
+
+To remove these limits, contact Verso Industries for an Enterprise license:
+- Email: sales@versoindustries.com
+- Web: https://versoindustries.com/enterprise
+
+---
+
+## Part 3: Documentation License (CC BY-SA 4.0)
+
+Documentation in the `docs/` directory is licensed under Creative Commons
+Attribution-ShareAlike 4.0 International (CC BY-SA 4.0).
+
+You are free to:
+- **Share**: Copy and redistribute the material in any medium or format
+- **Adapt**: Remix, transform, and build upon the material for any purpose
+
+Under the following terms:
+- **Attribution**: You must give appropriate credit to Verso Industries
+- **ShareAlike**: If you remix or transform, you must distribute under the same license
+
+---
+
+## Contact Information
+
+**Verso Industries**
+- Website: https://versoindustries.com
+- Email: legal@versoindustries.com
+- Enterprise Sales: sales@versoindustries.com
+
+---
+
+*License Version: 2.0.0*
+*Effective Date: December 2025*

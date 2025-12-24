@@ -1,0 +1,206 @@
+# HighNoon Language Framework
+# Copyright 2025 Verso Industries
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "highnoon"
+version = "1.0.0"
+description = "HighNoon Language Framework - Lite edition of the HSMN Architecture"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+authors = [
+    { name = "Michael B. Zimmerman", email = "contact@versoindustries.com" },
+]
+maintainers = [
+    { name = "Verso Industries", email = "contact@versoindustries.com" },
+]
+keywords = [
+    "language-model",
+    "neural-network",
+    "transformer",
+    "moe",
+    "mixture-of-experts",
+    "deep-learning",
+    "tensorflow",
+    "nlp",
+    "ai",
+    "machine-learning",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Text Processing :: Linguistic",
+    "Typing :: Typed",
+]
+
+dependencies = [
+    "tensorflow>=2.15.0,<3.0.0",
+    "numpy>=1.24.0,<2.0.0",
+    "typing-extensions>=4.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "black>=23.0.0",
+    "isort>=5.12.0",
+    "mypy>=1.0.0",
+    "ruff>=0.1.0",
+]
+training = ["tensorboard>=2.15.0", "transformers>=4.30.0", "datasets>=2.14.0"]
+full = ["highnoon[dev,training]"]
+
+[project.urls]
+Homepage = "https://versoindustries.com"
+Documentation = "https://versoindustries.com/technology/highnoon"
+Repository = "https://github.com/versoindustries/highnoon"
+Issues = "https://versoindustries.com/messages"
+Changelog = "https://github.com/versoindustries/highnoon/blob/main/CHANGELOG.md"
+
+[project.scripts]
+highnoon = "highnoon.cli.runner:main"
+highnoon-train = "highnoon.training.trainer:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["highnoon*"]
+
+[tool.setuptools.package-data]
+highnoon = [
+    "py.typed",
+    "_native/*.so",
+    "_native/*.dylib",
+    "_native/*.dll",
+    "_native/bin/**/*.so",
+    "_native/bin/**/*.dylib",
+    "_native/bin/**/*.dll",
+]
+
+# Black configuration
+[tool.black]
+line-length = 100
+target-version = ["py310", "py311", "py312"]
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+    \.eggs
+    | \.git
+    | \.hg
+    | \.mypy_cache
+    | \.tox
+    | \.venv
+    | build
+    | dist
+)/
+'''
+
+# isort configuration
+[tool.isort]
+profile = "black"
+line_length = 100
+known_first_party = ["highnoon"]
+skip_gitignore = true
+
+# pytest configuration
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short --cov=highnoon --cov-report=term-missing --cov-report=html"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "native: marks tests requiring native ops",
+    "limit: marks limit enforcement tests",
+    "integration: marks integration tests",
+]
+
+# Coverage configuration
+[tool.coverage.run]
+source = ["highnoon"]
+branch = true
+omit = [
+    "highnoon/_native/*",
+    "highnoon/__pycache__/*",
+    "*/__pycache__/*",
+    "*/tests/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+    "@abstractmethod",
+]
+fail_under = 70
+show_missing = true
+
+[tool.coverage.html]
+directory = "htmlcov"
+
+# mypy configuration
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = false
+warn_unused_configs = true
+ignore_missing_imports = true
+exclude = ["build", "dist", "venv"]
+disallow_untyped_defs = false
+check_untyped_defs = false
+
+# Per-module overrides for TensorFlow heavy files
+[[tool.mypy.overrides]]
+module = [
+    "highnoon.training.*",
+    "highnoon.quantum.*",
+    "highnoon.services.hpo_manager",
+    "highnoon.models.spatial.mamba",
+    "highnoon.models.hamiltonian",
+    "highnoon.models.tensor_layers",
+]
+ignore_errors = true
+
+# ruff configuration
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "E",  # pycodestyle errors
+    "W",  # pycodestyle warnings
+    "F",  # pyflakes
+    "I",  # isort
+    "B",  # flake8-bugbear
+    "C4", # flake8-comprehensions
+    "UP", # pyupgrade
+]
+ignore = [
+    "E501", # line too long (handled by black)
+    "B008", # do not perform function calls in argument defaults
+    "B905", # zip without strict (common ML pattern with gradients/weights)
+    "C901", # too complex
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]

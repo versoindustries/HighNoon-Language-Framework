@@ -1,0 +1,110 @@
+/* Card Component Styles */
+
+.card {
+    background: var(--bg-surface);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-lg);
+    transition: all var(--transition-base);
+}
+
+/* Variants */
+.card-default {
+    background: var(--bg-surface);
+}
+
+.card-glass {
+    background: var(--bg-glass);
+    backdrop-filter: var(--glass-blur) var(--glass-saturate);
+    -webkit-backdrop-filter: var(--glass-blur) var(--glass-saturate);
+}
+
+.card-outlined {
+    background: transparent;
+    border: 1px solid var(--border-strong);
+}
+
+/* Padding */
+.card-p-none {
+    padding: 0;
+}
+
+.card-p-sm {
+    padding: var(--spacing-sm);
+}
+
+.card-p-md {
+    padding: var(--spacing-md);
+}
+
+.card-p-lg {
+    padding: var(--spacing-lg);
+}
+
+/* Hover effect */
+.card-hover:hover {
+    border-color: var(--border-strong);
+    box-shadow: var(--shadow-lg);
+    transform: translateY(-2px);
+}
+
+/* Header */
+.card-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    padding: var(--spacing-md) var(--spacing-md) 0;
+}
+
+.card-p-lg .card-header {
+    padding: var(--spacing-lg) var(--spacing-lg) 0;
+}
+
+.card-header-text {
+    flex: 1;
+    min-width: 0;
+}
+
+.card-title {
+    font-size: var(--text-lg);
+    font-weight: var(--font-semibold);
+    color: var(--text-primary);
+    margin: 0;
+}
+
+.card-subtitle {
+    font-size: var(--text-sm);
+    color: var(--text-secondary);
+    margin: var(--spacing-xs) 0 0;
+}
+
+.card-header-action {
+    flex-shrink: 0;
+    margin-left: var(--spacing-md);
+}
+
+/* Content */
+.card-content {
+    padding: var(--spacing-md);
+}
+
+.card-p-lg .card-content {
+    padding: var(--spacing-lg);
+}
+
+/* Footer */
+.card-footer {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: var(--spacing-sm);
+    padding: 0 var(--spacing-md) var(--spacing-md);
+    border-top: 1px solid var(--border-subtle);
+    margin-top: var(--spacing-md);
+    padding-top: var(--spacing-md);
+}
+
+.card-p-lg .card-footer {
+    padding: 0 var(--spacing-lg) var(--spacing-lg);
+    margin-top: var(--spacing-lg);
+    padding-top: var(--spacing-lg);
+}

@@ -149,21 +149,33 @@ class TrialResult:
     is_on_pareto_frontier: bool = False
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert to dictionary for JSON serialization."""
+        """Convert to dictionary for JSON serialization.
+
+        Field names match frontend HPOTrialInfo type in types.ts.
+        """
         return {
             "trial_id": self.trial_id,
             "loss": self.loss if not math.isinf(self.loss) else None,
             "perplexity": self.perplexity,
             "mean_confidence": self.mean_confidence,
-            "ece": self.ece,
+            "expected_calibration_error": self.ece,  # Frontend expects this name
             "param_count": self.param_count,
             "hyperparams": self.hyperparams,
             "epochs_completed": self.epochs_completed,
             "wall_time_seconds": self.wall_time_seconds,
             "memory_peak_mb": self.memory_peak_mb,
+            "memory_mb": self.memory_peak_mb,  # Alias for frontend compatibility
             "error": self.error,
             "composite_score": self.composite_score,
             "is_on_pareto_frontier": self.is_on_pareto_frontier,
+            # Frontend table expects these fields
+            "status": "failed" if self.error else "completed",
+            "learning_rate": self.hyperparams.get("learning_rate", 0),
+            "duration_seconds": self.wall_time_seconds,
+            "best_loss": self.loss if not math.isinf(self.loss) else None,
+            "step": self.epochs_completed,
+            "batch_size": self.hyperparams.get("batch_size", 0),
+            "optimizer": self.hyperparams.get("optimizer", "unknown"),
         }
 
 
@@ -815,10 +827,14 @@ class SweepExecutor:
             try:
                 with open(status_file) as f:
                     status = json.load(f)
-                    loss = status.get("loss", float("inf"))
+                    # HPOReporter writes 'best_loss', not 'loss'
+                    loss = status.get("best_loss") or status.get("loss", float("inf"))
+                    if loss is None:
+                        loss = float("inf")
                     perplexity = status.get("perplexity")
                     mean_confidence = status.get("mean_confidence")
-                    ece = status.get("ece")
+                    # HPOReporter writes 'expected_calibration_error', not 'ece'
+                    ece = status.get("expected_calibration_error") or status.get("ece")
                     param_count = status.get("param_count", 0)
                     epochs_completed = status.get("epochs_completed", 0)
             except Exception as e:

@@ -758,7 +758,7 @@ class HPOSweepInfo(BaseModel):
     state: str  # pending, running, completed, cancelled
     max_trials: int
     completed_trials: int = 0
-    best_trial_id: int | None = None
+    best_trial_id: str | int | None = None
     best_loss: float | None = None
     best_composite_score: float | None = None  # Multi-objective best score
     best_perplexity: float | None = None  # Best trial's perplexity
@@ -2281,6 +2281,10 @@ def create_app(debug: bool = False) -> FastAPI:
                 sweep["best_loss"] = result.best_loss
                 sweep["best_hyperparams"] = result.best_hyperparams
                 sweep["trials"] = [t.to_dict() for t in result.completed_trials]
+                # Multi-objective best scores
+                if result.best_trial:
+                    sweep["best_composite_score"] = result.best_trial.composite_score
+                    sweep["best_perplexity"] = result.best_trial.perplexity
 
                 hpo_logs[sweep_id].append(
                     {
@@ -2329,10 +2333,16 @@ def create_app(debug: bool = False) -> FastAPI:
             completed = len(executor.completed_trials)
             best_loss = executor.best_trial.loss if executor.best_trial else None
             best_trial_id = executor.best_trial.trial_id if executor.best_trial else None
+            best_composite_score = (
+                executor.best_trial.composite_score if executor.best_trial else None
+            )
+            best_perplexity = executor.best_trial.perplexity if executor.best_trial else None
         else:
             completed = sweep["completed_trials"]
             best_loss = sweep.get("best_loss")
             best_trial_id = sweep.get("best_trial_id")
+            best_composite_score = sweep.get("best_composite_score")
+            best_perplexity = sweep.get("best_perplexity")
 
         return HPOSweepInfo(
             sweep_id=sweep["sweep_id"],
@@ -2342,6 +2352,8 @@ def create_app(debug: bool = False) -> FastAPI:
             completed_trials=completed,
             best_trial_id=best_trial_id,
             best_loss=best_loss,
+            best_composite_score=best_composite_score,
+            best_perplexity=best_perplexity,
             best_hyperparams=sweep.get("best_hyperparams"),
             started_at=sweep.get("started_at"),
             trials=[],  # Exclude trials for status endpoint

@@ -1090,7 +1090,7 @@ export function HPO() {
                                                             {trial.status}
                                                         </span>
                                                     </td>
-                                                    <td>{trial.learning_rate.toExponential(2)}</td>
+                                                    <td>{trial.learning_rate ? trial.learning_rate.toExponential(2) : '—'}</td>
                                                     <td>{trial.loss?.toFixed(4) ?? '—'}</td>
                                                     <td>{trial.perplexity?.toFixed(2) ?? '—'}</td>
                                                     <td>{trial.mean_confidence?.toFixed(3) ?? '—'}</td>

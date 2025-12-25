@@ -169,16 +169,16 @@ export interface StartTrainingRequest {
 // ============================================================================
 
 export interface HPOTrialInfo {
-    trial_id: number;
+    trial_id: string | number;  // Backend uses string (e.g., 'trial_0')
     status: 'running' | 'completed' | 'pruned' | 'failed';
-    hyperparams: Record<string, unknown>;
+    hyperparams?: Record<string, unknown>;
     learning_rate: number;
-    batch_size: number;
-    optimizer: string;
+    batch_size?: number;
+    optimizer?: string;
     loss: number | null;
-    best_loss: number | null;
-    duration_seconds: number | null;
-    step: number;
+    best_loss?: number | null;
+    duration_seconds?: number | null;
+    step?: number;
     pruned_at_step?: number;
     memory_mb?: number;       // Current RSS memory in MB
     peak_memory_mb?: number;  // Peak RSS memory in MB
@@ -208,7 +208,7 @@ export interface HPOSweepInfo {
     max_trials: number;
     completed_trials: number;
     pruned_trials: number;
-    best_trial_id: number | null;
+    best_trial_id: string | number | null;
     best_loss: number | null;
     best_composite_score?: number | null;  // Multi-objective best score
     best_perplexity?: number | null;        // Best trial's perplexity

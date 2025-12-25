@@ -227,10 +227,10 @@ class QuantumEnhancedBlock(tf.keras.layers.Layer):
         # Area law says low entropy for ground states).
 
         # Load the custom op module
-        from highnoon.models.layers.utils import load_custom_ops
+        from highnoon._native import get_op
 
-        ops = load_custom_ops()
-        if hasattr(ops, "EntanglementLoss"):
+        ops = get_op("fused_unified_quantum_block")
+        if ops is not None and hasattr(ops, "EntanglementLoss"):
             # Compute a proxy for bond entropies
             # For simplicity, use the variance of the state vector as a proxy for singular values
             # S = svd(x). s^2 are eigenvalues of rho.

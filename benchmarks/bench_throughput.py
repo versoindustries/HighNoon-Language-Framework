@@ -493,8 +493,8 @@ def format_throughput_markdown(results: dict[str, Any]) -> str:
         "",
     ]
 
-    if results["forward_summary"]:
-        s = results["forward_summary"]
+    if results.get("streaming_summary"):
+        s = results["streaming_summary"]
         lines.extend(
             [
                 f"- **Mean**: {s['mean_tokens_per_second']:,.0f} tokens/second",
@@ -505,7 +505,7 @@ def format_throughput_markdown(results: dict[str, Any]) -> str:
         )
 
     # Detailed table
-    if results["forward_results"]:
+    if results.get("streaming_results"):
         lines.extend(
             [
                 "### Detailed Results",
@@ -514,7 +514,7 @@ def format_throughput_markdown(results: dict[str, Any]) -> str:
                 "|-------|---------|------------|--------------|-----------|",
             ]
         )
-        for r in results["forward_results"]:
+        for r in results["streaming_results"]:
             lines.append(
                 f"| {r['batch_size']} | {r['sequence_length']} | "
                 f"{r['tokens_per_second']:,.0f} | {r['total_tokens']:,} | "
@@ -635,10 +635,10 @@ def main() -> int:
         print(f"Saved Markdown: {md_path}")
 
     # Print summary
-    if results["forward_summary"]:
-        s = results["forward_summary"]
+    if results.get("streaming_summary"):
+        s = results["streaming_summary"]
         print(f"\nStreaming forward throughput: {s['mean_tokens_per_second']:,.0f} tok/s (mean)")
-    if results["qsg_summary"]:
+    if results.get("qsg_summary"):
         s = results["qsg_summary"]
         print(f"QSG generation throughput: {s['mean_tokens_per_second']:.1f} tok/s (mean)")
         print(f"QSG speedup vs AR: ~{s['mean_speedup_vs_ar']:.0f}x")

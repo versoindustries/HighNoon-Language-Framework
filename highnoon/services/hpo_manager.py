@@ -4,12 +4,14 @@ This module manages the lifecycle of HPO trials, including spawning,
 monitoring, and coordinating with the C++ HPO orchestrator.
 
 Phase 5 Update: Integrated grouped parameter search for multi-stage HPO.
+Phase 6 Update: Automated learning rate selection with optimizer-aware defaults.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import time
 from dataclasses import dataclass, field
@@ -30,6 +32,26 @@ except ImportError as e:
     logging.getLogger(__name__).debug(f"[HPO Manager] Grouped sampling not available: {e}")
 
 logger = logging.getLogger(__name__)
+
+# =============================================================================
+# OPTIMIZER-AWARE LEARNING RATE DEFAULTS
+# =============================================================================
+# Each optimizer has an optimal learning rate range based on its characteristics.
+# Second-order optimizers (SophiaG) need lower LRs, while Lion is sensitive to high LRs.
+# Log-uniform sampling ensures small LRs are as likely as large ones.
+
+OPTIMIZER_LR_RANGES: dict[str, tuple[float, float]] = {
+    "adam": (1e-5, 1e-3),
+    "adamw": (1e-5, 3e-4),
+    "sophiag": (1e-5, 1e-4),  # Conservative for second-order optimizer
+    "qiao": (1e-5, 2e-4),  # Quantum-inspired alternating optimizer
+    "grover": (1e-5, 5e-4),  # Grover-enhanced optimizer
+    "sympflow": (1e-5, 3e-4),  # Symplectic Hamiltonian flow
+    "lion": (1e-5, 1e-4),  # Lion needs lower LR than Adam-family
+}
+
+# Default LR range when optimizer is not specified or unknown
+DEFAULT_LR_RANGE: tuple[float, float] = (1e-5, 3e-4)
 
 
 def load_hpo_config(config_path: Path | None = None) -> dict[str, Any]:
@@ -152,7 +174,9 @@ class HPOSearchSpace:
     """
 
     # Training hyperparameters
-    learning_rate: tuple[float, float] = (1e-5, 1e-2)
+    # Note: LR range is now auto-derived from optimizer selection.
+    # This default is a safe fallback; actual range comes from OPTIMIZER_LR_RANGES.
+    learning_rate: tuple[float, float] = (1e-5, 3e-4)
     batch_size: list[int] = field(default_factory=lambda: [16, 32, 64, 128])
     optimizer: list[str] = field(default_factory=lambda: ["sophiag", "adam"])
     warmup_steps: tuple[int, int] = (0, 1000)
@@ -372,11 +396,24 @@ class HPOSearchSpace:
         filtered_dims = [d for d in self.embedding_dim if d <= max_dim] or [256]
         filtered_batch = [b for b in self.batch_size if b <= max_batch] or [8]
 
+        # Select optimizer first so we can derive LR range
+        selected_optimizer = random.choice(self.optimizer)
+
+        # Get optimizer-specific LR range, falling back to default if unknown
+        lr_range = OPTIMIZER_LR_RANGES.get(selected_optimizer.lower(), DEFAULT_LR_RANGE)
+
+        # Use log-uniform sampling for learning rate
+        # This ensures small LRs (1e-5) are as likely as large LRs (1e-4)
+        # which is critical for stable hyperparameter search
+        lr_log_min = math.log10(lr_range[0])
+        lr_log_max = math.log10(lr_range[1])
+        sampled_lr = 10 ** random.uniform(lr_log_min, lr_log_max)
+
         config = {
-            # Training hyperparameters
-            "learning_rate": random.uniform(*self.learning_rate),
+            # Training hyperparameters (LR auto-derived from optimizer)
+            "learning_rate": sampled_lr,
             "batch_size": random.choice(filtered_batch),
-            "optimizer": random.choice(self.optimizer),
+            "optimizer": selected_optimizer,
             "warmup_steps": random.randint(*self.warmup_steps),
             "weight_decay": random.uniform(*self.weight_decay),
             # Model architecture params (memory-aware)

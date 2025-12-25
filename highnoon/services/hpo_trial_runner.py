@@ -1283,17 +1283,25 @@ def train_trial(
             quality_metrics = {}
 
     # Compute composite score for multi-objective ranking
-    composite_score = compute_composite_score(
-        loss=best_loss,
-        perplexity=quality_metrics.get("perplexity"),
-        ece=quality_metrics.get("expected_calibration_error"),
-        param_count=param_count,
-        param_budget=param_budget,
-        alpha_loss=trial_config.get("alpha_loss", DEFAULT_ALPHA_LOSS),
-        beta_perplexity=trial_config.get("beta_perplexity", DEFAULT_BETA_PERPLEXITY),
-        gamma_calibration=trial_config.get("gamma_calibration", DEFAULT_GAMMA_CALIBRATION),
-        lambda_efficiency=lambda_efficiency,
-    )
+    # Guard against None or inf best_loss from failed trials
+    if best_loss is None or not math.isfinite(best_loss):
+        logger.warning(
+            f"[HPO] Trial {trial_id}: best_loss={best_loss} is not finite, "
+            "using inf for composite score"
+        )
+        composite_score = float("inf")
+    else:
+        composite_score = compute_composite_score(
+            loss=best_loss,
+            perplexity=quality_metrics.get("perplexity"),
+            ece=quality_metrics.get("expected_calibration_error"),
+            param_count=param_count,
+            param_budget=param_budget,
+            alpha_loss=trial_config.get("alpha_loss", DEFAULT_ALPHA_LOSS),
+            beta_perplexity=trial_config.get("beta_perplexity", DEFAULT_BETA_PERPLEXITY),
+            gamma_calibration=trial_config.get("gamma_calibration", DEFAULT_GAMMA_CALIBRATION),
+            lambda_efficiency=lambda_efficiency,
+        )
 
     # Report completion with all metrics
     hpo_reporter.complete(

@@ -471,38 +471,8 @@ export function HPO() {
     const [searchStrategy, setSearchStrategy] = useState('bayesian');
     const [selectedOptimizers, setSelectedOptimizers] = useState<string[]>(['sophiag']);
 
-    // Learning rate range (stored as log10 values for slider, e.g., -5 = 1e-5)
-    const [lrMinLog, setLrMinLog] = useState(-5);  // 1e-5
-    const [lrMaxLog, setLrMaxLog] = useState(-3);  // 1e-3
-
-    // Convert log values to string format for API
-    const lrMin = `1e${lrMinLog}`;
-    const lrMax = `1e${lrMaxLog}`;
-
-    // Handle LR slider changes with correlation
-    const handleLrMinChange = (value: number) => {
-        setLrMinLog(value);
-        // Ensure max is always at least one step above min
-        if (value >= lrMaxLog) {
-            setLrMaxLog(Math.min(value + 1, -1));
-        }
-    };
-
-    const handleLrMaxChange = (value: number) => {
-        setLrMaxLog(value);
-        // Ensure min is always at least one step below max
-        if (value <= lrMinLog) {
-            setLrMinLog(Math.max(value - 1, -7));
-        }
-    };
-
-    // Format learning rate for display
-    const formatLearningRate = (logValue: number) => {
-        const value = Math.pow(10, logValue);
-        if (value >= 0.01) return value.toFixed(2);
-        if (value >= 0.001) return value.toFixed(3);
-        return value.toExponential(0);
-    };
+    // Learning rate is now auto-tuned based on optimizer selection
+    // (handled by backend in hpo_manager.py using OPTIMIZER_LR_RANGES)
 
     // Sweep state
     const [sweepStatus, setSweepStatus] = useState<HPOSweepInfo | null>(null);
@@ -659,8 +629,7 @@ export function HPO() {
                     max_trials: selectedTimeBudget.trials,
                     search_strategy: searchStrategy,
                     optimizers: selectedOptimizers,
-                    lr_min: lrMin,
-                    lr_max: lrMax,
+                    // Learning rate is auto-derived from optimizer selection
                     // Model tokenizer configuration (user-specified)
                     vocab_size: vocabSize,
                     context_window: contextWindow,
@@ -920,45 +889,15 @@ export function HPO() {
                                                                     />
                                                                 </div>
                                                             </div>
-                                                            <div className="config-grid">
-                                                                <div className="config-field">
-                                                                    <label className="config-label">
-                                                                        Learning Rate Min: {formatLearningRate(lrMinLog)}
-                                                                    </label>
-                                                                    <input
-                                                                        type="range"
-                                                                        className="config-slider"
-                                                                        min={-7}
-                                                                        max={-2}
-                                                                        step={1}
-                                                                        value={lrMinLog}
-                                                                        onChange={(e) => handleLrMinChange(parseInt(e.target.value))}
-                                                                        style={{ width: '100%' }}
-                                                                    />
-                                                                    <div className="slider-labels">
-                                                                        <span>1e-7</span>
-                                                                        <span>1e-2</span>
-                                                                    </div>
+                                                            {/* Learning rate auto-tuning indicator */}
+                                                            <div className="config-field auto-tuned-field">
+                                                                <div className="auto-tuned-indicator">
+                                                                    <Sparkles size={16} />
+                                                                    <span>Learning rate will be auto-tuned for {selectedOptimizers[0] === 'sophiag' ? 'SophiaG' : selectedOptimizers[0] === 'qiao' ? 'QIAO' : selectedOptimizers[0]}</span>
                                                                 </div>
-                                                                <div className="config-field">
-                                                                    <label className="config-label">
-                                                                        Learning Rate Max: {formatLearningRate(lrMaxLog)}
-                                                                    </label>
-                                                                    <input
-                                                                        type="range"
-                                                                        className="config-slider"
-                                                                        min={-6}
-                                                                        max={-1}
-                                                                        step={1}
-                                                                        value={lrMaxLog}
-                                                                        onChange={(e) => handleLrMaxChange(parseInt(e.target.value))}
-                                                                        style={{ width: '100%' }}
-                                                                    />
-                                                                    <div className="slider-labels">
-                                                                        <span>1e-6</span>
-                                                                        <span>1e-1</span>
-                                                                    </div>
-                                                                </div>
+                                                                <p className="auto-tuned-hint">
+                                                                    Uses optimizer-specific ranges with log-uniform sampling for stable training.
+                                                                </p>
                                                             </div>
                                                         </div>
                                                     )}

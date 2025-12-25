@@ -16,6 +16,15 @@ interface LogEntry {
     learning_rate?: number;
     epoch?: number;
     trial_id?: string;
+    // Memory metrics
+    memory_mb?: number;
+    peak_memory_mb?: number;
+    // Quality metrics (on trial completion)
+    perplexity?: number;
+    mean_confidence?: number;
+    composite_score?: number;
+    efficiency_score?: number;
+    param_count?: number;
 }
 
 interface TrainingConsoleProps {
@@ -44,6 +53,9 @@ export function TrainingConsole({ sweepId, isRunning, devMode = false }: Trainin
     const [showDebug, setShowDebug] = useState(devMode);
     const [currentLoss, setCurrentLoss] = useState<number | null>(null);
     const [currentStep, setCurrentStep] = useState<number | null>(null);
+    const [currentPerplexity, setCurrentPerplexity] = useState<number | null>(null);
+    const [currentConfidence, setCurrentConfidence] = useState<number | null>(null);
+    const [currentMemoryMb, setCurrentMemoryMb] = useState<number | null>(null);
     const [logIndex, setLogIndex] = useState(0);
     const consoleRef = useRef<HTMLDivElement>(null);
     const pollIntervalRef = useRef<number | null>(null);
@@ -76,11 +88,25 @@ export function TrainingConsole({ sweepId, isRunning, devMode = false }: Trainin
                         setLogs((prev) => [...prev, ...data.logs]);
                         setLogIndex(data.next_index);
 
-                        // Update current metrics from latest log with loss
-                        const latestWithLoss = [...data.logs].reverse().find((l: LogEntry) => l.loss !== null);
+                        // Update current metrics from latest logs
+                        const latestWithLoss = [...data.logs].reverse().find((l: LogEntry) => l.loss !== null && l.loss !== undefined);
                         if (latestWithLoss) {
                             setCurrentLoss(latestWithLoss.loss);
                             setCurrentStep(latestWithLoss.step);
+                        }
+                        // Update memory from latest log with memory_mb
+                        const latestWithMemory = [...data.logs].reverse().find((l: LogEntry) => l.memory_mb !== null && l.memory_mb !== undefined);
+                        if (latestWithMemory) {
+                            setCurrentMemoryMb(latestWithMemory.memory_mb);
+                        }
+                        // Update perplexity and confidence from trial completion logs
+                        const latestWithPerplexity = [...data.logs].reverse().find((l: LogEntry) => l.perplexity !== null && l.perplexity !== undefined);
+                        if (latestWithPerplexity) {
+                            setCurrentPerplexity(latestWithPerplexity.perplexity);
+                        }
+                        const latestWithConfidence = [...data.logs].reverse().find((l: LogEntry) => l.mean_confidence !== null && l.mean_confidence !== undefined);
+                        if (latestWithConfidence) {
+                            setCurrentConfidence(latestWithConfidence.mean_confidence);
                         }
 
                         scrollToBottom();
@@ -110,6 +136,9 @@ export function TrainingConsole({ sweepId, isRunning, devMode = false }: Trainin
         setLogIndex(0);
         setCurrentLoss(null);
         setCurrentStep(null);
+        setCurrentPerplexity(null);
+        setCurrentConfidence(null);
+        setCurrentMemoryMb(null);
     }, [sweepId]);
 
     // Filter logs - with null safety
@@ -171,9 +200,24 @@ export function TrainingConsole({ sweepId, isRunning, devMode = false }: Trainin
                         Loss: <strong>{formatLoss(currentLoss)}</strong>
                     </span>
                 )}
+                {currentPerplexity !== null && (
+                    <span className="training-console__metric">
+                        PPL: <strong>{currentPerplexity.toFixed(2)}</strong>
+                    </span>
+                )}
+                {currentConfidence !== null && (
+                    <span className="training-console__metric">
+                        Conf: <strong>{(currentConfidence * 100).toFixed(1)}%</strong>
+                    </span>
+                )}
                 {currentStep !== null && (
                     <span className="training-console__metric">
                         Step: <strong>{currentStep}</strong>
+                    </span>
+                )}
+                {currentMemoryMb !== null && (
+                    <span className="training-console__metric">
+                        Mem: <strong>{currentMemoryMb.toFixed(0)}MB</strong>
                     </span>
                 )}
                 {devMode && (
@@ -266,9 +310,24 @@ export function TrainingConsole({ sweepId, isRunning, devMode = false }: Trainin
                                             loss={formatLoss(log.loss)}
                                         </span>
                                     )}
+                                    {log.perplexity !== undefined && log.perplexity !== null && (
+                                        <span className="training-console__perplexity">
+                                            ppl={log.perplexity.toFixed(2)}
+                                        </span>
+                                    )}
+                                    {log.mean_confidence !== undefined && log.mean_confidence !== null && (
+                                        <span className="training-console__confidence">
+                                            conf={( log.mean_confidence * 100).toFixed(1)}%
+                                        </span>
+                                    )}
                                     {log.step !== undefined && log.step !== null && (
                                         <span className="training-console__step">
                                             step={log.step}
+                                        </span>
+                                    )}
+                                    {log.memory_mb !== undefined && log.memory_mb !== null && (
+                                        <span className="training-console__memory">
+                                            mem={log.memory_mb.toFixed(0)}MB
                                         </span>
                                     )}
                                     <span className="training-console__message">

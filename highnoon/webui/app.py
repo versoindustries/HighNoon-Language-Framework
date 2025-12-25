@@ -2679,6 +2679,15 @@ def create_app(debug: bool = False) -> FastAPI:
             "learning_rate": log_entry.get("learning_rate"),
             "epoch": log_entry.get("epoch"),
             "trial_id": log_entry.get("trial_id"),
+            # Memory metrics
+            "memory_mb": log_entry.get("memory_mb"),
+            "peak_memory_mb": log_entry.get("peak_memory_mb"),
+            # Quality metrics (sent on trial completion)
+            "perplexity": log_entry.get("perplexity"),
+            "mean_confidence": log_entry.get("mean_confidence"),
+            "composite_score": log_entry.get("composite_score"),
+            "efficiency_score": log_entry.get("efficiency_score"),
+            "param_count": log_entry.get("param_count"),
         }
         hpo_logs[sweep_id].append(entry)
 

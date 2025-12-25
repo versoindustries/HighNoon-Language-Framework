@@ -378,17 +378,26 @@ def analyze_scaling(results: list[ThroughputResult]) -> dict[str, Any]:
 def run_throughput_benchmark(
     config: BenchmarkConfig | None = None,
     quick: bool = False,
+    trained_model: tf.keras.Model | None = None,
 ) -> dict[str, Any]:
     """Run complete throughput benchmark suite (Production Mode).
 
     Uses full production architecture:
     - Streaming inference (O(1) memory)
     - QSG parallel generation
-    - Training throughput with QMR (O(log n) memory)
+    - Training throughput (only for trained models)
+
+    Note:
+        Training throughput benchmarks are ONLY run when a trained model is provided.
+        For untrained models, training benchmarks are skipped because the benchmark
+        uses different code paths than the actual HPO training loop. Run training
+        benchmarks on actual trained checkpoints via `--checkpoint` flag.
 
     Args:
         config: Benchmark configuration (uses quick/default if None).
         quick: Use quick configuration for validation.
+        trained_model: Optional pre-trained model. If provided, training benchmarks
+            are enabled. If None, only inference benchmarks run.
 
     Returns:
         Dictionary with all throughput results and analysis.
@@ -398,13 +407,25 @@ def run_throughput_benchmark(
 
     harness = BenchmarkHarness(config)
 
+    # Override model if provided
+    if trained_model is not None:
+        harness._model = trained_model
+
+    is_trained = trained_model is not None
+
     logger.info("=" * 60)
     logger.info("HSMN Throughput Benchmark (Production Mode)")
     logger.info(f"Pattern: {config.model.block_pattern}")
     logger.info(f"Model: {config.model.embedding_dim}d, {config.model.num_reasoning_blocks} blocks")
+    logger.info(
+        f"Model Type: {'Trained checkpoint' if is_trained else 'Untrained (inference only)'}"
+    )
     logger.info("Inference: StreamingInferenceWrapper (O(1) memory)")
     logger.info("Generation: QSGGenerator (parallel)")
-    logger.info("Training: Fused ops + QMR (O(log n) memory)")
+    if is_trained:
+        logger.info("Training: Enabled (trained model provided)")
+    else:
+        logger.info("Training: SKIPPED (use --checkpoint for trained model benchmarks)")
     logger.info("=" * 60)
 
     # Run streaming inference throughput (O(1) memory)
@@ -413,8 +434,16 @@ def run_throughput_benchmark(
     # Run QSG generation benchmarks
     qsg_results = run_qsg_generation_throughput(harness)
 
-    # Run training throughput with QMR
-    training_results = run_training_throughput(harness)
+    # Run training throughput ONLY for trained models
+    # Untrained benchmarks skip this because the benchmark uses different code paths
+    # than the actual HPO training loop (GradientTape vs NativeOpsBridge)
+    training_results: list[ThroughputResult] = []
+    if is_trained:
+        training_results = run_training_throughput(harness)
+    else:
+        logger.info(
+            "Skipping training throughput (untrained model - use trained checkpoint for training benchmarks)"
+        )
 
     # Analyze scaling
     scaling_analysis = analyze_scaling(streaming_results)
@@ -600,6 +629,14 @@ def main() -> int:
         "--output-dir", type=Path, default=Path("benchmarks/reports"), help="Output directory"
     )
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
+    parser.add_argument(
+        "--checkpoint",
+        type=Path,
+        default=None,
+        help="Path to trained model checkpoint. If provided, training benchmarks are enabled. "
+        "Training benchmarks are SKIPPED for untrained models since they use different code "
+        "paths than the actual HPO training loop.",
+    )
 
     args = parser.parse_args()
 
@@ -616,8 +653,21 @@ def main() -> int:
     else:
         config = BenchmarkConfig()
 
+    # Load trained model if checkpoint provided
+    trained_model = None
+    if args.checkpoint is not None:
+        if not args.checkpoint.exists():
+            print(f"Error: Checkpoint not found: {args.checkpoint}")
+            return 1
+        try:
+            trained_model = tf.keras.models.load_model(args.checkpoint)
+            print(f"Loaded trained model from: {args.checkpoint}")
+        except Exception as e:
+            print(f"Error loading checkpoint: {e}")
+            return 1
+
     # Run benchmark
-    results = run_throughput_benchmark(config=config)
+    results = run_throughput_benchmark(config=config, trained_model=trained_model)
 
     # Output
     args.output_dir.mkdir(parents=True, exist_ok=True)

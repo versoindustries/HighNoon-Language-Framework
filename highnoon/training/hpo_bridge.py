@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import threading
 from pathlib import Path
@@ -83,6 +84,33 @@ class HPOReporter:
         """Whether the reporter is enabled."""
         return self._enabled
 
+    def _sanitize_float(self, value: float | None, name: str = "metric") -> float | None:
+        """Sanitize float values, converting NaN/Inf to None and logging warnings.
+
+        NaN or Inf values in training metrics indicate numerical issues that
+        should be investigated (e.g., gradient explosion, division by zero).
+        This method logs a warning and returns None to prevent JSON serialization
+        errors while flagging the underlying training problem.
+
+        Args:
+            value: Float value to sanitize
+            name: Name of the metric for logging
+
+        Returns:
+            The original value if valid, or None if NaN/Inf
+        """
+        if value is None:
+            return None
+        if not isinstance(value, (int, float)):
+            return value
+        if math.isnan(value) or math.isinf(value):
+            logger.warning(
+                f"[HPO Reporter] {name}={value} is not finite - "
+                "possible gradient explosion or numerical instability"
+            )
+            return None
+        return float(value)
+
     def _send_to_api(self, log_entry: dict[str, Any]) -> None:
         """Send a log entry to the WebUI backend API.
 
@@ -142,11 +170,29 @@ class HPOReporter:
         if not self._enabled:
             return
 
-        metrics = {
+        # Sanitize all float values to prevent NaN/Inf from causing JSON errors
+        # This also logs warnings to flag numerical instability in training
+        loss = self._sanitize_float(loss, "loss")
+        gradient_norm = self._sanitize_float(gradient_norm, "gradient_norm")
+        learning_rate = self._sanitize_float(learning_rate, "learning_rate")
+        memory_mb = self._sanitize_float(memory_mb, "memory_mb")
+        peak_memory_mb = self._sanitize_float(peak_memory_mb, "peak_memory_mb")
+
+        # Sanitize any additional kwargs that might contain floats
+        sanitized_kwargs = {}
+        for key, value in kwargs.items():
+            if isinstance(value, float):
+                sanitized_kwargs[key] = self._sanitize_float(value, key)
+            else:
+                sanitized_kwargs[key] = value
+
+        metrics: dict[str, Any] = {
             "step": step,
-            "loss": loss,
         }
 
+        # Only include loss if it's valid (not NaN/Inf)
+        if loss is not None:
+            metrics["loss"] = loss
         if gradient_norm is not None:
             metrics["gradient_norm"] = gradient_norm
         if learning_rate is not None:
@@ -158,7 +204,7 @@ class HPOReporter:
         if peak_memory_mb is not None:
             metrics["peak_memory_mb"] = peak_memory_mb
 
-        metrics.update(kwargs)
+        metrics.update(sanitized_kwargs)
 
         # Append to JSONL file
         if self._metrics_file:
@@ -166,9 +212,10 @@ class HPOReporter:
                 f.write(json.dumps(metrics) + "\n")
 
         # Send to WebUI API for real-time display
+        loss_str = f"{loss:.6f}" if loss is not None else "NaN"
         log_entry = {
-            "level": "INFO",
-            "message": f"Step {step}: loss={loss:.6f}",
+            "level": "WARNING" if loss is None else "INFO",
+            "message": f"Step {step}: loss={loss_str}",
             "step": step,
             "loss": loss,
             "gradient_norm": gradient_norm,
@@ -182,7 +229,7 @@ class HPOReporter:
         # Log progress locally
         if step % 50 == 0:
             mem_str = f", mem={memory_mb:.0f}MB" if memory_mb else ""
-            logger.info(f"[HPO Reporter] Step {step}: loss={loss:.6f}{mem_str}")
+            logger.info(f"[HPO Reporter] Step {step}: loss={loss_str}{mem_str}")
 
     def log(
         self,
@@ -244,6 +291,16 @@ class HPOReporter:
         if not self._enabled:
             return
 
+        # Sanitize all float metrics to prevent NaN/Inf from causing JSON errors
+        final_loss = self._sanitize_float(final_loss, "final_loss")
+        efficiency_score = self._sanitize_float(efficiency_score, "efficiency_score")
+        perplexity = self._sanitize_float(perplexity, "perplexity")
+        mean_confidence = self._sanitize_float(mean_confidence, "mean_confidence")
+        expected_calibration_error = self._sanitize_float(
+            expected_calibration_error, "expected_calibration_error"
+        )
+        composite_score = self._sanitize_float(composite_score, "composite_score")
+
         # Write status file if we have a trial directory
         if self._trial_dir:
             status = {
@@ -269,9 +326,10 @@ class HPOReporter:
             comp_str = f", composite={composite_score:.6f}" if composite_score else ""
             ppl_str = f", ppl={perplexity:.2f}" if perplexity else ""
             params_str = f" ({param_count / 1e6:.1f}M params)" if param_count else ""
+            loss_str = f"loss={final_loss:.6f}" if final_loss else "loss=NaN"
             self.log(
                 (
-                    f"Trial completed with loss={final_loss:.6f}{eff_str}{comp_str}{ppl_str}{params_str}"
+                    f"Trial completed with {loss_str}{eff_str}{comp_str}{ppl_str}{params_str}"
                     if final_loss
                     else "Trial completed"
                 ),

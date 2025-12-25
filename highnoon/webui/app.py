@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import sys
 import uuid
 from datetime import datetime
@@ -2525,8 +2526,21 @@ def create_app(debug: bool = False) -> FastAPI:
         # Return logs starting from since_index
         result_logs = logs[since_index : since_index + limit]
 
+        # Sanitize float values to ensure JSON compliance (NaN/Inf -> None)
+        def sanitize_value(val: Any) -> Any:
+            """Convert NaN/Inf floats to None for JSON serialization."""
+            if isinstance(val, float) and (math.isnan(val) or math.isinf(val)):
+                return None
+            elif isinstance(val, dict):
+                return {k: sanitize_value(v) for k, v in val.items()}
+            elif isinstance(val, list):
+                return [sanitize_value(item) for item in val]
+            return val
+
+        sanitized_logs = [sanitize_value(log) for log in result_logs]
+
         return {
-            "logs": result_logs,
+            "logs": sanitized_logs,
             "total": len(logs),
             "next_index": min(since_index + limit, len(logs)),
         }

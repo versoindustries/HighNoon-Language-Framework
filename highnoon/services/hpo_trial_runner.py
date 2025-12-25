@@ -10,6 +10,7 @@ Includes RSS memory tracking via psutil for trial resource monitoring.
 import argparse
 import json
 import logging
+import math
 import os
 import sys
 from typing import Any
@@ -1035,6 +1036,14 @@ def train_trial(
     min_delta = trial_config.get("early_stopping_min_delta", 0.001)
     global_step = 0
 
+    # Gradient clipping to prevent explosion (configurable, default 1.0)
+    max_grad_norm = trial_config.get("max_grad_norm", 1.0)
+    logger.info(f"[HPO] Gradient clipping enabled: max_norm={max_grad_norm}")
+
+    # NaN tracking for early termination
+    nan_count = 0
+    max_nan_consecutive = trial_config.get("max_nan_consecutive", 5)
+
     for epoch in range(epochs):
         epoch_losses = []
         dataset_iter = iter(train_dataset)
@@ -1053,12 +1062,88 @@ def train_trial(
                     )
                     loss = tf.reduce_mean(loss)
 
-                # Compute gradients and update
-                gradients = tape.gradient(loss, model.trainable_variables)
-                gradient_norm = tf.linalg.global_norm(gradients)
-                optimizer.apply_gradients(zip(gradients, model.trainable_variables))
-
+                # =====================================================
+                # NaN Detection: Check loss for NaN/Inf BEFORE gradients
+                # =====================================================
                 current_loss = float(loss.numpy())
+                if math.isnan(current_loss) or math.isinf(current_loss):
+                    nan_count += 1
+                    logger.warning(
+                        f"[HPO] NaN/Inf loss detected at step {global_step} "
+                        f"(epoch {epoch}, batch {step}). Count: {nan_count}/{max_nan_consecutive}"
+                    )
+
+                    # Early termination if too many consecutive NaN
+                    if nan_count >= max_nan_consecutive:
+                        error_msg = (
+                            f"Training diverged: {nan_count} consecutive NaN/Inf losses. "
+                            "Possible causes: learning rate too high, numerical instability "
+                            "in model ops, or corrupt input data."
+                        )
+                        logger.error(f"[HPO] {error_msg}")
+                        tf.keras.backend.clear_session()
+                        memory_manager.cleanup()
+                        hpo_reporter.complete(success=False, error=error_msg)
+                        return float("inf")
+
+                    # Skip this batch and try to recover
+                    global_step += 1
+                    continue
+
+                # Reset NaN counter on valid loss
+                nan_count = 0
+
+                # Compute gradients
+                gradients = tape.gradient(loss, model.trainable_variables)
+
+                # =====================================================
+                # Gradient Validation: Check for None and NaN gradients
+                # =====================================================
+                # Filter out None gradients (non-trainable layers)
+                valid_grads_and_vars = [
+                    (g, v) for g, v in zip(gradients, model.trainable_variables) if g is not None
+                ]
+
+                if not valid_grads_and_vars:
+                    logger.warning(f"[HPO] No valid gradients at step {global_step}")
+                    global_step += 1
+                    continue
+
+                gradients_only = [g for g, _ in valid_grads_and_vars]
+                vars_only = [v for _, v in valid_grads_and_vars]
+
+                # Check for NaN in gradients
+                has_nan_grad = any(tf.reduce_any(tf.math.is_nan(g)) for g in gradients_only)
+                if has_nan_grad:
+                    nan_count += 1
+                    logger.warning(
+                        f"[HPO] NaN gradient detected at step {global_step}. "
+                        f"Count: {nan_count}/{max_nan_consecutive}"
+                    )
+                    if nan_count >= max_nan_consecutive:
+                        error_msg = (
+                            f"Gradient explosion: {nan_count} consecutive NaN gradients. "
+                            "Try reducing learning rate or enabling gradient clipping."
+                        )
+                        logger.error(f"[HPO] {error_msg}")
+                        tf.keras.backend.clear_session()
+                        memory_manager.cleanup()
+                        hpo_reporter.complete(success=False, error=error_msg)
+                        return float("inf")
+                    global_step += 1
+                    continue
+
+                # =====================================================
+                # Gradient Clipping: Prevent explosion
+                # =====================================================
+                gradient_norm = tf.linalg.global_norm(gradients_only)
+                clipped_gradients, _ = tf.clip_by_global_norm(
+                    gradients_only, max_grad_norm, use_norm=gradient_norm
+                )
+
+                # Apply clipped gradients
+                optimizer.apply_gradients(zip(clipped_gradients, vars_only))
+
                 epoch_losses.append(current_loss)
 
                 # Check for critical memory situation (swap spike or sustained high memory)

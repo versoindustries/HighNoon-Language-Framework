@@ -544,7 +544,16 @@ class NativeOpsBridge:
 
         # Python training step (always works)
         with tf.GradientTape() as tape:
-            logits = model(inputs, training=True)
+            output = model(inputs, training=True)
+            # Handle dict model output (HSMN returns {'logits': tensor})
+            if isinstance(output, dict):
+                logits = output.get("logits", output.get("output", None))
+                if logits is None:
+                    raise ValueError(
+                        f"Model returned dict without 'logits' or 'output' key: {output.keys()}"
+                    )
+            else:
+                logits = output
             loss = tf.reduce_mean(
                 tf.nn.sparse_softmax_cross_entropy_with_logits(labels=targets, logits=logits)
             )

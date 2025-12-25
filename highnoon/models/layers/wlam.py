@@ -1,4 +1,4 @@
-# src/models/layers/wlam.py
+# highnoon/models/layers/wlam.py
 # Copyright 2025 Verso Industries (Author: Michael B. Zimmerman)
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -21,6 +21,9 @@ Enhanced features (per WLAM roadmap):
 - Frequency-adaptive processing gating
 - Wavelet scattering transform for translation-invariant features
 - Cross-frequency linear attention between frequency bands
+
+NOTE: All computation is delegated to the C++ fused_wlam kernel.
+Python layers exist only to provide trainable weights.
 """
 
 from typing import Any
@@ -28,14 +31,7 @@ from typing import Any
 import tensorflow as tf
 from tensorflow.keras import layers
 
-from highnoon import config
-
-# Try importing FlashLinearAttention (requires C++ kernel)
-# Strict C++ compliance: FlashLinearAttention is mandatory
-from highnoon.models.layers.flash_linear_attention import FlashLinearAttention
 from highnoon.models.reasoning.fused_contract import FusedReasoningBlockMixin
-
-_flash_linear_available = True
 
 
 class WLAMBlock(FusedReasoningBlockMixin, layers.Layer):
@@ -50,7 +46,9 @@ class WLAMBlock(FusedReasoningBlockMixin, layers.Layer):
     - Wavelet scattering for translation-invariant features
     - Cross-frequency attention between bands
 
-    NOTE: Uses Conv1D layers - does not contain TT layers currently.
+    NOTE: All computation is handled by the C++ FusedWLAM kernel.
+    Python layers (Conv1D, Dense) exist only to provide trainable kernels.
+    Biases are disabled since the C++ op only uses kernel weights.
     """
 
     fused_block_type = "WLAMBlock"
@@ -77,7 +75,7 @@ class WLAMBlock(FusedReasoningBlockMixin, layers.Layer):
             num_heads: Number of attention heads for low-freq processing.
             wavelet_kernel_size: Size of wavelet filter kernels.
             num_levels: Number of DWT decomposition levels (1-5).
-            use_lifting: Use lifting scheme DWT (C++ fused op only, ~same perf as Conv1D).
+            use_lifting: Use lifting scheme DWT (C++ fused op only).
             use_adaptive: Enable frequency-adaptive processing gating.
             scattering_layers: Number of scattering layers (0=disabled).
             scattering_pool: Scattering average pooling size.
@@ -96,103 +94,95 @@ class WLAMBlock(FusedReasoningBlockMixin, layers.Layer):
         self.scattering_pool = scattering_pool
         self.use_cross_attn = use_cross_attn
 
-        # 1. Decomposition (Learnable DWT)
-        # Low-pass and high-pass filters for analysis
+        # ===== Weight-Only Layers (use_bias=False) =====
+        # The C++ fused_wlam op only uses kernel weights, not biases.
+        # These layers exist solely to provide trainable kernels.
+
+        # 1. DWT Analysis Filters (low-pass and high-pass)
         self.h_filter = layers.Conv1D(
-            embedding_dim, wavelet_kernel_size, padding="same", name="dwt_h_filter"
+            embedding_dim,
+            wavelet_kernel_size,
+            padding="same",
+            use_bias=False,
+            name="dwt_h_filter",
         )
         self.g_filter = layers.Conv1D(
-            embedding_dim, wavelet_kernel_size, padding="same", name="dwt_g_filter"
+            embedding_dim,
+            wavelet_kernel_size,
+            padding="same",
+            use_bias=False,
+            name="dwt_g_filter",
         )
 
-        # 2. Frequency-Specific Processing
-        # Linear attention for low-frequency (approximation) components
-        # Use FlashLinearAttention (C++ backed) when available for 5-8x speedup
-        # Strict C++ compliance: Enforce FlashLinearAttention
-        if not (config.WLAM_USE_FLASH_LINEAR and _flash_linear_available):
-            raise RuntimeError("WLAMBlock requires FlashLinearAttention (C++) in strict mode.")
-
-        self.use_flash_linear = True
-        self.low_freq_processor = FlashLinearAttention(
-            embedding_dim=embedding_dim,
-            num_heads=self.num_heads,
-            feature_map="elu",
-            use_gating=config.FLASH_LINEAR_USE_GATING,
-            use_forget_gate=config.FLASH_LINEAR_USE_FORGET_GATE,
-            use_rala=config.FLASH_LINEAR_USE_RALA,
-        )
-
-        # Depthwise convolution for high-frequency (detail) components
-        self.high_freq_processor = layers.DepthwiseConv1D(
-            kernel_size=3, padding="same", name="high_freq_conv"
-        )
-
-        # 3. Reconstruction (Learnable IWT)
-        # Low-pass and high-pass filters for synthesis
+        # 2. IWT Synthesis Filters (low-pass and high-pass)
         self.h_synth_filter = layers.Conv1D(
-            embedding_dim, wavelet_kernel_size, padding="same", name="iwt_h_filter"
+            embedding_dim,
+            wavelet_kernel_size,
+            padding="same",
+            use_bias=False,
+            name="iwt_h_filter",
         )
         self.g_synth_filter = layers.Conv1D(
-            embedding_dim, wavelet_kernel_size, padding="same", name="iwt_g_filter"
+            embedding_dim,
+            wavelet_kernel_size,
+            padding="same",
+            use_bias=False,
+            name="iwt_g_filter",
         )
-        self.upsample = layers.UpSampling1D(size=2)
 
-        # Normalization
+        # 3. LayerNorm (gamma/beta used by C++)
         self.norm = layers.LayerNormalization(epsilon=1e-5)
 
-        # Scattering filter (if enabled)
+        # 4. Scattering filter (optional, if enabled)
         if self.scattering_layers > 0:
             self.scatter_filter = layers.Conv1D(
-                embedding_dim, wavelet_kernel_size, padding="same", name="scatter_filter"
+                embedding_dim,
+                wavelet_kernel_size,
+                padding="same",
+                use_bias=False,
+                name="scatter_filter",
             )
             self.scatter_weight = self.add_weight(
                 name="scatter_weight", shape=(1,), initializer="zeros", trainable=True
             )
 
-        # 6. Cross-frequency attention (if enabled)
+        # 5. Cross-frequency attention (optional, if enabled)
         if self.use_cross_attn:
-            self.cross_attn_q = layers.Dense(embedding_dim, name="cross_attn_q")
-            self.cross_attn_k = layers.Dense(embedding_dim, name="cross_attn_k")
-            self.cross_attn_v = layers.Dense(embedding_dim, name="cross_attn_v")
-            self.cross_attn_o = layers.Dense(embedding_dim, name="cross_attn_o")
+            self.cross_attn_q = layers.Dense(embedding_dim, use_bias=False, name="cross_attn_q")
+            self.cross_attn_k = layers.Dense(embedding_dim, use_bias=False, name="cross_attn_k")
+            self.cross_attn_v = layers.Dense(embedding_dim, use_bias=False, name="cross_attn_v")
+            self.cross_attn_o = layers.Dense(embedding_dim, use_bias=False, name="cross_attn_o")
 
     def build(self, input_shape):
-        """Explicitly builds the weights for the sub-layers."""
-        # Conv1D layers for decomposition
+        """Explicitly builds the weights for the sub-layers.
+
+        All layers use use_bias=False since the C++ fused_wlam op
+        only requires kernel weights, not biases.
+        """
+        # Conv1D layers for DWT analysis
         if not self.h_filter.built:
             self.h_filter.build(input_shape)
         if not self.g_filter.built:
             self.g_filter.build(input_shape)
 
-        # Calculate the shape after downsampling
-        seq_len = input_shape[1]
-        downsampled_seq_len = (seq_len + 1) // 2 if seq_len is not None else None
-        downsampled_shape = tf.TensorShape([input_shape[0], downsampled_seq_len, input_shape[2]])
-
-        # Build frequency-specific processors
-        if not self.low_freq_processor.built:
-            self.low_freq_processor.build(downsampled_shape)
-        if not self.high_freq_processor.built:
-            self.high_freq_processor.build(downsampled_shape)
-
-        upsampled_shape = tf.TensorShape([input_shape[0], None, input_shape[2]])
-
-        # Conv1D layers for reconstruction
+        # Conv1D layers for IWT synthesis
+        synth_shape = tf.TensorShape([input_shape[0], None, input_shape[2]])
         if not self.h_synth_filter.built:
-            self.h_synth_filter.build(upsampled_shape)
+            self.h_synth_filter.build(synth_shape)
         if not self.g_synth_filter.built:
-            self.g_synth_filter.build(upsampled_shape)
+            self.g_synth_filter.build(synth_shape)
 
         # Normalization layer
         if not self.norm.built:
             self.norm.build(input_shape)
 
-        # Build enhanced feature layers
+        # Build enhanced feature layers (optional)
         if self.scattering_layers > 0:
             if not self.scatter_filter.built:
                 self.scatter_filter.build(input_shape)
 
         if self.use_cross_attn:
+            # Cross-attention uses input embedding dim
             for attn_layer in [
                 self.cross_attn_q,
                 self.cross_attn_k,
@@ -200,7 +190,7 @@ class WLAMBlock(FusedReasoningBlockMixin, layers.Layer):
                 self.cross_attn_o,
             ]:
                 if not attn_layer.built:
-                    attn_layer.build(downsampled_shape)
+                    attn_layer.build(input_shape)
 
         super().build(input_shape)
 

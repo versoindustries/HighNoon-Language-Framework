@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
-import sys
 import uuid
 from datetime import datetime
 from enum import Enum
@@ -18,9 +18,11 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
 
 # ============================================================================
 # Pydantic Models for API
@@ -1698,6 +1700,12 @@ def create_app(debug: bool = False) -> FastAPI:
     hpo_sweeps: dict[str, dict[str, Any]] = {}
     active_websockets: dict[str, list[WebSocket]] = {}
 
+    # Store active SweepExecutor instances for multi-trial orchestration
+    from highnoon.services.scheduler_factory import create_scheduler
+    from highnoon.services.sweep_executor import SweepConfig, SweepExecutor
+
+    active_sweeps: dict[str, SweepExecutor] = {}
+
     @app.get("/api/training/presets")
     async def get_training_presets():
         """Get pre-validated training presets with RAM/VRAM estimates."""
@@ -2079,9 +2087,11 @@ def create_app(debug: bool = False) -> FastAPI:
 
     @app.post("/api/hpo/sweep/start")
     async def start_hpo_sweep(payload: StartHPORequest):
-        """Start a new HPO sweep with full model configuration.
+        """Start a new HPO sweep with full multi-trial orchestration.
 
-        This writes the complete config to disk for the C++ HPO orchestrator.
+        This is the FIXED implementation that runs ALL requested trials,
+        not just a single trial. Uses SweepExecutor for enterprise-grade
+        orchestration with retry logic, checkpointing, and scheduler integration.
         """
         sweep_id = str(uuid.uuid4())[:8]
 
@@ -2143,26 +2153,23 @@ def create_app(debug: bool = False) -> FastAPI:
         if hf_dataset_name:
             print(f"[HPO] Using curriculum dataset: {hf_dataset_name}")
 
-        # Include sweep_id in the trial config for logging
-        # Full HSMN configuration with all trainable parameters
-        trial_config = {
+        # Parse learning rate
+        try:
+            lr_value = float(payload.lr_max) if payload.lr_max else 1e-4
+        except (ValueError, TypeError):
+            lr_value = 1e-4
+
+        # Build model config for executor
+        model_config = {
             "sweep_id": sweep_id,
             # Core architecture
             "vocab_size": payload.vocab_size,
             "hidden_dim": payload.embedding_dim or 512,
             "num_reasoning_blocks": payload.num_reasoning_blocks or 8,
             "num_moe_experts": payload.num_moe_experts or 8,
-            "sequence_length": min(payload.context_window or 512, 512),  # Limit for HPO
+            "sequence_length": min(payload.context_window or 512, 512),
             "batch_size": payload.batch_sizes[0] if payload.batch_sizes else 8,
-            "learning_rate": (
-                float(
-                    payload.lr_max.replace("e", "e-")
-                    if "e-" not in payload.lr_max
-                    else payload.lr_max
-                )
-                if isinstance(payload.lr_max, str)
-                else payload.lr_max
-            ),
+            "learning_rate": lr_value,
             "optimizer": payload.optimizers[0] if payload.optimizers else "sophiag",
             "param_budget": payload.param_budget,
             # Mamba2 SSM parameters
@@ -2185,13 +2192,11 @@ def create_app(debug: bool = False) -> FastAPI:
             # Regularization
             "dropout_rate": payload.dropout_rate,
             "weight_decay": payload.weight_decay,
-            # Dataset configuration from curriculum
+            # Dataset configuration
             "hf_dataset_name": hf_dataset_name,
             "curriculum_id": payload.curriculum_id,
             "curriculum_datasets": curriculum_datasets,
-            # =========================================================================
-            # Quantum Enhancement Parameters (Phases 26-36)
-            # =========================================================================
+            # Quantum Enhancement Parameters
             "use_quantum_embedding": payload.use_quantum_embedding,
             "use_floquet_position": payload.use_floquet_position,
             "use_quantum_feature_maps": payload.use_quantum_feature_maps,
@@ -2205,101 +2210,11 @@ def create_app(debug: bool = False) -> FastAPI:
             "use_unitary_residual": payload.use_unitary_residual,
             "unitary_residual_init_angle": payload.unitary_residual_init_angle,
             "use_quantum_state_bus": payload.use_quantum_state_bus,
-            # =========================================================================
-            # Quantum Training Loop (Phases T1-T6)
-            # =========================================================================
-            "use_quantum_natural_gradient": payload.use_quantum_natural_gradient,
-            "qng_damping": payload.qng_damping,
-            "use_tensor_galore": payload.use_tensor_galore,
-            "galore_rank": payload.galore_rank,
-            "barren_plateau_monitor": payload.barren_plateau_monitor,
-            "barren_plateau_threshold": payload.barren_plateau_threshold,
-            # =========================================================================
-            # Quantum Constant-Memory Training (Phases 1-7)
-            # =========================================================================
-            "use_unitary_mamba_gates": payload.use_unitary_mamba_gates,
-            "neumann_series_terms": payload.neumann_series_terms,
-            "use_sprk_timecrystal": payload.use_sprk_timecrystal,
-            "sprk_order": payload.sprk_order,
-            "use_qng_geodesic": payload.use_qng_geodesic,
-            "qng_geodesic_order": payload.qng_geodesic_order,
-            "entanglement_regularization": payload.entanglement_regularization,
-            # =========================================================================
-            # Phase 17 Hamiltonian Enhancements
-            # =========================================================================
-            "hamiltonian_basis_size": payload.hamiltonian_basis_size,
-            "hamiltonian_enable_superposition": payload.hamiltonian_enable_superposition,
-            "hamiltonian_integrator": payload.hamiltonian_integrator,
-            "hamiltonian_enable_nqs": payload.hamiltonian_enable_nqs,
-            "hamiltonian_nqs_hidden_dim": payload.hamiltonian_nqs_hidden_dim,
-            # =========================================================================
-            # QSG Parameters
-            # =========================================================================
-            "qsg_bond_dim": payload.qsg_bond_dim,
-            "qsg_grover_iterations": payload.qsg_grover_iterations,
-            "qsg_jacobi_iterations": payload.qsg_jacobi_iterations,
-            "qsg_hopfield_beta": payload.qsg_hopfield_beta,
-            # =========================================================================
-            # Quantum Control (Phase 2.1)
-            # =========================================================================
-            "use_rls_sysid": payload.use_rls_sysid,
-            "rls_forgetting_factor": payload.rls_forgetting_factor,
-            "use_hybrid_pid": payload.use_hybrid_pid,
-            "pid_learning_rate": payload.pid_learning_rate,
-            "use_tensor_network_kalman": payload.use_tensor_network_kalman,
-            "tnkf_max_rank": payload.tnkf_max_rank,
-            # =========================================================================
-            # QHPM Anti-Forgetting
-            # =========================================================================
-            "use_qhpm_crystallization": payload.use_qhpm_crystallization,
-            "qhpm_crystallization_threshold": payload.qhpm_crystallization_threshold,
-            "qhpm_max_directions": payload.qhpm_max_directions,
-            "qhpm_crystallization_decay": payload.qhpm_crystallization_decay,
-            # =========================================================================
-            # Phases 47-84: Quantum Enhancement v5.0
-            # =========================================================================
-            # Pillar 1: Foundation
-            "use_quantum_measurement_dropout": payload.use_quantum_measurement_dropout,
-            "qmd_drop_rate": payload.qmd_drop_rate,
-            "use_q_ssm_gating": payload.use_q_ssm_gating,
-            "use_intrinsic_plasticity": payload.use_intrinsic_plasticity,
-            "use_quantum_coherence_bus": payload.use_quantum_coherence_bus,
-            "qcb_num_nodes": payload.qcb_num_nodes,
-            # Pillar 2: I/O Enhancement
-            "use_hyperdimensional_embedding": payload.use_hyperdimensional_embedding,
-            "use_hypertokens": payload.use_hypertokens,
-            "use_majorana_position": payload.use_majorana_position,
-            "use_born_rule_loss": payload.use_born_rule_loss,
-            "use_quantum_fidelity_loss": payload.use_quantum_fidelity_loss,
-            # Pillar 3: Topological Reasoning
-            "use_qasa_attention": payload.use_qasa_attention,
-            "use_mpqr_reasoning": payload.use_mpqr_reasoning,
-            "mpqr_num_paths": payload.mpqr_num_paths,
-            "use_topological_wavelet": payload.use_topological_wavelet,
-            "use_td_moe": payload.use_td_moe,
-            "td_moe_tucker_rank": payload.td_moe_tucker_rank,
-            "use_symplectic_gnn_kalman": payload.use_symplectic_gnn_kalman,
-            # Pillar 4: Training & Optimization
-            "use_adiabatic_optimizer": payload.use_adiabatic_optimizer,
-            "use_geodesic_optimizer": payload.use_geodesic_optimizer,
-            "use_alphaqubit_decoder": payload.use_alphaqubit_decoder,
-            "use_vqem": payload.use_vqem,
-            "use_gradient_teleportation": payload.use_gradient_teleportation,
-            # Pillar 5: Memory & Continual Learning
-            "use_quantum_crystallization": payload.use_quantum_crystallization,
-            "use_neuromorphic_memory": payload.use_neuromorphic_memory,
-            # Pillar 6: Coherence Mesh
-            "use_multi_stage_hamiltonian": payload.use_multi_stage_hamiltonian,
-            "use_random_natural_gradient": payload.use_random_natural_gradient,
-            "rng_num_samples": payload.rng_num_samples,
-            # Pillar 7: Advanced QI
-            "use_spini_integrator": payload.use_spini_integrator,
-            "use_qcot_reasoning": payload.use_qcot_reasoning,
-            "qcot_reasoning_steps": payload.qcot_reasoning_steps,
-            "use_waveform_attention": payload.use_waveform_attention,
         }
+
+        # Save config for reference
         with open(config_file, "w") as f:
-            json.dump(trial_config, f, indent=2)
+            json.dump(model_config, f, indent=2)
 
         # Add initial log entry
         hpo_logs[sweep_id] = [
@@ -2312,112 +2227,86 @@ def create_app(debug: bool = False) -> FastAPI:
             }
         ]
 
-        # Spawn trial runner as a background process
-        trial_runner_module = "highnoon.services.hpo_trial_runner"
-        trial_id = f"{sweep_id}_trial_0"
+        # Create SweepConfig for executor
+        sweep_config = SweepConfig(
+            max_trials=payload.max_trials,
+            max_parallel=1,  # Sequential execution for now
+            epochs_per_trial=payload.epochs_per_trial or 3,
+            steps_per_epoch=50,
+            search_strategy=payload.search_strategy or "random",
+            use_optuna=payload.use_optuna,
+            hyperband_eta=payload.hyperband_eta or 3,
+            param_budget=payload.param_budget or 1_000_000_000,
+            sweep_id=sweep_id,
+            model_config=model_config,
+        )
 
-        async def run_trial_async():
-            """Run trial in background and stream logs."""
+        # Create scheduler based on strategy
+        scheduler = create_scheduler(
+            strategy=payload.search_strategy or "random",
+            config=sweep_config,
+        )
+
+        # Create log callback to update hpo_logs
+        def log_callback(entry: dict[str, Any]) -> None:
+            if sweep_id in hpo_logs:
+                hpo_logs[sweep_id].append(entry)
+                # Keep log buffer bounded
+                if len(hpo_logs[sweep_id]) > 1000:
+                    hpo_logs[sweep_id] = hpo_logs[sweep_id][-1000:]
+
+        # Create SweepExecutor (THE FIX - this runs ALL trials!)
+        executor = SweepExecutor(
+            sweep_id=sweep_id,
+            config=sweep_config,
+            scheduler=scheduler,
+            max_parallel=1,
+            storage_path=str(config_dir / sweep_id),
+            log_callback=log_callback,
+        )
+
+        # Store executor for status queries
+        active_sweeps[sweep_id] = executor
+
+        # Background task to run the full sweep
+        async def run_sweep_background():
+            """Run complete HPO sweep with all trials."""
             try:
-                # Log trial start
+                result = await executor.run()
+
+                # Update sweep state
+                sweep["state"] = result.state
+                sweep["completed_trials"] = len(result.completed_trials)
+                sweep["best_trial_id"] = result.best_trial_id
+                sweep["best_loss"] = result.best_loss
+                sweep["best_hyperparams"] = result.best_hyperparams
+                sweep["trials"] = [t.to_dict() for t in result.completed_trials]
+
                 hpo_logs[sweep_id].append(
                     {
                         "timestamp": datetime.now().isoformat(),
                         "level": "INFO",
-                        "message": f"Spawning trial {trial_id}...",
-                        "trial_id": trial_id,
+                        "message": f"HPO sweep completed: {len(result.completed_trials)} trials, "
+                        f"best loss: {result.best_loss:.6f if result.best_loss else 'N/A'}",
                     }
                 )
 
-                # Set environment for trial runner
-                env = {
-                    **dict(__import__("os").environ.items()),
-                    "HPO_SWEEP_ID": sweep_id,
-                    "HPO_TRIAL_ID": trial_id,
-                    "HPO_API_HOST": "127.0.0.1:8000",
-                }
-
-                # Run the trial
-                process = await asyncio.create_subprocess_exec(
-                    sys.executable,
-                    "-m",
-                    trial_runner_module,
-                    "--trial_id",
-                    trial_id,
-                    "--config",
-                    str(config_file),
-                    "--epochs",
-                    "3",
-                    "--steps_per_epoch",
-                    "50",
-                    env=env,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    cwd=str(PROJECT_ROOT),
-                )
-
-                # Stream output to logs
-                async def stream_output(stream, level):
-                    while True:
-                        line = await stream.readline()
-                        if not line:
-                            break
-                        decoded = line.decode().strip()
-                        if decoded:
-                            hpo_logs[sweep_id].append(
-                                {
-                                    "timestamp": datetime.now().isoformat(),
-                                    "level": level,
-                                    "message": decoded,
-                                    "trial_id": trial_id,
-                                }
-                            )
-                            # Keep log buffer bounded
-                            if len(hpo_logs[sweep_id]) > 1000:
-                                hpo_logs[sweep_id] = hpo_logs[sweep_id][-1000:]
-
-                # Stream both stdout and stderr
-                await asyncio.gather(
-                    stream_output(process.stdout, "INFO"),
-                    stream_output(process.stderr, "WARNING"),
-                )
-
-                await process.wait()
-
-                # Update sweep state
-                sweep["completed_trials"] = 1
-                if process.returncode == 0:
-                    hpo_logs[sweep_id].append(
-                        {
-                            "timestamp": datetime.now().isoformat(),
-                            "level": "INFO",
-                            "message": f"Trial {trial_id} completed successfully",
-                            "trial_id": trial_id,
-                        }
-                    )
-                else:
-                    hpo_logs[sweep_id].append(
-                        {
-                            "timestamp": datetime.now().isoformat(),
-                            "level": "ERROR",
-                            "message": f"Trial {trial_id} failed with exit code {process.returncode}",
-                            "trial_id": trial_id,
-                        }
-                    )
-                    sweep["state"] = "failed"
-
             except Exception as e:
+                sweep["state"] = "failed"
                 hpo_logs[sweep_id].append(
                     {
                         "timestamp": datetime.now().isoformat(),
                         "level": "ERROR",
-                        "message": f"Trial runner error: {str(e)}",
+                        "message": f"Sweep failed: {str(e)}",
                     }
                 )
-                sweep["state"] = "failed"
 
-        # Start the trial in background (don't await)
-        asyncio.create_task(run_trial_async())
+            finally:
+                # Cleanup executor
+                active_sweeps.pop(sweep_id, None)
+
+        # Start the sweep in background (don't await)
+        asyncio.create_task(run_sweep_background())
 
         return {
             "status": "started",
@@ -2429,18 +2318,30 @@ def create_app(debug: bool = False) -> FastAPI:
 
     @app.get("/api/hpo/sweep/{sweep_id}/status")
     async def get_hpo_sweep_status(sweep_id: str):
-        """Get HPO sweep status."""
+        """Get HPO sweep status with real-time progress from executor."""
         sweep = hpo_sweeps.get(sweep_id)
         if not sweep:
             raise HTTPException(status_code=404, detail="HPO sweep not found")
+
+        # Get live progress from active executor if running
+        executor = active_sweeps.get(sweep_id)
+        if executor:
+            completed = len(executor.completed_trials)
+            best_loss = executor.best_trial.loss if executor.best_trial else None
+            best_trial_id = executor.best_trial.trial_id if executor.best_trial else None
+        else:
+            completed = sweep["completed_trials"]
+            best_loss = sweep.get("best_loss")
+            best_trial_id = sweep.get("best_trial_id")
+
         return HPOSweepInfo(
             sweep_id=sweep["sweep_id"],
             stage=HPOStage(sweep["stage"]),
             state=sweep["state"],
             max_trials=sweep["max_trials"],
-            completed_trials=sweep["completed_trials"],
-            best_trial_id=sweep.get("best_trial_id"),
-            best_loss=sweep.get("best_loss"),
+            completed_trials=completed,
+            best_trial_id=best_trial_id,
+            best_loss=best_loss,
             best_hyperparams=sweep.get("best_hyperparams"),
             started_at=sweep.get("started_at"),
             trials=[],  # Exclude trials for status endpoint
@@ -2452,7 +2353,15 @@ def create_app(debug: bool = False) -> FastAPI:
         sweep = hpo_sweeps.get(sweep_id)
         if not sweep:
             raise HTTPException(status_code=404, detail="HPO sweep not found")
-        return {"trials": sweep.get("trials", [])}
+
+        # Get live trials from executor if running
+        executor = active_sweeps.get(sweep_id)
+        if executor:
+            trials = [t.to_dict() for t in executor.completed_trials]
+        else:
+            trials = sweep.get("trials", [])
+
+        return {"trials": trials}
 
     @app.get("/api/hpo/sweep/{sweep_id}/best")
     async def get_hpo_best(sweep_id: str):
@@ -2460,6 +2369,16 @@ def create_app(debug: bool = False) -> FastAPI:
         sweep = hpo_sweeps.get(sweep_id)
         if not sweep:
             raise HTTPException(status_code=404, detail="HPO sweep not found")
+
+        # Check executor for live best
+        executor = active_sweeps.get(sweep_id)
+        if executor and executor.best_trial:
+            return {
+                "best_trial_id": executor.best_trial.trial_id,
+                "best_loss": executor.best_trial.loss,
+                "best_hyperparams": executor.best_trial.hyperparams,
+            }
+
         if not sweep.get("best_hyperparams"):
             return {"status": "no_results", "message": "No completed trials yet"}
         return {
@@ -2470,15 +2389,183 @@ def create_app(debug: bool = False) -> FastAPI:
 
     @app.post("/api/hpo/sweep/{sweep_id}/cancel")
     async def cancel_hpo_sweep(sweep_id: str):
-        """Cancel an HPO sweep."""
+        """Cancel an HPO sweep and stop the executor."""
         sweep = hpo_sweeps.get(sweep_id)
         if not sweep:
             raise HTTPException(status_code=404, detail="HPO sweep not found")
         if sweep["state"] in ["completed", "cancelled"]:
             raise HTTPException(status_code=400, detail="Sweep already finished")
 
+        # Actually cancel the executor if running
+        executor = active_sweeps.get(sweep_id)
+        if executor:
+            await executor.cancel()
+            active_sweeps.pop(sweep_id, None)
+
         sweep["state"] = "cancelled"
         return {"status": "cancelled", "sweep_id": sweep_id}
+
+    @app.get("/api/hpo/sweep/{sweep_id}/pareto")
+    async def get_hpo_pareto_frontier(sweep_id: str):
+        """Get Pareto frontier trials from an HPO sweep."""
+        sweep = hpo_sweeps.get(sweep_id)
+        if not sweep:
+            raise HTTPException(status_code=404, detail="HPO sweep not found")
+
+        # Get from executor if running
+        executor = active_sweeps.get(sweep_id)
+        if executor:
+            pareto = [t.to_dict() for t in executor.scorer.pareto_frontier]
+        else:
+            # Fall back to trials marked as on frontier
+            pareto = [t for t in sweep.get("trials", []) if t.get("is_on_pareto_frontier")]
+
+        return {"pareto_frontier": pareto}
+
+    @app.get("/api/hpo/sweep/{sweep_id}/metrics")
+    async def stream_hpo_metrics(sweep_id: str, request: Request):
+        """Stream HPO metrics in real-time via Server-Sent Events.
+
+        This endpoint provides live updates on sweep progress including:
+        - Trial completions
+        - Current best trial
+        - Running trial count
+        - Completed trial count
+        """
+        from starlette.responses import StreamingResponse
+
+        sweep = hpo_sweeps.get(sweep_id)
+        if not sweep:
+            raise HTTPException(status_code=404, detail="HPO sweep not found")
+
+        async def event_generator():
+            """Generate SSE events for sweep progress."""
+            last_completed = 0
+            while True:
+                # Check if client disconnected
+                if await request.is_disconnected():
+                    break
+
+                executor = active_sweeps.get(sweep_id)
+                if executor:
+                    completed = len(executor.completed_trials)
+                    running = len(executor.running_trials)
+                    best_loss = executor.best_trial.loss if executor.best_trial else None
+                    best_id = executor.best_trial.trial_id if executor.best_trial else None
+                    state = "running"
+                else:
+                    completed = sweep.get("completed_trials", 0)
+                    running = 0
+                    best_loss = sweep.get("best_loss")
+                    best_id = sweep.get("best_trial_id")
+                    state = sweep.get("state", "unknown")
+
+                # Send update if there's new data or periodically
+                if completed != last_completed or state != "running":
+                    data = {
+                        "sweep_id": sweep_id,
+                        "state": state,
+                        "completed_trials": completed,
+                        "running_trials": running,
+                        "max_trials": sweep.get("max_trials", 0),
+                        "best_trial_id": best_id,
+                        "best_loss": best_loss,
+                    }
+                    yield f"data: {json.dumps(data)}\n\n"
+                    last_completed = completed
+
+                    # Stop streaming if sweep is complete
+                    if state in ["completed", "cancelled", "failed"]:
+                        break
+
+                await asyncio.sleep(1)
+
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    @app.post("/api/hpo/sweep/{sweep_id}/resume")
+    async def resume_hpo_sweep(sweep_id: str, background_tasks: BackgroundTasks):
+        """Resume a cancelled or crashed HPO sweep from checkpoint.
+
+        This endpoint restores sweep state from the last checkpoint
+        and continues running remaining trials.
+        """
+        sweep = hpo_sweeps.get(sweep_id)
+        if not sweep:
+            raise HTTPException(status_code=404, detail="HPO sweep not found")
+
+        if sweep_id in active_sweeps:
+            raise HTTPException(status_code=400, detail="Sweep is already running")
+
+        if sweep.get("state") == "completed":
+            raise HTTPException(status_code=400, detail="Sweep already completed")
+
+        # Try to restore from checkpoint
+        storage_path = Path(f"artifacts/hpo_trials/{sweep_id}")
+        checkpoint_file = storage_path / f"{sweep_id}_checkpoint.json"
+
+        if not checkpoint_file.exists():
+            raise HTTPException(status_code=400, detail="No checkpoint found for this sweep")
+
+        # Update sweep state
+        sweep["state"] = "resuming"
+
+        async def resume_sweep_background():
+            """Resume sweep in background."""
+            try:
+                # Create new executor with checkpoint restore
+                sweep_config = SweepConfig(
+                    max_trials=sweep.get("max_trials", 50),
+                    max_parallel=1,
+                    sweep_id=sweep_id,
+                )
+                scheduler = create_scheduler(
+                    sweep.get("search_strategy", "random"),
+                    sweep_config,
+                )
+                executor = SweepExecutor(
+                    sweep_id=sweep_id,
+                    config=sweep_config,
+                    scheduler=scheduler,
+                    storage_path=str(storage_path),
+                )
+                active_sweeps[sweep_id] = executor
+
+                sweep["state"] = "running"
+                result = await executor.run()
+
+                # Update sweep state on completion
+                sweep["state"] = result.state
+                sweep["completed_trials"] = len(result.completed_trials)
+                if result.best_trial:
+                    sweep["best_trial_id"] = result.best_trial.trial_id
+                    sweep["best_loss"] = result.best_trial.loss
+                    sweep["best_hyperparams"] = result.best_trial.hyperparams
+                sweep["trials"] = [t.to_dict() for t in result.completed_trials]
+
+                active_sweeps.pop(sweep_id, None)
+                logger.info(f"[HPO] Resumed sweep {sweep_id} completed")
+
+            except Exception as e:
+                sweep["state"] = "failed"
+                sweep["error"] = str(e)
+                active_sweeps.pop(sweep_id, None)
+                logger.error(f"[HPO] Resume sweep {sweep_id} failed: {e}")
+
+        background_tasks.add_task(resume_sweep_background)
+
+        return {
+            "status": "resuming",
+            "sweep_id": sweep_id,
+            "message": "Sweep is being resumed from checkpoint",
+        }
 
     @app.get("/api/hpo/sweeps")
     async def list_hpo_sweeps():

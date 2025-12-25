@@ -13,6 +13,7 @@ import logging
 import math
 import os
 import sys
+from pathlib import Path
 from typing import Any
 
 import tensorflow as tf
@@ -1345,6 +1346,10 @@ def main():
         logger.error(f"[HPO] Config file not found: {args.config}")
         sys.exit(1)
 
+    # Determine status output path (in same directory as config for SweepExecutor)
+    config_dir = Path(args.config).parent
+    status_file = config_dir / "status.json"
+
     # Train trial with epoch-based training
     try:
         best_loss = train_trial(
@@ -1354,9 +1359,31 @@ def main():
             steps_per_epoch=args.steps_per_epoch,
         )
         logger.info(f"[HPO] Trial completed successfully with loss={best_loss:.6f}")
+
+        # Write status file for SweepExecutor to read
+        status = {
+            "trial_id": args.trial_id,
+            "loss": best_loss if not math.isinf(best_loss) else None,
+            "epochs_completed": args.epochs,
+            "status": "completed",
+        }
+        with open(status_file, "w") as f:
+            json.dump(status, f, indent=2)
+
         sys.exit(0)
     except Exception as e:
         logger.error(f"[HPO] Trial failed: {e}", exc_info=True)
+
+        # Write failure status
+        status = {
+            "trial_id": args.trial_id,
+            "loss": None,
+            "error": str(e),
+            "status": "failed",
+        }
+        with open(status_file, "w") as f:
+            json.dump(status, f, indent=2)
+
         sys.exit(1)
 
 

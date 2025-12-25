@@ -19,7 +19,14 @@ import tensorflow as tf
 from highnoon.data.loaders import load_training_dataset
 from highnoon.models.reasoning.reasoning_module import ReasoningModule
 from highnoon.services.hpo_manager import estimate_model_params
-from highnoon.services.hpo_metrics import DEFAULT_LAMBDA_EFFICIENCY, compute_efficiency_score
+from highnoon.services.hpo_metrics import (
+    DEFAULT_ALPHA_LOSS,
+    DEFAULT_BETA_PERPLEXITY,
+    DEFAULT_GAMMA_CALIBRATION,
+    DEFAULT_LAMBDA_EFFICIENCY,
+    compute_composite_score,
+    compute_efficiency_score,
+)
 from highnoon.training.hpo_bridge import HPOReporter
 
 # Quantum control callback (optional - may not be available if native ops missing)
@@ -454,6 +461,111 @@ def evaluate_qsg_generation(
     except Exception as e:
         logger.warning(f"[HPO] QSG evaluation failed: {e}")
         return {"qsg_error": str(e)}
+
+
+def evaluate_quality_metrics(
+    model: tf.keras.Model,
+    vocab_size: int,
+    seq_length: int = 256,
+    num_samples: int = 50,
+    dataset_name: str = "synthetic",
+) -> dict[str, float]:
+    """Evaluate model quality metrics (perplexity, confidence, calibration).
+
+    This runs a lightweight evaluation on a validation set to compute:
+    - Perplexity: Cross-entropy based language modeling quality
+    - Mean Confidence: Average prediction confidence (entropy-based)
+    - ECE: Expected Calibration Error (how well confidence matches accuracy)
+
+    Args:
+        model: Trained model to evaluate
+        vocab_size: Model vocabulary size
+        seq_length: Sequence length for evaluation
+        num_samples: Number of samples to evaluate
+        dataset_name: Dataset for perplexity ("synthetic" or HuggingFace name)
+
+    Returns:
+        Dictionary with perplexity, mean_confidence, expected_calibration_error
+    """
+    import math
+
+    import numpy as np
+
+    # Lazy imports to avoid circular dependencies
+    try:
+        from benchmarks.bench_confidence import (
+            compute_confidence_from_entropy,
+            compute_expected_calibration_error,
+            compute_token_entropy,
+        )
+        from benchmarks.bench_perplexity import load_dataset_as_batches
+    except ImportError as e:
+        logger.warning(f"[HPO] Benchmark modules not available: {e}")
+        return {}
+
+    logger.info(f"[HPO] Evaluating quality metrics on {num_samples} samples...")
+
+    perplexities = []
+    all_confidences = []
+    all_accuracies = []
+
+    batch_size = 8
+    try:
+        for input_ids, target_ids in load_dataset_as_batches(
+            dataset_name, vocab_size, seq_length, batch_size, num_samples
+        ):
+            # Forward pass
+            outputs = model(input_ids, training=False)
+            logits = outputs if isinstance(outputs, tf.Tensor) else outputs
+
+            # Perplexity from cross-entropy
+            loss = tf.keras.losses.sparse_categorical_crossentropy(
+                target_ids, logits, from_logits=True
+            )
+            mean_loss = float(tf.reduce_mean(loss).numpy())
+            perplexities.append(math.exp(min(mean_loss, 100)))
+
+            # Confidence from entropy
+            entropy = compute_token_entropy(logits)
+            confidence = compute_confidence_from_entropy(entropy, vocab_size)
+
+            # Accuracy for calibration
+            predictions = tf.argmax(logits, axis=-1, output_type=tf.int32)
+            correct = tf.cast(predictions == target_ids, tf.float32)
+
+            all_confidences.extend(confidence.numpy().flatten().tolist())
+            all_accuracies.extend(correct.numpy().flatten().tolist())
+
+    except Exception as e:
+        logger.warning(f"[HPO] Quality evaluation error during batch processing: {e}")
+        return {}
+
+    if not perplexities:
+        logger.warning("[HPO] No perplexity samples collected")
+        return {}
+
+    # Aggregate metrics
+    overall_perplexity = float(np.mean(perplexities))
+    mean_confidence = float(np.mean(all_confidences)) if all_confidences else 0.0
+
+    ece = 0.0
+    if all_confidences and all_accuracies:
+        ece, _ = compute_expected_calibration_error(
+            np.array(all_confidences),
+            np.array(all_accuracies),
+            num_bins=10,
+        )
+
+    logger.info(
+        f"[HPO] Quality: PPL={overall_perplexity:.2f}, "
+        f"Conf={mean_confidence:.3f}, ECE={ece:.4f}"
+    )
+
+    return {
+        "perplexity": overall_perplexity,
+        "mean_confidence": mean_confidence,
+        "expected_calibration_error": ece,
+    }
 
 
 def build_hsmn_model(
@@ -1064,17 +1176,61 @@ def train_trial(
         best_loss, param_count, param_budget, lambda_efficiency
     )
 
-    # Report completion with efficiency metrics
+    # ===== Multi-Objective Quality Metrics Evaluation =====
+    quality_metrics: dict[str, float] = {}
+    evaluate_quality = trial_config.get("evaluate_quality_metrics", True)
+
+    if evaluate_quality:
+        quality_eval_samples = trial_config.get("quality_eval_samples", 50)
+        quality_eval_dataset = trial_config.get("quality_eval_dataset", "synthetic")
+
+        try:
+            quality_metrics = evaluate_quality_metrics(
+                model,
+                vocab_size,
+                seq_length=sequence_length,
+                num_samples=quality_eval_samples,
+                dataset_name=quality_eval_dataset,
+            )
+        except Exception as e:
+            logger.warning(f"[HPO] Quality evaluation failed: {e}")
+            quality_metrics = {}
+
+    # Compute composite score for multi-objective ranking
+    composite_score = compute_composite_score(
+        loss=best_loss,
+        perplexity=quality_metrics.get("perplexity"),
+        ece=quality_metrics.get("expected_calibration_error"),
+        param_count=param_count,
+        param_budget=param_budget,
+        alpha_loss=trial_config.get("alpha_loss", DEFAULT_ALPHA_LOSS),
+        beta_perplexity=trial_config.get("beta_perplexity", DEFAULT_BETA_PERPLEXITY),
+        gamma_calibration=trial_config.get("gamma_calibration", DEFAULT_GAMMA_CALIBRATION),
+        lambda_efficiency=lambda_efficiency,
+    )
+
+    # Report completion with all metrics
     hpo_reporter.complete(
         success=True,
         final_loss=best_loss,
         param_count=param_count,
         efficiency_score=efficiency_score,
+        perplexity=quality_metrics.get("perplexity"),
+        mean_confidence=quality_metrics.get("mean_confidence"),
+        expected_calibration_error=quality_metrics.get("expected_calibration_error"),
+        composite_score=composite_score,
     )
 
+    # Log comprehensive completion summary
+    ppl_str = (
+        f"{quality_metrics.get('perplexity', 0):.2f}"
+        if quality_metrics.get("perplexity")
+        else "N/A"
+    )
     logger.info(
-        f"[HPO] Trial {trial_id} completed with best_loss={best_loss:.6f}, "
-        f"efficiency={efficiency_score:.6f} (~{param_count / 1e6:.1f}M params)"
+        f"[HPO] Trial {trial_id} completed: loss={best_loss:.6f}, "
+        f"composite={composite_score:.6f}, ppl={ppl_str}, "
+        f"~{param_count / 1e6:.1f}M params"
     )
 
     return best_loss

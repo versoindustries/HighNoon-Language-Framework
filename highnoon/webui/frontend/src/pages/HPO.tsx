@@ -1072,6 +1072,14 @@ export function HPO() {
                                             <span className="metric-label">Best Loss</span>
                                             <span className="metric-value">{sweepStatus?.best_loss?.toFixed(4) ?? '—'}</span>
                                         </div>
+                                        <div className="status-metric">
+                                            <span className="metric-label">Best Composite</span>
+                                            <span className="metric-value">{sweepStatus?.best_composite_score?.toFixed(4) ?? '—'}</span>
+                                        </div>
+                                        <div className="status-metric">
+                                            <span className="metric-label">Best PPL</span>
+                                            <span className="metric-value">{sweepStatus?.best_perplexity?.toFixed(2) ?? '—'}</span>
+                                        </div>
                                     </div>
                                     <ProgressBar
                                         value={trials.length}
@@ -1121,13 +1129,16 @@ export function HPO() {
                                             <th>Status</th>
                                             <th>LR</th>
                                             <th>Loss</th>
+                                            <th>PPL</th>
+                                            <th>Conf</th>
+                                            <th>Composite</th>
                                             <th>Memory</th>
                                         </tr>
                                     </thead>
                                     <tbody>
                                         {trials.length === 0 ? (
                                             <tr>
-                                                <td colSpan={5} className="trials-empty">
+                                                <td colSpan={8} className="trials-empty">
                                                     No trials yet
                                                 </td>
                                             </tr>
@@ -1142,6 +1153,9 @@ export function HPO() {
                                                     </td>
                                                     <td>{trial.learning_rate.toExponential(2)}</td>
                                                     <td>{trial.loss?.toFixed(4) ?? '—'}</td>
+                                                    <td>{trial.perplexity?.toFixed(2) ?? '—'}</td>
+                                                    <td>{trial.mean_confidence?.toFixed(3) ?? '—'}</td>
+                                                    <td>{trial.composite_score?.toFixed(4) ?? '—'}</td>
                                                     <td>{trial.memory_mb ? `${trial.memory_mb.toFixed(0)} MB` : '—'}</td>
                                                 </tr>
                                             ))

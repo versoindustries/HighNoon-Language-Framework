@@ -740,6 +740,11 @@ class HPOTrialInfo(BaseModel):
     memory_mb: float | None = None  # Current RSS memory in MB
     peak_memory_mb: float | None = None  # Peak RSS memory in MB
     hyperparams: dict[str, Any] = Field(default_factory=dict)
+    # Multi-objective quality metrics
+    perplexity: float | None = None
+    mean_confidence: float | None = None
+    expected_calibration_error: float | None = None
+    composite_score: float | None = None
 
 
 class HPOSweepInfo(BaseModel):
@@ -752,6 +757,8 @@ class HPOSweepInfo(BaseModel):
     completed_trials: int = 0
     best_trial_id: int | None = None
     best_loss: float | None = None
+    best_composite_score: float | None = None  # Multi-objective best score
+    best_perplexity: float | None = None  # Best trial's perplexity
     best_hyperparams: dict[str, Any] | None = None
     started_at: str | None = None
     trials: list[HPOTrialInfo] = Field(default_factory=list)

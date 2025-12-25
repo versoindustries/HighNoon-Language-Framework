@@ -223,6 +223,10 @@ class HPOReporter:
         error: str | None = None,
         param_count: int | None = None,
         efficiency_score: float | None = None,
+        perplexity: float | None = None,
+        mean_confidence: float | None = None,
+        expected_calibration_error: float | None = None,
+        composite_score: float | None = None,
     ) -> None:
         """Report trial completion.
 
@@ -232,6 +236,10 @@ class HPOReporter:
             error: Error message if failed
             param_count: Estimated parameter count of the model
             efficiency_score: Efficiency-penalized score (loss × (1 + λ × norm_params))
+            perplexity: Validation perplexity (model quality metric)
+            mean_confidence: Mean prediction confidence (entropy-based)
+            expected_calibration_error: ECE (calibration quality, lower is better)
+            composite_score: Multi-objective composite score for ranking
         """
         if not self._enabled:
             return
@@ -244,6 +252,11 @@ class HPOReporter:
                 "error": error,
                 "param_count": param_count,
                 "efficiency_score": efficiency_score,
+                # Multi-objective quality metrics
+                "perplexity": perplexity,
+                "mean_confidence": mean_confidence,
+                "expected_calibration_error": expected_calibration_error,
+                "composite_score": composite_score,
             }
 
             status_file = self._trial_dir / "status.json"
@@ -253,20 +266,25 @@ class HPOReporter:
         # Send completion message to WebUI
         if success:
             eff_str = f", efficiency={efficiency_score:.6f}" if efficiency_score else ""
+            comp_str = f", composite={composite_score:.6f}" if composite_score else ""
+            ppl_str = f", ppl={perplexity:.2f}" if perplexity else ""
             params_str = f" ({param_count / 1e6:.1f}M params)" if param_count else ""
             self.log(
                 (
-                    f"Trial completed with loss={final_loss:.6f}{eff_str}{params_str}"
+                    f"Trial completed with loss={final_loss:.6f}{eff_str}{comp_str}{ppl_str}{params_str}"
                     if final_loss
                     else "Trial completed"
                 ),
                 level="INFO",
                 loss=final_loss,
                 efficiency_score=efficiency_score,
+                composite_score=composite_score,
+                perplexity=perplexity,
                 param_count=param_count,
             )
             logger.info(
-                f"[HPO Reporter] Trial completed with loss={final_loss}, efficiency={efficiency_score}"
+                f"[HPO Reporter] Trial completed: loss={final_loss}, "
+                f"composite={composite_score}, ppl={perplexity}"
             )
         else:
             self.log(f"Trial failed: {error}", level="ERROR")

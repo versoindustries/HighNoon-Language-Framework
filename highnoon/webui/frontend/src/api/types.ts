@@ -182,6 +182,11 @@ export interface HPOTrialInfo {
     pruned_at_step?: number;
     memory_mb?: number;       // Current RSS memory in MB
     peak_memory_mb?: number;  // Peak RSS memory in MB
+    // Multi-objective quality metrics
+    perplexity?: number | null;
+    mean_confidence?: number | null;
+    expected_calibration_error?: number | null;
+    composite_score?: number | null;
 }
 
 /** Model configuration from HPO sweep */
@@ -205,6 +210,8 @@ export interface HPOSweepInfo {
     pruned_trials: number;
     best_trial_id: number | null;
     best_loss: number | null;
+    best_composite_score?: number | null;  // Multi-objective best score
+    best_perplexity?: number | null;        // Best trial's perplexity
     best_hyperparams: Record<string, unknown> | null;
     started_at: string | null;
     estimated_completion: string | null;

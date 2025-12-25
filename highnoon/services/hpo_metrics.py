@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import threading
 import time
@@ -62,6 +63,70 @@ def compute_efficiency_score(
     return loss * (1 + lambda_efficiency * norm_params)
 
 
+# Default weights for composite score components
+DEFAULT_ALPHA_LOSS = 0.5  # Training loss weight
+DEFAULT_BETA_PERPLEXITY = 0.3  # Perplexity weight
+DEFAULT_GAMMA_CALIBRATION = 0.2  # Calibration (ECE) weight
+
+
+def compute_composite_score(
+    loss: float,
+    perplexity: float | None = None,
+    ece: float | None = None,
+    param_count: int | None = None,
+    param_budget: int | None = None,
+    alpha_loss: float = DEFAULT_ALPHA_LOSS,
+    beta_perplexity: float = DEFAULT_BETA_PERPLEXITY,
+    gamma_calibration: float = DEFAULT_GAMMA_CALIBRATION,
+    lambda_efficiency: float = DEFAULT_LAMBDA_EFFICIENCY,
+) -> float:
+    """Compute multi-objective composite score for trial ranking.
+
+    The composite score combines:
+    1. Training loss (lower is better)
+    2. Perplexity on validation set (lower is better)
+    3. Calibration quality via ECE (lower is better)
+    4. Efficiency penalty for model size
+
+    Formula: α×loss + β×norm_ppl + γ×ece + efficiency_multiplier
+
+    Args:
+        loss: Best training loss achieved
+        perplexity: Validation set perplexity (None = skip)
+        ece: Expected Calibration Error (None = skip)
+        param_count: Model parameter count
+        param_budget: User's parameter budget
+        alpha_loss: Weight for loss component
+        beta_perplexity: Weight for perplexity component
+        gamma_calibration: Weight for calibration component
+        lambda_efficiency: Weight for efficiency penalty
+
+    Returns:
+        Composite score (lower is better)
+
+    Example:
+        >>> compute_composite_score(0.5, perplexity=50.0, ece=0.05)
+        0.4597...
+    """
+    score = alpha_loss * loss
+
+    if perplexity is not None:
+        # Normalize perplexity (log scale, capped at 1000)
+        norm_ppl = min(math.log(perplexity + 1) / math.log(1001), 1.0)
+        score += beta_perplexity * norm_ppl
+
+    if ece is not None:
+        # ECE is already 0-1 scale (0 = perfect calibration)
+        score += gamma_calibration * ece
+
+    # Efficiency penalty as multiplier
+    if param_count and param_budget and param_budget > 0:
+        norm_params = param_count / param_budget
+        score *= 1 + lambda_efficiency * norm_params
+
+    return score
+
+
 @dataclass
 class TrialMetrics:
     """Metrics snapshot for a single trial at a specific step."""
@@ -75,6 +140,11 @@ class TrialMetrics:
     memory_mb: float | None = None
     peak_memory_mb: float | None = None  # Peak RSS memory during trial
     wall_time_seconds: float | None = None
+
+    # Quality metrics (evaluated at trial end)
+    perplexity: float | None = None
+    mean_confidence: float | None = None
+    expected_calibration_error: float | None = None
 
     # Additional custom metrics
     extras: dict[str, Any] = field(default_factory=dict)
@@ -102,6 +172,12 @@ class TrialStatus:
     # Efficiency tracking (Phase: HPO Efficiency-Aware Optimization)
     param_count: int | None = None  # Estimated parameter count from config
     efficiency_score: float | None = None  # loss × (1 + λ × norm_params)
+
+    # Multi-objective quality metrics
+    perplexity: float | None = None
+    mean_confidence: float | None = None
+    expected_calibration_error: float | None = None
+    composite_score: float | None = None  # Combined multi-objective score
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to JSON-serializable dictionary."""
@@ -210,6 +286,11 @@ class HPOMetricsCollector:
                 hyperparameters=data.get("hyperparameters", {}),
                 param_count=data.get("param_count"),
                 efficiency_score=data.get("efficiency_score"),
+                # Multi-objective quality metrics
+                perplexity=data.get("perplexity"),
+                mean_confidence=data.get("mean_confidence"),
+                expected_calibration_error=data.get("expected_calibration_error"),
+                composite_score=data.get("composite_score"),
             )
         except Exception as exc:
             logger.error(f"[HPO Metrics] Failed to load status for {trial_id}: {exc}")
@@ -278,13 +359,19 @@ class HPOMetricsCollector:
 
         return sorted(trials)
 
-    def get_best_trial(self, use_efficiency: bool = True) -> tuple[str, float] | None:
-        """Find the trial with the best (lowest) loss or efficiency score.
+    def get_best_trial(
+        self,
+        use_efficiency: bool = True,
+        use_composite: bool = True,
+    ) -> tuple[str, float] | None:
+        """Find the trial with the best (lowest) loss or composite score.
 
         Args:
             use_efficiency: If True and efficiency_score is available,
                 rank by efficiency_score instead of loss. This rewards
                 smaller models that achieve similar accuracy.
+            use_composite: If True and composite_score is available,
+                rank by composite_score (multi-objective). Takes precedence.
 
         Returns:
             Tuple of (trial_id, best_score) or None if no trials found
@@ -299,8 +386,10 @@ class HPOMetricsCollector:
         for trial_id in trials:
             status = self.load_trial_status(trial_id)
             if status:
-                # Use efficiency_score if available and requested
-                if use_efficiency and status.efficiency_score is not None:
+                # Priority: composite > efficiency > loss
+                if use_composite and status.composite_score is not None:
+                    score = status.composite_score
+                elif use_efficiency and status.efficiency_score is not None:
                     score = status.efficiency_score
                 elif status.best_loss is not None:
                     score = status.best_loss

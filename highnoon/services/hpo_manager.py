@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from highnoon.services.hpo_metrics import HPOMetricsCollector, TrialStatus
+from highnoon.services.hpo_metrics import HPOMetricsCollector, OversizedConfigTracker, TrialStatus
 from highnoon.services.hpo_utils import convert_numpy_types
 
 # Phase 5: Import grouped parameter sampler (TPE-style forest sampling)
@@ -185,6 +185,9 @@ class HPOSearchSpace:
     # Memory-aware shrinking: count of consecutive memory failures
     # When > 0, sample() reduces architecture sizes to prevent OOM
     memory_failure_count: int = 0
+
+    # Smart tuner: track skipped trials for WebUI and adaptive sampling
+    _budget_tracker: OversizedConfigTracker | None = None
 
     def record_memory_failure(self) -> None:
         """Record a memory-related trial failure (OOM, swap spike, etc.).
@@ -405,16 +408,38 @@ class HPOSearchSpace:
         if self.unfreeze_interval is not None:
             config["unfreeze_interval"] = random.randint(*self.unfreeze_interval)
 
-        # Parameter budget constraint check
+        # Parameter budget constraint check with smart tuner integration
         if self.param_budget is not None:
-            estimated_params = estimate_model_params(config)
+            # Initialize budget tracker if not already done
+            if self._budget_tracker is None:
+                self._budget_tracker = OversizedConfigTracker(
+                    param_budget=self.param_budget,
+                )
+
+            # Check initial estimate
+            initial_estimated = estimate_model_params(config)
             max_attempts = 50  # Allow many attempts to find a fitting config
             attempt = 0
+
+            # Log if initial config exceeds budget
+            if initial_estimated > self.param_budget:
+                logger.info(
+                    f"[SmartTuner] Trial {trial_id}: initial config exceeds budget "
+                    f"({initial_estimated / 1e6:.1f}M > {self.param_budget / 1e6:.1f}M), resampling..."
+                )
+
+            estimated_params = initial_estimated
 
             while estimated_params > self.param_budget and attempt < max_attempts:
                 # Re-sample with progressively smaller architecture
                 attempt += 1
                 random.seed(trial_id + attempt * 1000)
+
+                # Log each resample attempt
+                logger.debug(
+                    f"[SmartTuner] Trial {trial_id} attempt {attempt}: "
+                    f"adjusting architecture to fit budget"
+                )
 
                 # Progressively tighten constraints based on attempt number
                 if attempt < 15:
@@ -456,23 +481,62 @@ class HPOSearchSpace:
                 estimated_params = estimate_model_params(config)
 
                 if estimated_params > self.param_budget:
+                    # Record this as a skipped configuration
+                    self._budget_tracker.record_oversized(
+                        trial_id=f"trial_{trial_id}",
+                        config=config.copy(),
+                        estimated_params=estimated_params,
+                        reason=f"minimum_config_exceeds_budget_after_{max_attempts}_attempts",
+                    )
                     logger.warning(
-                        f"[HPO Manager] Trial {trial_id}: even minimum config exceeds param_budget "
+                        f"[SmartTuner] Trial {trial_id}: SKIPPED - even minimum config exceeds param_budget "
                         f"({estimated_params / 1e6:.1f}M > {self.param_budget / 1e6:.1f}M). "
                         f"Consider increasing budget or reducing vocab_size."
                     )
                 else:
                     logger.info(
-                        f"[HPO Manager] Trial {trial_id}: using minimum config to fit budget "
-                        f"({estimated_params / 1e6:.1f}M <= {self.param_budget / 1e6:.1f}M)"
+                        f"[SmartTuner] Trial {trial_id}: using minimum config to fit budget "
+                        f"({estimated_params / 1e6:.1f}M <= {self.param_budget / 1e6:.1f}M) "
+                        f"after {attempt} attempts"
                     )
             else:
-                logger.debug(
-                    f"[HPO Manager] Trial {trial_id}: config within budget "
-                    f"({estimated_params / 1e6:.1f}M <= {self.param_budget / 1e6:.1f}M)"
-                )
+                if attempt > 0:
+                    logger.info(
+                        f"[SmartTuner] Trial {trial_id}: config adjusted to fit budget "
+                        f"({estimated_params / 1e6:.1f}M <= {self.param_budget / 1e6:.1f}M) "
+                        f"after {attempt} attempts"
+                    )
+                else:
+                    logger.debug(
+                        f"[SmartTuner] Trial {trial_id}: config within budget "
+                        f"({estimated_params / 1e6:.1f}M <= {self.param_budget / 1e6:.1f}M)"
+                    )
 
         return config
+
+    def get_skipped_trials(self) -> list[dict[str, Any]]:
+        """Get list of trials that were skipped due to budget constraints.
+
+        Returns:
+            List of skipped trial records formatted for WebUI
+        """
+        if self._budget_tracker is None:
+            return []
+        return [r.to_dict() for r in self._budget_tracker.get_skipped_records()]
+
+    def get_budget_statistics(self) -> dict[str, Any]:
+        """Get statistics about parameter budget enforcement.
+
+        Returns:
+            Dictionary with budget enforcement statistics
+        """
+        if self._budget_tracker is None:
+            return {"enabled": False}
+
+        stats = self._budget_tracker.get_statistics()
+        stats["enabled"] = True
+        stats["param_budget"] = self.param_budget
+        return stats
 
 
 class HPOTrialManager:

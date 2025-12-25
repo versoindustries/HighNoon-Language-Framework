@@ -2363,6 +2363,77 @@ def create_app(debug: bool = False) -> FastAPI:
 
         return {"trials": trials}
 
+    @app.get("/api/hpo/sweep/{sweep_id}/skipped")
+    async def get_hpo_skipped_trials(sweep_id: str):
+        """Get trials that were skipped due to parameter budget constraints.
+
+        Returns list of skipped trial records with:
+        - trial_id: ID that would have been assigned
+        - reason: Why it was skipped (e.g., 'exceeded_budget_after_50_attempts')
+        - estimated_params: Estimated parameter count
+        - param_budget: The configured budget
+        - architecture_signature: Architecture pattern for clustering
+        """
+        sweep = hpo_sweeps.get(sweep_id)
+        if not sweep:
+            raise HTTPException(status_code=404, detail="HPO sweep not found")
+
+        # Get from executor if running
+        executor = active_sweeps.get(sweep_id)
+        if executor and hasattr(executor, "smart_sampler") and executor.smart_sampler:
+            skipped = executor.smart_sampler.get_skipped_for_webui()
+            stats = executor.smart_sampler.get_statistics()
+        else:
+            # Check for persisted skipped records
+            from highnoon.services.hpo_metrics import OversizedConfigTracker
+
+            tracker = OversizedConfigTracker(
+                param_budget=sweep.get("model_config", {}).get("param_budget", 1_000_000_000),
+                hpo_root=Path("artifacts/hpo_trials"),
+            )
+            skipped = [r.to_dict() for r in tracker.get_skipped_records()]
+            stats = tracker.get_statistics()
+
+        return {
+            "skipped_trials": skipped,
+            "statistics": stats,
+        }
+
+    @app.get("/api/hpo/sweep/{sweep_id}/budget")
+    async def get_hpo_budget_stats(sweep_id: str):
+        """Get parameter budget enforcement statistics.
+
+        Returns:
+        - param_budget: The configured budget
+        - total_skipped: Number of trials skipped
+        - skip_rate: Percentage of trials skipped
+        - safe_bounds: Recommended safe architecture bounds
+        - top_failing_architectures: Most common failing patterns
+        """
+        sweep = hpo_sweeps.get(sweep_id)
+        if not sweep:
+            raise HTTPException(status_code=404, detail="HPO sweep not found")
+
+        # Get budget from sweep config
+        param_budget = sweep.get("model_config", {}).get("param_budget", 1_000_000_000)
+
+        # Get from executor if running
+        executor = active_sweeps.get(sweep_id)
+        if executor and hasattr(executor, "smart_sampler") and executor.smart_sampler:
+            stats = executor.smart_sampler.get_statistics()
+        else:
+            from highnoon.services.hpo_metrics import OversizedConfigTracker
+
+            tracker = OversizedConfigTracker(
+                param_budget=param_budget,
+                hpo_root=Path("artifacts/hpo_trials"),
+            )
+            stats = tracker.get_statistics()
+            stats["enabled"] = True
+            stats["param_budget"] = param_budget
+
+        return stats
+
     @app.get("/api/hpo/sweep/{sweep_id}/best")
     async def get_hpo_best(sweep_id: str):
         """Get best hyperparameters from an HPO sweep."""

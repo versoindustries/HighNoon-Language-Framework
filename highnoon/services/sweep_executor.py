@@ -386,15 +386,18 @@ class MultiObjectiveScorer:
     """Multi-objective scoring with Pareto frontier tracking.
 
     Computes weighted composite scores and tracks Pareto-optimal trials.
+    Includes memory efficiency as a scoring component for enterprise-grade optimization.
     """
 
     def __init__(
         self,
-        alpha_loss: float = 0.4,
-        beta_perplexity: float = 0.3,
+        alpha_loss: float = 0.35,
+        beta_perplexity: float = 0.25,
         gamma_calibration: float = 0.1,
-        lambda_efficiency: float = 0.2,
+        lambda_efficiency: float = 0.15,
+        mu_memory: float = 0.15,  # NEW: Memory efficiency weight
         param_budget: int = 1_000_000_000,
+        memory_budget_mb: float = 16_000.0,  # 16GB default memory budget
     ):
         """Initialize scorer.
 
@@ -402,20 +405,31 @@ class MultiObjectiveScorer:
             alpha_loss: Weight for loss component
             beta_perplexity: Weight for perplexity component
             gamma_calibration: Weight for calibration (ECE) component
-            lambda_efficiency: Weight for efficiency component
+            lambda_efficiency: Weight for parameter efficiency component
+            mu_memory: Weight for memory efficiency component
             param_budget: Parameter budget for efficiency calculation
+            memory_budget_mb: Memory budget in MB for memory efficiency
         """
         self.weights = {
             "loss": alpha_loss,
             "perplexity": beta_perplexity,
             "ece": gamma_calibration,
             "efficiency": lambda_efficiency,
+            "memory": mu_memory,
         }
         self.param_budget = param_budget
+        self.memory_budget_mb = memory_budget_mb
         self.pareto_frontier: list[TrialResult] = []
 
     def compute_score(self, result: TrialResult) -> float:
-        """Compute weighted composite score.
+        """Compute weighted composite score including memory efficiency.
+
+        The composite score considers:
+        - Loss: Primary training objective
+        - Perplexity: Model quality metric
+        - ECE (Expected Calibration Error): Confidence calibration
+        - Parameter efficiency: Model size relative to budget
+        - Memory efficiency: Peak memory usage relative to budget
 
         Args:
             result: Trial result to score
@@ -429,11 +443,19 @@ class MultiObjectiveScorer:
         ece = result.ece if result.ece is not None else 0.1
         efficiency = result.param_count / self.param_budget if result.param_count > 0 else 0.5
 
+        # Memory efficiency: lower memory is better
+        memory_norm = (
+            min(result.memory_peak_mb / self.memory_budget_mb, 1.0)
+            if result.memory_peak_mb > 0
+            else 0.5  # Default if not tracked
+        )
+
         return (
             self.weights["loss"] * loss_norm
             + self.weights["perplexity"] * ppl_norm
             + self.weights["ece"] * ece
             + self.weights["efficiency"] * efficiency
+            + self.weights["memory"] * memory_norm
         )
 
     def update_pareto_frontier(self, result: TrialResult) -> bool:
@@ -464,6 +486,9 @@ class MultiObjectiveScorer:
     def _dominates(self, a: TrialResult, b: TrialResult) -> bool:
         """Check if result a Pareto-dominates result b.
 
+        Considers all objectives: loss, ece, param_count, perplexity, and memory.
+        Result a dominates b if a is no worse in all objectives and better in at least one.
+
         Args:
             a: First result
             b: Second result
@@ -472,7 +497,9 @@ class MultiObjectiveScorer:
             True if a dominates b
         """
         better_in_any = False
-        for obj in ["loss", "ece", "param_count"]:
+
+        # Compare objectives where lower is better
+        for obj in ["loss", "ece", "param_count", "memory_peak_mb"]:
             val_a = getattr(a, obj, None)
             val_b = getattr(b, obj, None)
             if val_a is None or val_b is None:
@@ -779,12 +806,14 @@ class SweepExecutor:
         with open(config_file, "w") as f:
             json.dump(config, f, indent=2)
 
-        # Run trial subprocess
+        # Run trial subprocess with complete environment
         trial_runner_module = "highnoon.services.hpo_trial_runner"
         env = {
             **dict(__import__("os").environ.items()),
             "HPO_SWEEP_ID": self.sweep_id,
             "HPO_TRIAL_ID": trial_id,
+            "HPO_TRIAL_DIR": str(trial_dir),  # Explicit trial directory
+            "HPO_ROOT": str(self.storage_path),  # HPO artifacts root
             "HPO_API_HOST": "127.0.0.1:8000",
         }
 
@@ -840,6 +869,35 @@ class SweepExecutor:
             except Exception as e:
                 error = f"Failed to read status: {e}"
 
+        # Read memory from status.json first (authoritative), fallback to metrics.jsonl
+        memory_peak_mb = 0.0
+        if status_file.exists():
+            try:
+                with open(status_file) as f:
+                    status_data = json.load(f)
+                    memory_peak_mb = status_data.get("memory_peak_mb", 0.0) or 0.0
+            except Exception:
+                pass
+
+        # Fallback: read peak memory from metrics.jsonl if not in status
+        if memory_peak_mb == 0.0:
+            metrics_file = trial_dir / "metrics.jsonl"
+            if metrics_file.exists():
+                try:
+                    with open(metrics_file) as f:
+                        for line in f:
+                            if line.strip():
+                                try:
+                                    entry = json.loads(line)
+                                    if "peak_memory_mb" in entry and entry["peak_memory_mb"]:
+                                        memory_peak_mb = max(
+                                            memory_peak_mb, entry["peak_memory_mb"]
+                                        )
+                                except json.JSONDecodeError:
+                                    continue
+                except Exception as e:
+                    logger.debug(f"[HPO] Could not read metrics.jsonl for memory: {e}")
+
         if process.returncode != 0 and not error:
             error = stderr.decode()[:500] if stderr else "Unknown error"
 
@@ -859,6 +917,7 @@ class SweepExecutor:
             hyperparams=config,
             epochs_completed=epochs_completed,
             wall_time_seconds=wall_time,
+            memory_peak_mb=memory_peak_mb,
             error=error,
         )
 

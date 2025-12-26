@@ -12,12 +12,19 @@ import logging
 import math
 import os
 import threading
+import time
 from pathlib import Path
 from typing import Any
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 logger = logging.getLogger(__name__)
+
+# API communication settings (more robust than silent 2-second timeout)
+API_TIMEOUT_SECONDS = 5  # Increased from 2 for reliability
+API_MAX_RETRIES = 3  # Retry failed API calls
+API_RETRY_DELAY_SECONDS = 0.5  # Delay between retries
+API_FAILURE_WARNING_THRESHOLD = 5  # Warn after this many consecutive failures
 
 
 class HPOReporter:
@@ -55,6 +62,11 @@ class HPOReporter:
         self._api_host = api_host or os.getenv("HPO_API_HOST", "127.0.0.1:8000")
         self._log_queue: list[dict[str, Any]] = []
         self._log_lock = threading.Lock()
+
+        # API failure tracking for diagnostics
+        self._api_failure_count = 0
+        self._api_success_count = 0
+        self._last_api_warning_time = 0.0
 
         # Determine trial directory from params or environment
         if trial_dir:
@@ -112,9 +124,10 @@ class HPOReporter:
         return float(value)
 
     def _send_to_api(self, log_entry: dict[str, Any]) -> None:
-        """Send a log entry to the WebUI backend API.
+        """Send a log entry to the WebUI backend API with retry logic.
 
         This runs in a background thread to avoid blocking training.
+        Uses exponential backoff retry for reliability.
 
         Args:
             log_entry: Log data to send.
@@ -123,22 +136,55 @@ class HPOReporter:
             return
 
         def _do_send():
-            try:
-                url = f"http://{self._api_host}/api/hpo/sweep/{self._sweep_id}/log"
-                data = json.dumps(log_entry).encode("utf-8")
-                req = Request(
-                    url,
-                    data=data,
-                    headers={"Content-Type": "application/json"},
-                    method="POST",
+            url = f"http://{self._api_host}/api/hpo/sweep/{self._sweep_id}/log"
+            data = json.dumps(log_entry).encode("utf-8")
+            last_error = None
+
+            for attempt in range(API_MAX_RETRIES):
+                try:
+                    req = Request(
+                        url,
+                        data=data,
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    with urlopen(req, timeout=API_TIMEOUT_SECONDS) as response:
+                        _ = response.read()
+
+                    # Success - reset failure count and track
+                    self._api_success_count += 1
+                    if self._api_failure_count > 0:
+                        logger.info(
+                            f"[HPO Reporter] API connection restored after "
+                            f"{self._api_failure_count} failures"
+                        )
+                    self._api_failure_count = 0
+                    return
+
+                except URLError as e:
+                    last_error = e
+                    if attempt < API_MAX_RETRIES - 1:
+                        time.sleep(API_RETRY_DELAY_SECONDS * (2**attempt))
+                except Exception as e:
+                    last_error = e
+                    if attempt < API_MAX_RETRIES - 1:
+                        time.sleep(API_RETRY_DELAY_SECONDS * (2**attempt))
+
+            # All retries failed
+            self._api_failure_count += 1
+            current_time = time.time()
+
+            # Warn user if API has been failing (but don't spam)
+            if (
+                self._api_failure_count >= API_FAILURE_WARNING_THRESHOLD
+                and current_time - self._last_api_warning_time > 60  # Max 1 warning per minute
+            ):
+                self._last_api_warning_time = current_time
+                logger.warning(
+                    f"[HPO Reporter] WebUI API unreachable ({self._api_failure_count} consecutive failures). "
+                    f"Metrics ARE being saved to disk at {self._trial_dir or 'N/A'}. "
+                    f"Last error: {last_error}"
                 )
-                with urlopen(req, timeout=2) as response:
-                    _ = response.read()
-            except URLError as e:
-                # Log silently - don't spam if API is unavailable
-                logger.debug(f"[HPO Reporter] API log failed: {e}")
-            except Exception as e:
-                logger.debug(f"[HPO Reporter] API log error: {e}")
 
         # Run in background thread
         thread = threading.Thread(target=_do_send, daemon=True)
@@ -274,6 +320,8 @@ class HPOReporter:
         mean_confidence: float | None = None,
         expected_calibration_error: float | None = None,
         composite_score: float | None = None,
+        memory_peak_mb: float | None = None,
+        epochs_completed: int | None = None,
     ) -> None:
         """Report trial completion.
 
@@ -287,6 +335,8 @@ class HPOReporter:
             mean_confidence: Mean prediction confidence (entropy-based)
             expected_calibration_error: ECE (calibration quality, lower is better)
             composite_score: Multi-objective composite score for ranking
+            memory_peak_mb: Peak memory usage during training (for multi-objective optimization)
+            epochs_completed: Number of epochs completed before stopping
         """
         if not self._enabled:
             return
@@ -300,6 +350,7 @@ class HPOReporter:
             expected_calibration_error, "expected_calibration_error"
         )
         composite_score = self._sanitize_float(composite_score, "composite_score")
+        memory_peak_mb = self._sanitize_float(memory_peak_mb, "memory_peak_mb")
 
         # Write status file if we have a trial directory
         if self._trial_dir:
@@ -314,6 +365,9 @@ class HPOReporter:
                 "mean_confidence": mean_confidence,
                 "expected_calibration_error": expected_calibration_error,
                 "composite_score": composite_score,
+                # Memory and progress tracking
+                "memory_peak_mb": memory_peak_mb,
+                "epochs_completed": epochs_completed,
             }
 
             status_file = self._trial_dir / "status.json"

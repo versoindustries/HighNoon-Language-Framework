@@ -212,6 +212,8 @@ export interface HPOSweepInfo {
     best_loss: number | null;
     best_composite_score?: number | null;  // Multi-objective best score
     best_perplexity?: number | null;        // Best trial's perplexity
+    best_confidence?: number | null;        // Best trial's mean confidence
+    best_memory_mb?: number | null;         // Best trial's peak memory
     best_hyperparams: Record<string, unknown> | null;
     started_at: string | null;
     estimated_completion: string | null;

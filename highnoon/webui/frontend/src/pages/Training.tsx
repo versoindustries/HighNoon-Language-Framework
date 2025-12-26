@@ -55,6 +55,44 @@ export function Training() {
         loadSweeps();
     }, []);
 
+    // Poll for metrics when job is running
+    useEffect(() => {
+        if (!job || (job.state !== 'running' && job.state !== 'paused')) {
+            return;
+        }
+
+        const pollMetrics = async () => {
+            try {
+                const metricsData = await trainingApi.getMetrics(job.job_id);
+                setMetrics(metricsData);
+
+                // Update loss history for chart
+                if (metricsData.loss !== undefined && metricsData.global_step !== undefined) {
+                    setLossHistory(prev => {
+                        // Avoid duplicates
+                        if (prev.length > 0 && prev[prev.length - 1].step === metricsData.global_step) {
+                            return prev;
+                        }
+                        return [...prev, { step: metricsData.global_step, loss: metricsData.loss }].slice(-100);
+                    });
+                }
+
+                // Also refresh job status
+                const jobStatus = await trainingApi.getStatus(job.job_id);
+                setJob(jobStatus);
+            } catch (err) {
+                console.error('Failed to fetch metrics:', err);
+            }
+        };
+
+        // Initial fetch
+        pollMetrics();
+
+        // Poll every 2 seconds when running
+        const interval = setInterval(pollMetrics, 2000);
+        return () => clearInterval(interval);
+    }, [job?.job_id, job?.state]);
+
     const isRunning = job?.state === 'running';
     const isPaused = job?.state === 'paused';
     const completedSweeps = sweeps.filter(s => s.state === 'completed');

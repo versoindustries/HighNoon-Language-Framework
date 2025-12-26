@@ -98,6 +98,37 @@ export const hpoApi = {
     async listConfigs(): Promise<{ name: string; description: string }[]> {
         return fetchApi('/hpo/configs');
     },
+
+    /** Get parameter budget enforcement statistics. */
+    async getBudgetStats(sweepId: string): Promise<{
+        enabled: boolean;
+        param_budget: number;
+        total_skipped: number;
+        skip_rate: number;
+        safe_bounds?: {
+            max_embedding_dim: number;
+            max_reasoning_blocks: number;
+            max_moe_experts: number;
+        };
+    }> {
+        return fetchApi(`/hpo/sweep/${sweepId}/budget`);
+    },
+
+    /** Get skipped trials due to budget constraints. */
+    async getSkippedTrials(sweepId: string): Promise<{
+        skipped_trials: Array<{
+            trial_id: string;
+            reason: string;
+            estimated_params: number;
+            param_budget: number;
+        }>;
+        statistics: {
+            total_skipped: number;
+            skip_rate: number;
+        };
+    }> {
+        return fetchApi(`/hpo/sweep/${sweepId}/skipped`);
+    },
 };
 
 // ============================================================================
@@ -115,7 +146,7 @@ export const trainingApi = {
 
     /** Get training job status. */
     async getStatus(jobId: string): Promise<TrainingJobInfo> {
-        return fetchApi(`/training/${jobId}`);
+        return fetchApi(`/training/${jobId}/status`);
     },
 
     /** Get current training metrics. */
@@ -145,12 +176,48 @@ export const trainingApi = {
 
     /** List all training jobs. */
     async listJobs(): Promise<TrainingJobInfo[]> {
-        return fetchApi('/training/jobs');
+        const response = await fetchApi<{ jobs: TrainingJobInfo[] }>('/training/jobs');
+        return response.jobs || [];
     },
 
     /** Get training presets with resource estimates. */
     async getPresets(): Promise<{ name: string; description: string; ram_estimate: string }[]> {
         return fetchApi('/training/presets');
+    },
+
+    /** Get training logs with pagination. */
+    async getLogs(jobId: string, sinceIndex = 0, limit = 100): Promise<{
+        logs: Array<{
+            timestamp: string;
+            level: string;
+            message: string;
+            step?: number;
+            loss?: number;
+            learning_rate?: number;
+            throughput?: number;
+            memory_mb?: number;
+            gradient_norm?: number;
+        }>;
+        next_index: number;
+        total: number;
+    }> {
+        return fetchApi(`/training/${jobId}/logs?since_index=${sinceIndex}&limit=${limit}`);
+    },
+
+    /** Get system health for a training job. */
+    async getHealth(jobId: string): Promise<{
+        cpu_percent: number;
+        memory_used_gb: number;
+        memory_total_gb: number;
+        disk_used_gb: number;
+        disk_total_gb: number;
+    }> {
+        return fetchApi(`/training/${jobId}/health`);
+    },
+
+    /** Clear training logs. */
+    async clearLogs(jobId: string): Promise<void> {
+        await fetchApi(`/training/${jobId}/logs`, { method: 'DELETE' });
     },
 };
 

@@ -1303,7 +1303,11 @@ def train_trial(
             lambda_efficiency=lambda_efficiency,
         )
 
-    # Report completion with all metrics
+    # Get final memory stats for multi-objective optimization
+    final_mem_stats = memory_manager.get_stats()
+    peak_memory_mb = final_mem_stats.get("peak_mb", 0.0)
+
+    # Report completion with all metrics including memory
     hpo_reporter.complete(
         success=True,
         final_loss=best_loss,
@@ -1313,18 +1317,21 @@ def train_trial(
         mean_confidence=quality_metrics.get("mean_confidence"),
         expected_calibration_error=quality_metrics.get("expected_calibration_error"),
         composite_score=composite_score,
+        memory_peak_mb=peak_memory_mb,
+        epochs_completed=epoch + 1,  # epoch is 0-indexed
     )
 
-    # Log comprehensive completion summary
+    # Log comprehensive completion summary with memory
     ppl_str = (
         f"{quality_metrics.get('perplexity', 0):.2f}"
         if quality_metrics.get("perplexity")
         else "N/A"
     )
+    mem_str = f", peak_mem={peak_memory_mb:.0f}MB" if peak_memory_mb > 0 else ""
     logger.info(
         f"[HPO] Trial {trial_id} completed: loss={best_loss:.6f}, "
         f"composite={composite_score:.6f}, ppl={ppl_str}, "
-        f"~{param_count / 1e6:.1f}M params"
+        f"~{param_count / 1e6:.1f}M params{mem_str}"
     )
 
     return best_loss

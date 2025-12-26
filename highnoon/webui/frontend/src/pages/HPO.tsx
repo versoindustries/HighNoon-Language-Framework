@@ -479,6 +479,15 @@ export function HPO() {
     const [trials, setTrials] = useState<HPOTrialInfo[]>([]);
     const [isRunning, setIsRunning] = useState(false);
 
+    // Budget enforcement stats
+    const [budgetStats, setBudgetStats] = useState<{
+        enabled: boolean;
+        param_budget: number;
+        total_skipped: number;
+        skip_rate: number;
+        safe_bounds?: { max_embedding_dim: number; max_reasoning_blocks: number; max_moe_experts: number };
+    } | null>(null);
+
     // Modal state
     const [upgradeModal, setUpgradeModal] = useState<{ open: boolean; feature: string; tier: 'pro' | 'enterprise' }>({
         open: false, feature: '', tier: 'pro'
@@ -584,6 +593,15 @@ export function HPO() {
                 // Also fetch trials
                 const trialList = await hpoApi.getTrials(sweepStatus.sweep_id);
                 setTrials(trialList);
+
+                // Fetch budget stats
+                try {
+                    const stats = await hpoApi.getBudgetStats(sweepStatus.sweep_id);
+                    setBudgetStats(stats);
+                } catch (budgetErr) {
+                    // Budget stats may not be available for all sweeps
+                    console.debug('[HPO] Budget stats not available:', budgetErr);
+                }
 
                 // Check if sweep is done
                 if (status.state === 'completed' || status.state === 'failed' || status.state === 'cancelled') {
@@ -1054,6 +1072,42 @@ export function HPO() {
                                 )}
                             </CardContent>
                         </Card>
+
+                        {/* Budget Enforcement Stats */}
+                        {budgetStats && budgetStats.total_skipped > 0 && (
+                            <Card padding="lg" className="budget-stats-card">
+                                <CardHeader
+                                    title="Budget Enforcement"
+                                    subtitle="Parameter budget optimization"
+                                />
+                                <CardContent>
+                                    <div className="budget-stats">
+                                        <div className="budget-stat">
+                                            <span className="stat-label">Budget</span>
+                                            <span className="stat-value">{formatNumber(budgetStats.param_budget)}</span>
+                                        </div>
+                                        <div className="budget-stat">
+                                            <span className="stat-label">Skipped</span>
+                                            <span className="stat-value stat-warning">{budgetStats.total_skipped}</span>
+                                        </div>
+                                        <div className="budget-stat">
+                                            <span className="stat-label">Skip Rate</span>
+                                            <span className="stat-value">{(budgetStats.skip_rate * 100).toFixed(1)}%</span>
+                                        </div>
+                                    </div>
+                                    {budgetStats.safe_bounds && (
+                                        <div className="safe-bounds">
+                                            <span className="safe-bounds-title">Safe Architecture Bounds:</span>
+                                            <div className="bounds-grid">
+                                                <span>Embed: {budgetStats.safe_bounds.max_embedding_dim}</span>
+                                                <span>Blocks: {budgetStats.safe_bounds.max_reasoning_blocks}</span>
+                                                <span>Experts: {budgetStats.safe_bounds.max_moe_experts}</span>
+                                            </div>
+                                        </div>
+                                    )}
+                                </CardContent>
+                            </Card>
+                        )}
 
                         <Card padding="none" className="trials-card">
                             <CardHeader

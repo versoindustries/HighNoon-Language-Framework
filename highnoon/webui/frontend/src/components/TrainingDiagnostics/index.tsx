@@ -7,6 +7,7 @@ import {
     RefreshCw, Pause, Play, Download, ChevronDown, ChevronUp
 } from 'lucide-react';
 import { Button, Card, CardHeader, CardContent, ProgressBar } from '../ui';
+import { trainingApi } from '../../api/client';
 import './TrainingDiagnostics.css';
 
 // =============================================================================
@@ -260,49 +261,76 @@ export function TrainingDiagnostics({
     const [health, setHealth] = useState<SystemHealth | null>(null);
     const [logs, setLogs] = useState<LogEntry[]>([]);
     const [metrics, setMetrics] = useState<TrainingMetrics | null>(null);
+    const [logIndex, setLogIndex] = useState(0);
 
-    // Simulate system health updates
-    useEffect(() => {
-        // Simulated health data (would come from backend in production)
-        const interval = setInterval(() => {
-            setHealth({
-                cpuPercent: 20 + Math.random() * 40,
-                memoryUsedGb: 8 + Math.random() * 16,
-                memoryTotalGb: 64,
-                diskUsedGb: 120 + Math.random() * 10,
-                diskTotalGb: 500,
-            });
-        }, 2000);
-
-        return () => clearInterval(interval);
-    }, []);
-
-    // Simulate logs (would come from WebSocket in production)
+    // Fetch system health from backend
     useEffect(() => {
         if (!jobId) return;
 
-        const messages = [
-            'Loading training configuration...',
-            'Initializing model weights...',
-            'Starting training loop...',
-            'Step 100: loss=2.4532, lr=1e-4',
-            'Step 200: loss=2.1245, lr=1e-4',
-            'Checkpoint saved at step 200',
-        ];
-
-        let index = 0;
-        const interval = setInterval(() => {
-            if (index < messages.length) {
-                setLogs(prev => [...prev, {
-                    timestamp: new Date().toLocaleTimeString(),
-                    level: 'info',
-                    message: messages[index],
-                }]);
-                index++;
+        const fetchHealth = async () => {
+            try {
+                const data = await trainingApi.getHealth(jobId);
+                setHealth({
+                    cpuPercent: data.cpu_percent,
+                    memoryUsedGb: data.memory_used_gb,
+                    memoryTotalGb: data.memory_total_gb,
+                    diskUsedGb: data.disk_used_gb,
+                    diskTotalGb: data.disk_total_gb,
+                });
+            } catch (err) {
+                console.error('Failed to fetch health:', err);
             }
-        }, 1500);
+        };
 
+        fetchHealth();
+        const interval = setInterval(fetchHealth, 3000);
         return () => clearInterval(interval);
+    }, [jobId]);
+
+    // Fetch logs and metrics from backend
+    useEffect(() => {
+        if (!jobId) return;
+
+        const fetchLogs = async () => {
+            try {
+                const data = await trainingApi.getLogs(jobId, logIndex, 50);
+                if (data.logs && data.logs.length > 0) {
+                    const newLogs: LogEntry[] = data.logs.map(log => ({
+                        timestamp: new Date(log.timestamp).toLocaleTimeString(),
+                        level: (log.level?.toLowerCase() || 'info') as 'info' | 'warning' | 'error' | 'debug',
+                        message: log.message || '',
+                    }));
+                    setLogs(prev => [...prev, ...newLogs]);
+                    setLogIndex(data.next_index);
+
+                    // Update metrics from latest log with training data
+                    const latestWithMetrics = [...data.logs].reverse().find(l => l.step !== undefined);
+                    if (latestWithMetrics) {
+                        setMetrics({
+                            step: latestWithMetrics.step || 0,
+                            epoch: 0, // Would need to be passed from job
+                            loss: latestWithMetrics.loss || 0,
+                            learningRate: latestWithMetrics.learning_rate || 0,
+                            throughput: latestWithMetrics.throughput || 0,
+                            gradientNorm: latestWithMetrics.gradient_norm,
+                        });
+                    }
+                }
+            } catch (err) {
+                console.error('Failed to fetch logs:', err);
+            }
+        };
+
+        fetchLogs();
+        const interval = setInterval(fetchLogs, 2000);
+        return () => clearInterval(interval);
+    }, [jobId, logIndex]);
+
+    // Reset when job changes
+    useEffect(() => {
+        setLogs([]);
+        setLogIndex(0);
+        setMetrics(null);
     }, [jobId]);
 
     if (isCollapsed) {

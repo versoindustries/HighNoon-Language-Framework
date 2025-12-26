@@ -750,8 +750,23 @@ class HPOTrialInfo(BaseModel):
     composite_score: float | None = None
 
 
+class HPOModelConfig(BaseModel):
+    """Model configuration from HPO sweep."""
+
+    vocab_size: int = 32000
+    context_window: int = 4096
+    embedding_dim: int = 768
+    num_reasoning_blocks: int = 6
+    num_moe_experts: int = 4
+    position_embedding: str = "rope"
+    param_budget: int = 1_000_000_000
+
+
 class HPOSweepInfo(BaseModel):
-    """Information about an HPO sweep."""
+    """Information about an HPO sweep.
+
+    Includes comprehensive multi-objective metrics for the best trial.
+    """
 
     sweep_id: str
     stage: HPOStage
@@ -762,9 +777,15 @@ class HPOSweepInfo(BaseModel):
     best_loss: float | None = None
     best_composite_score: float | None = None  # Multi-objective best score
     best_perplexity: float | None = None  # Best trial's perplexity
+    best_confidence: float | None = None  # Best trial's mean confidence
+    best_memory_mb: float | None = None  # Best trial's peak memory usage
     best_hyperparams: dict[str, Any] | None = None
     started_at: str | None = None
     trials: list[HPOTrialInfo] = Field(default_factory=list)
+    model_config_data: HPOModelConfig | None = Field(default=None, alias="model_config")
+
+    class Config:
+        populate_by_name = True
 
 
 # ============================================================================
@@ -1957,6 +1978,86 @@ def create_app(debug: bool = False) -> FastAPI:
         """List all training jobs."""
         return {"jobs": list(training_jobs.values())}
 
+    # Training logs storage
+    training_logs: dict[str, list[dict[str, Any]]] = {}
+
+    @app.post("/api/training/{job_id}/log")
+    async def log_training_event(job_id: str, request: Request):
+        """Log a training event (called by training process)."""
+        job = training_jobs.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Training job not found")
+
+        body = await request.json()
+        if job_id not in training_logs:
+            training_logs[job_id] = []
+
+        log_entry = {
+            "timestamp": body.get("timestamp", datetime.now().isoformat()),
+            "level": body.get("level", "INFO"),
+            "message": body.get("message", ""),
+            "step": body.get("step"),
+            "loss": body.get("loss"),
+            "learning_rate": body.get("learning_rate"),
+            "throughput": body.get("throughput"),
+            "memory_mb": body.get("memory_mb"),
+            "gradient_norm": body.get("gradient_norm"),
+        }
+        training_logs[job_id].append(log_entry)
+
+        # Keep last 1000 logs
+        if len(training_logs[job_id]) > 1000:
+            training_logs[job_id] = training_logs[job_id][-1000:]
+
+        return {"status": "logged"}
+
+    @app.get("/api/training/{job_id}/logs")
+    async def get_training_logs(job_id: str, since_index: int = 0, limit: int = 100):
+        """Get training logs with pagination."""
+        job = training_jobs.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Training job not found")
+
+        logs = training_logs.get(job_id, [])
+        selected = logs[since_index : since_index + limit]
+        return {
+            "logs": selected,
+            "next_index": since_index + len(selected),
+            "total": len(logs),
+        }
+
+    @app.delete("/api/training/{job_id}/logs")
+    async def clear_training_logs(job_id: str):
+        """Clear training logs."""
+        job = training_jobs.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Training job not found")
+
+        training_logs[job_id] = []
+        return {"status": "cleared"}
+
+    @app.get("/api/training/{job_id}/health")
+    async def get_training_health(job_id: str):
+        """Get system health for a training job."""
+        import psutil
+
+        job = training_jobs.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Training job not found")
+
+        # Get real system metrics
+        cpu_percent = psutil.cpu_percent(interval=0.1)
+        memory = psutil.virtual_memory()
+        disk = psutil.disk_usage("/")
+
+        return {
+            "cpu_percent": cpu_percent,
+            "memory_used_gb": memory.used / (1024**3),
+            "memory_total_gb": memory.total / (1024**3),
+            "disk_used_gb": disk.used / (1024**3),
+            "disk_total_gb": disk.total / (1024**3),
+        }
+
     # ========================================================================
     # API Routes - HPO
     # ========================================================================
@@ -2285,6 +2386,8 @@ def create_app(debug: bool = False) -> FastAPI:
                 if result.best_trial:
                     sweep["best_composite_score"] = result.best_trial.composite_score
                     sweep["best_perplexity"] = result.best_trial.perplexity
+                    sweep["best_confidence"] = result.best_trial.mean_confidence
+                    sweep["best_memory_mb"] = result.best_trial.memory_peak_mb
 
                 hpo_logs[sweep_id].append(
                     {
@@ -2337,12 +2440,30 @@ def create_app(debug: bool = False) -> FastAPI:
                 executor.best_trial.composite_score if executor.best_trial else None
             )
             best_perplexity = executor.best_trial.perplexity if executor.best_trial else None
+            best_confidence = executor.best_trial.mean_confidence if executor.best_trial else None
+            best_memory_mb = executor.best_trial.memory_peak_mb if executor.best_trial else None
         else:
             completed = sweep["completed_trials"]
             best_loss = sweep.get("best_loss")
             best_trial_id = sweep.get("best_trial_id")
             best_composite_score = sweep.get("best_composite_score")
             best_perplexity = sweep.get("best_perplexity")
+            best_confidence = sweep.get("best_confidence")
+            best_memory_mb = sweep.get("best_memory_mb")
+
+        # Build model_config from sweep data
+        sweep_model_config = sweep.get("model_config")
+        model_config = None
+        if sweep_model_config:
+            model_config = HPOModelConfig(
+                vocab_size=sweep_model_config.get("vocab_size", 32000),
+                context_window=sweep_model_config.get("context_window", 4096),
+                embedding_dim=sweep_model_config.get("embedding_dim", 768),
+                num_reasoning_blocks=sweep_model_config.get("num_reasoning_blocks", 6),
+                num_moe_experts=sweep_model_config.get("num_moe_experts", 4),
+                position_embedding=sweep_model_config.get("position_embedding", "rope"),
+                param_budget=sweep_model_config.get("param_budget", 1_000_000_000),
+            )
 
         return HPOSweepInfo(
             sweep_id=sweep["sweep_id"],
@@ -2354,9 +2475,12 @@ def create_app(debug: bool = False) -> FastAPI:
             best_loss=best_loss,
             best_composite_score=best_composite_score,
             best_perplexity=best_perplexity,
+            best_confidence=best_confidence,
+            best_memory_mb=best_memory_mb,
             best_hyperparams=sweep.get("best_hyperparams"),
             started_at=sweep.get("started_at"),
             trials=[],  # Exclude trials for status endpoint
+            model_config=model_config,
         )
 
     @app.get("/api/hpo/sweep/{sweep_id}/trials")

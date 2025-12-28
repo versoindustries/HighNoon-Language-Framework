@@ -16,8 +16,10 @@ _update_op = getattr(_lib, "FusedStreamingUpdate", None) if _lib else None
 def fused_streaming_compress(state: tf.Tensor, target_dim: int) -> tf.Tensor:
     """Compress streaming state to target dimension."""
     if _compress_op is None:
-        # Fallback: simple truncation
-        return state[..., :target_dim]
+        raise RuntimeError(
+            "FusedStreamingCompress C++ op not available. Build with: "
+            "cd highnoon/_native && ./build_secure.sh"
+        )
     return _compress_op(state=tf.cast(state, tf.float32), target_dim=target_dim)
 
 
@@ -26,7 +28,10 @@ def fused_streaming_update(
 ) -> tf.Tensor:
     """Update streaming state with EMA."""
     if _update_op is None:
-        return alpha * old_state + (1 - alpha) * new_state
+        raise RuntimeError(
+            "FusedStreamingUpdate C++ op not available. Build with: "
+            "cd highnoon/_native && ./build_secure.sh"
+        )
     return _update_op(
         old_state=tf.cast(old_state, tf.float32),
         new_state=tf.cast(new_state, tf.float32),

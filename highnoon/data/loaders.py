@@ -83,11 +83,17 @@ def load_training_dataset(
     superword_min_frequency: int | None = None,
     superword_max_vocab: int | None = None,
     prefetch_buffer_size: int | None = None,
+    use_adaptive_tokenizer: bool = True,
+    adaptive_min_freq: int = 10,
 ) -> tuple[tf.data.Dataset, QWTTextTokenizer, SuperwordMerger | None]:
     """Load a training dataset with tokenization and optional superword merging.
 
     Supports loading from HuggingFace datasets (for development/testing) or
     falls back to sample texts when no dataset is specified.
+
+    When use_adaptive_tokenizer is enabled (default), uses AdaptiveQWTTokenizer
+    which learns frequent n-grams from the corpus to expand vocabulary and
+    compress sequences. This fixes the vocab_size mismatch issue.
 
     When superword merging is enabled, trains a SuperwordMerger on the tokenized
     corpus to learn frequent n-grams, then applies merges to reduce sequence length.
@@ -111,25 +117,46 @@ def load_training_dataset(
         superword_max_vocab: Max superwords to learn. Defaults to config.SUPERWORD_MAX_VOCAB_SIZE.
         prefetch_buffer_size: Number of batches to prefetch. If None, uses tf.data.AUTOTUNE.
             For memory-constrained HPO, set to 1-4. For high-throughput, use None (auto).
+        use_adaptive_tokenizer: Use AdaptiveQWTTokenizer with learnable codebook (default: True).
+        adaptive_min_freq: Minimum n-gram frequency for adaptive tokenizer learning.
 
     Returns:
         Tuple of (dataset, tokenizer, merger) where:
         - dataset yields (input_ids, labels)
-        - tokenizer is the QWTTextTokenizer instance
-        - merger is the trained SuperwordMerger (or None if disabled)
+        - tokenizer is the QWTTextTokenizer or AdaptiveQWTTokenizer instance
+        - merger is the trained SuperwordMerger (or None if using adaptive tokenizer)
     """
     # Create or use provided tokenizer
     if tokenizer is None:
-        tokenizer = create_tokenizer(vocab_size=vocab_size, max_length=sequence_length)
-
-    logger.info(
-        "[Data Loaders] Using QWTTextTokenizer: vocab_size=%d, max_length=%d",
-        tokenizer.vocab_size,
-        tokenizer.model_max_length,
-    )
+        if use_adaptive_tokenizer:
+            from highnoon.tokenization import AdaptiveQWTTokenizer
+            tokenizer = AdaptiveQWTTokenizer(
+                vocab_size=vocab_size,
+                model_max_length=sequence_length,
+                min_ngram_size=2,
+                max_ngram_size=5,
+            )
+            logger.info(
+                "[Data Loaders] Using AdaptiveQWTTokenizer: target_vocab=%d, max_length=%d",
+                vocab_size,
+                sequence_length,
+            )
+        else:
+            tokenizer = create_tokenizer(vocab_size=vocab_size, max_length=sequence_length)
+            logger.info(
+                "[Data Loaders] Using QWTTextTokenizer: vocab_size=%d, max_length=%d",
+                tokenizer.vocab_size,
+                tokenizer.model_max_length,
+            )
+    else:
+        logger.info(
+            "[Data Loaders] Using provided tokenizer: vocab_size=%d",
+            tokenizer.vocab_size,
+        )
 
     # Collect texts from HuggingFace dataset or fallback to sample texts
     all_token_ids = []
+    raw_texts = []  # Collect raw texts for adaptive tokenizer learning
 
     if hf_dataset_name:
         # Load from HuggingFace dataset with streaming for efficiency
@@ -181,19 +208,12 @@ def load_training_dataset(
                                     break
                         logger.info("[Data Loaders] Using text column: %s", text_column_detected)
 
-                # Extract and tokenize text
+                # Extract text (collect raw, tokenize later for adaptive learning)
                 text = sample.get(text_column_detected) or ""
                 if not text or not isinstance(text, str):
                     continue
 
-                encoding = tokenizer(
-                    text,
-                    truncation=True,
-                    max_length=sequence_length,
-                    padding="max_length",
-                    add_special_tokens=True,
-                )
-                all_token_ids.append(encoding["input_ids"])
+                raw_texts.append(text)
                 sample_count += 1
 
                 # Respect max_samples limit
@@ -205,8 +225,8 @@ def load_training_dataset(
                     logger.info("[Data Loaders] Tokenized %d samples...", sample_count)
 
             logger.info(
-                "[Data Loaders] Tokenized %d samples from HuggingFace (streaming)",
-                len(all_token_ids),
+                "[Data Loaders] Collected %d text samples from HuggingFace",
+                len(raw_texts),
             )
 
         except Exception as e:
@@ -214,35 +234,84 @@ def load_training_dataset(
             logger.warning("[Data Loaders] Falling back to sample texts")
             hf_dataset_name = None  # Fall back to sample texts
 
-    if not all_token_ids:
-        # Fallback: tokenize built-in sample texts
+    if not raw_texts:
+        # Fallback: use built-in sample texts
         logger.info("[Data Loaders] Using built-in sample texts (%d samples)", len(_SAMPLE_TEXTS))
-        for text in _SAMPLE_TEXTS:
-            encoding = tokenizer(
-                text,
-                truncation=True,
-                max_length=sequence_length,
-                padding="max_length",
-                add_special_tokens=True,
-            )
-            all_token_ids.append(encoding["input_ids"])
+        raw_texts = list(_SAMPLE_TEXTS)
+
+    # Train AdaptiveQWTTokenizer if enabled (before tokenizing)
+    from highnoon.tokenization import AdaptiveQWTTokenizer
+    if isinstance(tokenizer, AdaptiveQWTTokenizer) and not tokenizer.is_trained:
+        logger.info(
+            "[Data Loaders] Training AdaptiveQWTTokenizer on %d texts (min_freq=%d)...",
+            len(raw_texts),
+            adaptive_min_freq,
+        )
+        learned_count = tokenizer.learn_from_corpus(raw_texts, min_freq=adaptive_min_freq)
+        logger.info(
+            "[Data Loaders] AdaptiveQWTTokenizer learned %d n-grams, vocab_size=%d",
+            learned_count,
+            tokenizer.vocab_size,
+        )
+
+    # Now tokenize all collected texts
+    logger.info("[Data Loaders] Tokenizing %d texts...", len(raw_texts))
+    for text in raw_texts:
+        encoding = tokenizer(
+            text,
+            truncation=True,
+            max_length=sequence_length,
+            padding="max_length",
+            add_special_tokens=True,
+        )
+        all_token_ids.append(encoding["input_ids"])
 
     # Convert to numpy array
     token_array = np.array(all_token_ids, dtype=np.int32)
     num_samples = len(token_array)
 
+    # Validate token IDs are within vocab bounds
+    actual_vocab_size = tokenizer.vocab_size
+    max_token_id = int(np.max(token_array))
+    min_token_id = int(np.min(token_array))
+    
     logger.info(
-        "[Data Loaders] Tokenized %d samples, shape=%s",
+        "[Data Loaders] Tokenized %d samples, shape=%s, "
+        "token_range=[%d, %d], vocab_size=%d",
         num_samples,
         token_array.shape,
+        min_token_id,
+        max_token_id,
+        actual_vocab_size,
     )
+    
+    if max_token_id >= actual_vocab_size:
+        logger.error(
+            "[Data Loaders] CRITICAL: max_token_id=%d >= vocab_size=%d. "
+            "This will cause NaN loss! Clamping tokens to valid range.",
+            max_token_id,
+            actual_vocab_size,
+        )
+        # Clamp to valid range to prevent NaN
+        token_array = np.clip(token_array, 0, actual_vocab_size - 1)
+
 
     # Phase 10.2: SuperwordMerger Integration
     # Train and apply superword merging if enabled
+    # NOTE: Skip if using AdaptiveQWTTokenizer since it has its own internal merger
     use_superwords = (
         enable_superwords if enable_superwords is not None else config.ENABLE_SUPERWORDS
     )
     merger: SuperwordMerger | None = None
+
+    # AdaptiveQWTTokenizer has its own merger, don't double-apply
+    if isinstance(tokenizer, AdaptiveQWTTokenizer):
+        use_superwords = False
+        if tokenizer.merger is not None:
+            logger.info(
+                "[Data Loaders] Using AdaptiveQWTTokenizer's internal merger (%d superwords)",
+                tokenizer.merger.superword_count,
+            )
 
     if use_superwords and num_samples > 0:
         logger.info("[Data Loaders] Training SuperwordMerger on %d sequences...", num_samples)

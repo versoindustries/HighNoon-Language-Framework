@@ -1,10 +1,11 @@
 // HighNoon Dashboard - HPO Orchestrator Page (Enterprise UX)
 // Tiered licensing with progressive disclosure
+// Phase-based UI: Setup Mode -> Dashboard Mode when optimization starts
 import { useState, useCallback, useEffect, createContext, useContext, useRef } from 'react';
 import {
     Play, Pause, Square, Download, RefreshCw, Check, Clock, Zap, Sparkles,
     ChevronRight, ChevronDown, Info, Lock, Crown, Settings, Cpu, Target,
-    Layers, AlertTriangle, BarChart3
+    Layers, AlertTriangle, BarChart3, ArrowLeft
 } from 'lucide-react';
 import {
     Card,
@@ -24,6 +25,7 @@ import type {
     WebSocketMessage,
 } from '../api/types';
 import { TrainingConsole } from '../components/TrainingConsole';
+import { HPODashboard } from '../components/HPODashboard';
 import './HPO.css';
 
 // =============================================================================
@@ -47,7 +49,7 @@ const TIER_LIMITS: Record<LicenseTier, TierLimits> = {
         maxContextWindow: 5000000, // 5M context - FULL Lite capability
         maxTrials: 20,
         allowedStrategies: ['bayesian', 'random', 'hyperband', 'successive_halving', 'pbt'],
-        allowedOptimizers: ['sophiag', 'qiao', 'grover', 'sympflow'],  // Quantum optimizers: SophiaG, QIAO, Grover-Q, SympFlow
+        allowedOptimizers: ['sophiag', 'qiao', 'grover', 'sympflow', 'sympflowqng'],  // Quantum optimizers: SophiaG, QIAO, Grover-Q, SympFlow, SympFlowQNG
         advancedOptions: true,  // Enabled for HPO enhancements
     },
     pro: {
@@ -55,7 +57,7 @@ const TIER_LIMITS: Record<LicenseTier, TierLimits> = {
         maxContextWindow: 5000000,
         maxTrials: 100,
         allowedStrategies: ['bayesian', 'random', 'hyperband', 'successive_halving', 'pbt'],
-        allowedOptimizers: ['sophiag', 'qiao', 'grover', 'sympflow', 'adamw', 'lion'],  // Quantum + standard optimizers
+        allowedOptimizers: ['sophiag', 'qiao', 'grover', 'sympflow', 'sympflowqng', 'adamw', 'lion'],  // Quantum + standard optimizers
         advancedOptions: true,
     },
     enterprise: {
@@ -63,7 +65,7 @@ const TIER_LIMITS: Record<LicenseTier, TierLimits> = {
         maxContextWindow: 5000000,
         maxTrials: 999,
         allowedStrategies: ['bayesian', 'random', 'hyperband', 'successive_halving', 'pbt', 'custom'],
-        allowedOptimizers: ['sophiag', 'qiao', 'grover', 'sympflow', 'adamw', 'adam', 'lion', 'custom'],  // Full optimizer suite
+        allowedOptimizers: ['sophiag', 'qiao', 'grover', 'sympflow', 'sympflowqng', 'adamw', 'adam', 'lion', 'custom'],  // Full optimizer suite
         advancedOptions: true,
     },
 };
@@ -72,58 +74,10 @@ const TIER_LIMITS: Record<LicenseTier, TierLimits> = {
 const LicenseContext = createContext<LicenseTier>('lite');
 
 // =============================================================================
-// TYPES
-// =============================================================================
-
-type TimeBudget = 'quick' | 'standard' | 'thorough' | 'convergence';
-
-interface TimeBudgetOption {
-    id: TimeBudget;
-    label: string;
-    duration: string;
-    description: string;
-    trials: number;
-    icon: React.ReactNode;
-}
-
-// =============================================================================
 // CONSTANTS
 // =============================================================================
 
-const TIME_BUDGETS: TimeBudgetOption[] = [
-    {
-        id: 'quick',
-        label: 'Quick',
-        duration: '15 minutes',
-        description: 'Fast exploration',
-        trials: 5,
-        icon: <Zap size={20} />,
-    },
-    {
-        id: 'standard',
-        label: 'Standard',
-        duration: '1 hour',
-        description: 'Balanced search',
-        trials: 15,
-        icon: <Clock size={20} />,
-    },
-    {
-        id: 'thorough',
-        label: 'Thorough',
-        duration: '4 hours',
-        description: 'Comprehensive',
-        trials: 40,
-        icon: <Sparkles size={20} />,
-    },
-    {
-        id: 'convergence',
-        label: 'Convergence',
-        duration: 'Until optimal',
-        description: 'Best accuracy',
-        trials: 999,  // Effectively unlimited within Lite tier limits
-        icon: <Target size={20} />,
-    },
-];
+// HPO always runs until convergence - no manual mode selection needed
 
 
 // =============================================================================
@@ -456,19 +410,15 @@ export function HPO() {
     const [currentStep, setCurrentStep] = useState(0);
     const [selectedCurriculum, setSelectedCurriculum] = useState<string>('');
 
-    // Model configuration - SLIDER BARS
-    const [vocabSize, setVocabSize] = useState(32000);
+    // Model configuration - Context window slider (vocab is auto-determined)
     const [contextWindow, setContextWindow] = useState(4096);
 
     // Parameter budget - HPO will find optimal architecture within this constraint
     const [paramBudget, setParamBudget] = useState(1_000_000_000); // Default 1B
 
-    // Time budget
-    const [timeBudget, setTimeBudget] = useState<TimeBudget>('standard');
-
     // Advanced options (Pro+)
     const [advancedOpen, setAdvancedOpen] = useState(false);
-    const [searchStrategy, setSearchStrategy] = useState('bayesian');
+    const [searchStrategy] = useState('quantum');  // QAHPO is the only strategy
     const [selectedOptimizers, setSelectedOptimizers] = useState<string[]>(['sophiag']);
 
     // Learning rate is now auto-tuned based on optimizer selection
@@ -495,6 +445,12 @@ export function HPO() {
 
     // Dev mode state for verbose logging
     const [devMode, setDevMode] = useState(false);
+
+    // Dashboard mode: 'setup' shows wizard, 'dashboard' shows live monitoring
+    const [dashboardMode, setDashboardMode] = useState<'setup' | 'dashboard'>('setup');
+
+    // Settings modal for accessing config from dashboard mode
+    const [settingsModalOpen, setSettingsModalOpen] = useState(false);
 
     // WebSocket connection ref for sweep tracking
     const wsRef = useRef<{ close: () => void } | null>(null);
@@ -617,7 +573,6 @@ export function HPO() {
 
     const steps = ['Curriculum', 'Configure', 'Start'];
     const curriculum = curricula.find(c => c.id === selectedCurriculum) || null;
-    const selectedTimeBudget = TIME_BUDGETS.find(t => t.id === timeBudget)!;
 
     const canProceed = () => {
         if (currentStep === 0) return !!selectedCurriculum;
@@ -644,13 +599,14 @@ export function HPO() {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     curriculum_id: selectedCurriculum,
-                    max_trials: selectedTimeBudget.trials,
+                    // HPO runs until convergence - no manual limits
+                    auto_stop_on_convergence: true,
                     search_strategy: searchStrategy,
                     optimizers: selectedOptimizers,
-                    // Learning rate is auto-derived from optimizer selection
-                    // Model tokenizer configuration (user-specified)
-                    vocab_size: vocabSize,
+                    // Tokenizer configuration - vocab_size is auto-determined by IntelligentVocabController
                     context_window: contextWindow,
+                    use_quantum_tokenizer: true,  // Enable automatic vocab sizing
+                    use_hyperdimensional_embedding: true,  // Use HDE for memory efficiency
                     // Parameter budget constraint - HPO will auto-discover optimal architecture
                     param_budget: paramBudget,
                 }),
@@ -658,7 +614,6 @@ export function HPO() {
             const data = await response.json();
             console.log('HPO sweep started:', data);
             if (data.sweep_id) {
-                // Use type assertion for sweep status from API response
                 setSweepStatus({
                     sweep_id: data.sweep_id,
                     stage: 'coarse' as const,
@@ -666,10 +621,13 @@ export function HPO() {
                     max_trials: data.max_trials,
                     completed_trials: 0,
                 } as unknown as HPOSweepInfo);
+                // Switch to dashboard mode for unified monitoring view
+                setDashboardMode('dashboard');
             }
         } catch (err) {
             console.error('Failed to start HPO sweep:', err);
             setIsRunning(false);
+            setDashboardMode('setup');
         }
     };
 
@@ -684,496 +642,500 @@ export function HPO() {
     return (
         <LicenseContext.Provider value={currentTier}>
             <div className="page">
-                <div className="page-header">
-                    <div className="page-header-content">
-                        <h1 className="page-title">
-                            Smart Tuner
-                            {getTierBadge(currentTier)}
-                        </h1>
-                        <p className="page-subtitle">
-                            Automatically find the best hyperparameters for your model
-                        </p>
-                    </div>
-                    <div className="page-header-actions">
-                        {isRunning && (
-                            <>
-                                <Button variant="secondary" leftIcon={<Pause size={16} />}>Pause</Button>
-                                <Button variant="danger" leftIcon={<Square size={16} />} onClick={handleStopSweep}>Stop</Button>
-                            </>
-                        )}
-                    </div>
-                </div>
-
-                <div className="hpo-layout-simple">
-                    {/* Left Column: Wizard */}
-                    <div className="hpo-wizard-column">
-                        <Card variant="glass" padding="none">
-                            <CardHeader title="Setup" subtitle="Configure optimization in a few simple steps" />
-                            <CardContent>
-                                <StepIndicator currentStep={currentStep} steps={steps} />
-
-                                <div className="wizard-content">
-                                    {/* Step 1: Curriculum Selection */}
-                                    {currentStep === 0 && (
-                                        <div className="wizard-step">
-                                            <h3 className="wizard-step-title">Select your curriculum</h3>
-                                            <p className="wizard-step-desc">
-                                                Choose the curriculum to optimize hyperparameters for
-                                            </p>
-                                            <div className="curriculum-options">
-                                                {loadingCurricula ? (
-                                                    <div className="curriculum-loading">Loading curricula...</div>
-                                                ) : curricula.length === 0 ? (
-                                                    <div className="curriculum-empty">
-                                                        <Info size={24} />
-                                                        <p>No curricula found. Create one in the Curriculum tab first.</p>
-                                                    </div>
-                                                ) : (
-                                                    curricula.map((curr) => (
-                                                        <label
-                                                            key={curr.id}
-                                                            className={`curriculum-option ${selectedCurriculum === curr.id ? 'curriculum-option-selected' : ''}`}
-                                                        >
-                                                            <input
-                                                                type="radio"
-                                                                name="curriculum"
-                                                                value={curr.id}
-                                                                checked={selectedCurriculum === curr.id}
-                                                                onChange={() => setSelectedCurriculum(curr.id)}
-                                                            />
-                                                            <div className="curriculum-option-content">
-                                                                <span className="curriculum-option-name">{curr.name}</span>
-                                                                <div className="curriculum-option-meta">
-                                                                    <span>{curr.stages.length} stages</span>
-                                                                </div>
-                                                            </div>
-                                                        </label>
-                                                    ))
-                                                )}
-                                            </div>
-                                        </div>
-                                    )}
-
-                                    {/* Step 2: Configuration (Model + Time + Advanced) */}
-                                    {currentStep === 1 && (
-                                        <div className="wizard-step">
-                                            <h3 className="wizard-step-title">Configure your model</h3>
-                                            <p className="wizard-step-desc">
-                                                Set model parameters and optimization time
-                                            </p>
-
-                                            {/* Model Configuration - SLIDER BARS */}
-                                            <div className="config-section">
-                                                <div className="config-section-header">
-                                                    <Cpu size={18} />
-                                                    <span>Tokenizer Settings</span>
-                                                </div>
-                                                <div className="slider-group">
-                                                    <LogSlider
-                                                        label="Vocabulary Size"
-                                                        value={vocabSize}
-                                                        stops={VOCAB_STOPS}
-                                                        maxValue={limits.maxVocabSize}
-                                                        onChange={setVocabSize}
-                                                    />
-                                                    <LogSlider
-                                                        label="Context Window"
-                                                        value={contextWindow}
-                                                        stops={CONTEXT_STOPS}
-                                                        maxValue={limits.maxContextWindow}
-                                                        onChange={setContextWindow}
-                                                    />
-                                                </div>
-
-                                                {/* Parameter Budget - HPO finds optimal architecture within this constraint */}
-                                                <div className="config-section config-section-architecture">
-                                                    <div className="config-section-header">
-                                                        <Layers size={18} />
-                                                        <span>Parameter Budget</span>
-                                                        <span className="param-indicator">
-                                                            <span className="param-count param-count-safe">
-                                                                {formatParams(paramBudget)} max
-                                                            </span>
-                                                        </span>
-                                                    </div>
-                                                    <div className="param-budget-content">
-                                                        <p className="budget-explanation">
-                                                            Set your target model size. HPO will automatically discover the optimal
-                                                            architecture (reasoning blocks, MoE experts, embedding dimension, etc.)
-                                                            within this parameter budget.
-                                                        </p>
-                                                        <LogSlider
-                                                            label="Maximum Parameters"
-                                                            value={paramBudget}
-                                                            stops={PARAM_STOPS}
-                                                            maxValue={LITE_LIMITS.maxParams}
-                                                            onChange={setParamBudget}
-                                                            formatValue={formatParams}
-                                                        />
-                                                        <div className="budget-presets">
-                                                            <span className="budget-preset-label">Quick Presets:</span>
-                                                            <button className="budget-preset-btn" onClick={() => setParamBudget(500_000_000)}>500M</button>
-                                                            <button className="budget-preset-btn" onClick={() => setParamBudget(1_000_000_000)}>1B</button>
-                                                            <button className="budget-preset-btn" onClick={() => setParamBudget(3_000_000_000)}>3B</button>
-                                                            <button className="budget-preset-btn" onClick={() => setParamBudget(7_000_000_000)}>7B</button>
-                                                            <button className="budget-preset-btn" onClick={() => setParamBudget(13_000_000_000)}>13B</button>
-                                                            <button className="budget-preset-btn" onClick={() => setParamBudget(20_000_000_000)}>20B</button>
-                                                        </div>
-                                                    </div>
-                                                </div>
-
-
-                                                {/* Time Budget */}
-                                                <div className="config-section">
-                                                    <div className="config-section-header">
-                                                        <Clock size={18} />
-                                                        <span>Time Budget</span>
-                                                    </div>
-                                                    <div className="time-budget-compact">
-                                                        {TIME_BUDGETS.map((budget) => (
-                                                            <label
-                                                                key={budget.id}
-                                                                className={`time-budget-chip ${timeBudget === budget.id ? 'time-budget-chip-selected' : ''}`}
-                                                            >
-                                                                <input
-                                                                    type="radio"
-                                                                    name="timeBudget"
-                                                                    value={budget.id}
-                                                                    checked={timeBudget === budget.id}
-                                                                    onChange={() => setTimeBudget(budget.id)}
-                                                                />
-                                                                {budget.icon}
-                                                                <div className="time-budget-chip-content">
-                                                                    <span className="chip-label">{budget.label}</span>
-                                                                    <span className="chip-duration">{budget.duration}</span>
-                                                                </div>
-                                                            </label>
-                                                        ))}
-                                                    </div>
-                                                </div>
-
-                                                {/* Advanced Options - Collapsible */}
-                                                <div className="config-section config-section-advanced">
-                                                    <button
-                                                        className="config-section-header config-section-toggle"
-                                                        onClick={() => limits.advancedOptions ? setAdvancedOpen(!advancedOpen) : showUpgradeModal('Advanced Options', 'pro')}
-                                                    >
-                                                        <Settings size={18} />
-                                                        <span>Advanced Options</span>
-                                                        {!limits.advancedOptions && (
-                                                            <span className="locked-badge">
-                                                                <Lock size={12} />
-                                                                Pro
-                                                            </span>
-                                                        )}
-                                                        {limits.advancedOptions && (
-                                                            advancedOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />
-                                                        )}
-                                                    </button>
-
-                                                    {advancedOpen && limits.advancedOptions && (
-                                                        <div className="advanced-options">
-                                                            <div className="config-grid">
-                                                                <div className="config-field">
-                                                                    <label className="config-label">Search Strategy</label>
-                                                                    <Select
-                                                                        options={[
-                                                                            { value: 'bayesian', label: 'Bayesian Optimization' },
-                                                                            { value: 'random', label: 'Random Search' },
-                                                                            { value: 'hyperband', label: 'Hyperband' },
-                                                                            { value: 'successive_halving', label: 'Successive Halving' },
-                                                                            { value: 'pbt', label: 'Population-Based Training' },
-                                                                        ].filter(o => limits.allowedStrategies.includes(o.value))}
-                                                                        value={searchStrategy}
-                                                                        onChange={(e) => setSearchStrategy(e.target.value)}
-                                                                        fullWidth
-                                                                    />
-                                                                </div>
-                                                                <div className="config-field">
-                                                                    <label className="config-label">Optimizer</label>
-                                                                    <Select
-                                                                        options={[
-                                                                            { value: 'sophiag', label: 'SophiaG (Recommended)' },
-                                                                            { value: 'qiao', label: 'QIAO (Quantum-Inspired Alternating)' },
-                                                                            { value: 'grover', label: 'Grover-Q (Quantum-Enhanced)' },
-                                                                            { value: 'sympflow', label: 'SympFlow (Symplectic Hamiltonian)' },
-                                                                            { value: 'adamw', label: 'AdamW' },
-                                                                            { value: 'adam', label: 'Adam' },
-                                                                            { value: 'lion', label: 'Lion' },
-                                                                        ].filter(o => limits.allowedOptimizers.includes(o.value))}
-                                                                        value={selectedOptimizers[0]}
-                                                                        onChange={(e) => setSelectedOptimizers([e.target.value])}
-                                                                        fullWidth
-                                                                    />
-                                                                </div>
-                                                            </div>
-                                                            {/* Learning rate auto-tuning indicator */}
-                                                            <div className="config-field auto-tuned-field">
-                                                                <div className="auto-tuned-indicator">
-                                                                    <Sparkles size={16} />
-                                                                    <span>Learning rate will be auto-tuned for {selectedOptimizers[0] === 'sophiag' ? 'SophiaG' : selectedOptimizers[0] === 'qiao' ? 'QIAO' : selectedOptimizers[0]}</span>
-                                                                </div>
-                                                                <p className="auto-tuned-hint">
-                                                                    Uses optimizer-specific ranges with log-uniform sampling for stable training.
-                                                                </p>
-                                                            </div>
-                                                        </div>
-                                                    )}
-                                                </div>
-                                            </div>
-                                        </div>
-                                    )}
-
-                                    {/* Step 3: Review & Start */}
-                                    {currentStep === 2 && (
-                                        <div className="wizard-step">
-                                            <h3 className="wizard-step-title">Ready to optimize</h3>
-                                            <p className="wizard-step-desc">
-                                                Review your configuration and start
-                                            </p>
-
-                                            <div className="review-summary">
-                                                <div className="review-item">
-                                                    <span className="review-label">Curriculum</span>
-                                                    <span className="review-value">{curriculum?.name}</span>
-                                                </div>
-                                                <div className="review-item review-item-highlight">
-                                                    <span className="review-label">Parameter Budget</span>
-                                                    <span className="review-value review-value-safe">
-                                                        Up to {formatParams(paramBudget)}
-                                                    </span>
-                                                </div>
-                                                <div className="review-item">
-                                                    <span className="review-label">Vocabulary</span>
-                                                    <span className="review-value">{formatNumber(vocabSize)} tokens</span>
-                                                </div>
-                                                <div className="review-item">
-                                                    <span className="review-label">Context</span>
-                                                    <span className="review-value">{formatNumber(contextWindow)} tokens</span>
-                                                </div>
-                                                <div className="review-item">
-                                                    <span className="review-label">Duration</span>
-                                                    <span className="review-value">{selectedTimeBudget.duration} ({selectedTimeBudget.trials} trials)</span>
-                                                </div>
-                                                <div className="review-item">
-                                                    <span className="review-label">Strategy</span>
-                                                    <span className="review-value">
-                                                        {searchStrategy === 'bayesian' ? 'Bayesian Optimization' :
-                                                            searchStrategy === 'random' ? 'Random Search' :
-                                                                searchStrategy === 'hyperband' ? 'Hyperband' :
-                                                                    searchStrategy === 'successive_halving' ? 'Successive Halving' :
-                                                                        searchStrategy === 'pbt' ? 'Population-Based Training' :
-                                                                            searchStrategy}
-                                                    </span>
-                                                </div>
-                                                <div className="review-item">
-                                                    <span className="review-label">Optimizer</span>
-                                                    <span className="review-value">
-                                                        {selectedOptimizers[0] === 'sophiag' ? 'SophiaG' :
-                                                            selectedOptimizers[0] === 'qiao' ? 'QIAO (Quantum-Inspired Alternating)' :
-                                                                selectedOptimizers[0] === 'grover' ? 'Grover-Q (Quantum-Enhanced)' :
-                                                                    selectedOptimizers[0] === 'sympflow' ? 'SympFlow (Symplectic Hamiltonian)' :
-                                                                        selectedOptimizers[0] === 'adamw' ? 'AdamW' :
-                                                                            selectedOptimizers[0] === 'adam' ? 'Adam' :
-                                                                                selectedOptimizers[0] === 'lion' ? 'Lion' :
-                                                                                    selectedOptimizers[0]}
-                                                    </span>
-                                                </div>
-                                            </div>
-
-                                            <div className="auto-config-note">
-                                                <Sparkles size={16} />
-                                                <span>Architecture, learning rate, batch size, and scheduler will be auto-optimized</span>
-                                            </div>
-                                        </div>
-                                    )}
-                                </div>
-
-                                {/* Wizard Navigation */}
-                                <div className="wizard-nav">
-                                    {currentStep > 0 && (
-                                        <Button variant="ghost" onClick={handleBack}>Back</Button>
-                                    )}
-                                    <div className="wizard-nav-spacer" />
-                                    {currentStep < steps.length - 1 ? (
-                                        <Button variant="primary" onClick={handleNext} disabled={!canProceed()}>
-                                            Continue
-                                        </Button>
-                                    ) : (
-                                        <Button variant="primary" leftIcon={<Play size={16} />} onClick={handleStartSweep} disabled={isRunning}>
-                                            Start Optimization
-                                        </Button>
-                                    )}
-                                </div>
-                            </CardContent>
-                        </Card>
-                    </div>
-
-                    {/* Right Column: Status & Results */}
-                    <div className="hpo-results-column">
-                        <Card padding="lg">
-                            <CardHeader title="Status" />
-                            <CardContent>
-                                <div className="sweep-status">
-                                    <div className="status-indicator">
-                                        <span className={`status-dot ${isRunning ? 'status-running' : 'status-idle'}`}></span>
-                                        <span className="status-text">{isRunning ? 'Running' : 'Ready'}</span>
-                                        <span className="status-strategy">Bayesian</span>
-                                    </div>
-                                    <div className="status-metrics">
-                                        <div className="status-metric">
-                                            <span className="metric-label">Trials</span>
-                                            <span className="metric-value">{trials.length} / {Math.min(selectedTimeBudget.trials, limits.maxTrials)}</span>
-                                        </div>
-                                        <div className="status-metric">
-                                            <span className="metric-label">Best Loss</span>
-                                            <span className="metric-value">{sweepStatus?.best_loss?.toFixed(4) ?? '—'}</span>
-                                        </div>
-                                        <div className="status-metric">
-                                            <span className="metric-label">Best Composite</span>
-                                            <span className="metric-value">{sweepStatus?.best_composite_score?.toFixed(4) ?? '—'}</span>
-                                        </div>
-                                        <div className="status-metric">
-                                            <span className="metric-label">Best PPL</span>
-                                            <span className="metric-value">{sweepStatus?.best_perplexity?.toFixed(2) ?? '—'}</span>
-                                        </div>
-                                    </div>
-                                    <ProgressBar
-                                        value={trials.length}
-                                        max={selectedTimeBudget.trials}
-                                        variant="gradient"
-                                        size="md"
-                                        animated={isRunning}
-                                    />
-                                </div>
-                            </CardContent>
-                        </Card>
-
-                        <Card padding="lg">
-                            <CardHeader
-                                title="Best Found"
-                                action={<Button variant="ghost" size="sm" leftIcon={<Download size={14} />}>Export</Button>}
-                            />
-                            <CardContent>
-                                {sweepStatus?.best_hyperparams ? (
-                                    <div className="best-params">
-                                        {Object.entries(sweepStatus.best_hyperparams).map(([key, value]) => (
-                                            <div key={key} className="param-row-display">
-                                                <span className="param-key">{key}</span>
-                                                <span className="param-value">{String(value)}</span>
-                                            </div>
-                                        ))}
-                                    </div>
-                                ) : (
-                                    <div className="empty-state-sm">
-                                        <Info size={24} />
-                                        <p>Start optimization to find best params</p>
-                                    </div>
-                                )}
-                            </CardContent>
-                        </Card>
-
-                        {/* Budget Enforcement Stats */}
-                        {budgetStats && budgetStats.total_skipped > 0 && (
-                            <Card padding="lg" className="budget-stats-card">
-                                <CardHeader
-                                    title="Budget Enforcement"
-                                    subtitle="Parameter budget optimization"
-                                />
-                                <CardContent>
-                                    <div className="budget-stats">
-                                        <div className="budget-stat">
-                                            <span className="stat-label">Budget</span>
-                                            <span className="stat-value">{formatNumber(budgetStats.param_budget)}</span>
-                                        </div>
-                                        <div className="budget-stat">
-                                            <span className="stat-label">Skipped</span>
-                                            <span className="stat-value stat-warning">{budgetStats.total_skipped}</span>
-                                        </div>
-                                        <div className="budget-stat">
-                                            <span className="stat-label">Skip Rate</span>
-                                            <span className="stat-value">{(budgetStats.skip_rate * 100).toFixed(1)}%</span>
-                                        </div>
-                                    </div>
-                                    {budgetStats.safe_bounds && (
-                                        <div className="safe-bounds">
-                                            <span className="safe-bounds-title">Safe Architecture Bounds:</span>
-                                            <div className="bounds-grid">
-                                                <span>Embed: {budgetStats.safe_bounds.max_embedding_dim}</span>
-                                                <span>Blocks: {budgetStats.safe_bounds.max_reasoning_blocks}</span>
-                                                <span>Experts: {budgetStats.safe_bounds.max_moe_experts}</span>
-                                            </div>
-                                        </div>
-                                    )}
-                                </CardContent>
-                            </Card>
-                        )}
-
-                        <Card padding="none" className="trials-card">
-                            <CardHeader
-                                title="Trial Results"
-                                action={<Button variant="ghost" size="sm" leftIcon={<RefreshCw size={14} />}>Refresh</Button>}
-                            />
-                            <div className="trials-table-wrapper">
-                                <table className="trials-table">
-                                    <thead>
-                                        <tr>
-                                            <th>Trial</th>
-                                            <th>Status</th>
-                                            <th>LR</th>
-                                            <th>Loss</th>
-                                            <th>PPL</th>
-                                            <th>Conf</th>
-                                            <th>Composite</th>
-                                            <th>Memory</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        {trials.length === 0 ? (
-                                            <tr>
-                                                <td colSpan={8} className="trials-empty">
-                                                    No trials yet
-                                                </td>
-                                            </tr>
-                                        ) : (
-                                            trials.map((trial) => (
-                                                <tr key={trial.trial_id}>
-                                                    <td>#{trial.trial_id}</td>
-                                                    <td>
-                                                        <span className={`trial-status trial-status-${trial.status}`}>
-                                                            {trial.status}
-                                                        </span>
-                                                    </td>
-                                                    <td>{trial.learning_rate ? trial.learning_rate.toExponential(2) : '—'}</td>
-                                                    <td>{trial.loss?.toFixed(4) ?? '—'}</td>
-                                                    <td>{trial.perplexity?.toFixed(2) ?? '—'}</td>
-                                                    <td>{trial.mean_confidence?.toFixed(3) ?? '—'}</td>
-                                                    <td>{trial.composite_score?.toFixed(4) ?? '—'}</td>
-                                                    <td>{trial.memory_mb ? `${trial.memory_mb.toFixed(0)} MB` : '—'}</td>
-                                                </tr>
-                                            ))
-                                        )}
-                                    </tbody>
-                                </table>
+                {/* Dashboard Mode - Unified monitoring interface */}
+                {dashboardMode === 'dashboard' ? (
+                    <>
+                        <div className="page-header">
+                            <div className="page-header-content">
+                                <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    leftIcon={<ArrowLeft size={16} />}
+                                    onClick={() => setDashboardMode('setup')}
+                                    className="hpo-back-btn"
+                                >
+                                    Back to Setup
+                                </Button>
+                                <h1 className="page-title">
+                                    Smart Tuner
+                                    {getTierBadge(currentTier)}
+                                </h1>
                             </div>
-                        </Card>
-
-                        {/* Training Console - Real-time logs */}
-                        <TrainingConsole
-                            sweepId={sweepStatus?.sweep_id || null}
+                        </div>
+                        <HPODashboard
+                            sweepStatus={sweepStatus}
+                            trials={trials}
                             isRunning={isRunning}
                             devMode={devMode}
+                            onPause={() => {/* TODO: Implement pause */ }}
+                            onStop={handleStopSweep}
+                            onShowSettings={() => setSettingsModalOpen(true)}
+                            config={{
+                                curriculumName: curriculum?.name,
+                                paramBudget: paramBudget,
+                                optimizer: selectedOptimizers[0] === 'sophiag' ? 'SophiaG' : selectedOptimizers[0],
+                                optimizationMode: 'Until Convergence',
+                            }}
                         />
-                    </div>
-                </div>
+                    </>
+                ) : (
+                    /* Setup Mode - Configuration wizard */
+                    <>
+                        <div className="page-header">
+                            <div className="page-header-content">
+                                <h1 className="page-title">
+                                    Smart Tuner
+                                    {getTierBadge(currentTier)}
+                                </h1>
+                                <p className="page-subtitle">
+                                    Automatically find the best hyperparameters for your model
+                                </p>
+                            </div>
+                            <div className="page-header-actions">
+                                {isRunning && (
+                                    <>
+                                        <Button variant="secondary" leftIcon={<Pause size={16} />}>Pause</Button>
+                                        <Button variant="danger" leftIcon={<Square size={16} />} onClick={handleStopSweep}>Stop</Button>
+                                    </>
+                                )}
+                            </div>
+                        </div>
 
-                {/* Upgrade Modal */}
-                <UpgradeModal
-                    isOpen={upgradeModal.open}
-                    onClose={() => setUpgradeModal({ ...upgradeModal, open: false })}
-                    feature={upgradeModal.feature}
-                    requiredTier={upgradeModal.tier}
-                />
+                        <div className="hpo-layout-simple">
+                            {/* Left Column: Wizard */}
+                            <div className="hpo-wizard-column">
+                                <Card variant="glass" padding="none">
+                                    <CardHeader title="Setup" subtitle="Configure optimization in a few simple steps" />
+                                    <CardContent>
+                                        <StepIndicator currentStep={currentStep} steps={steps} />
+
+                                        <div className="wizard-content">
+                                            {/* Step 1: Curriculum Selection */}
+                                            {currentStep === 0 && (
+                                                <div className="wizard-step">
+                                                    <h3 className="wizard-step-title">Select your curriculum</h3>
+                                                    <p className="wizard-step-desc">
+                                                        Choose the curriculum to optimize hyperparameters for
+                                                    </p>
+                                                    <div className="curriculum-options">
+                                                        {loadingCurricula ? (
+                                                            <div className="curriculum-loading">Loading curricula...</div>
+                                                        ) : curricula.length === 0 ? (
+                                                            <div className="curriculum-empty">
+                                                                <Info size={24} />
+                                                                <p>No curricula found. Create one in the Curriculum tab first.</p>
+                                                            </div>
+                                                        ) : (
+                                                            curricula.map((curr) => (
+                                                                <label
+                                                                    key={curr.id}
+                                                                    className={`curriculum-option ${selectedCurriculum === curr.id ? 'curriculum-option-selected' : ''}`}
+                                                                >
+                                                                    <input
+                                                                        type="radio"
+                                                                        name="curriculum"
+                                                                        value={curr.id}
+                                                                        checked={selectedCurriculum === curr.id}
+                                                                        onChange={() => setSelectedCurriculum(curr.id)}
+                                                                    />
+                                                                    <div className="curriculum-option-content">
+                                                                        <span className="curriculum-option-name">{curr.name}</span>
+                                                                        <div className="curriculum-option-meta">
+                                                                            <span>{curr.stages.length} stages</span>
+                                                                        </div>
+                                                                    </div>
+                                                                </label>
+                                                            ))
+                                                        )}
+                                                    </div>
+                                                </div>
+                                            )}
+
+                                            {/* Step 2: Configuration (Model + Time + Advanced) */}
+                                            {currentStep === 1 && (
+                                                <div className="wizard-step">
+                                                    <h3 className="wizard-step-title">Configure your model</h3>
+                                                    <p className="wizard-step-desc">
+                                                        Set model parameters and optimization time
+                                                    </p>
+
+                                                    {/* Model Configuration - SLIDER BARS */}
+                                                    <div className="config-section">
+                                                        <div className="config-section-header">
+                                                            <Cpu size={18} />
+                                                            <span>Tokenizer Settings</span>
+                                                        </div>
+                                                        <div className="slider-group">
+                                                            {/* Vocabulary Info - Auto-determined by Quantum Tokenizer */}
+                                                            <div className="config-info-box" style={{ marginBottom: '1rem', padding: '0.75rem', background: 'var(--bg-subtle)', borderRadius: '8px', border: '1px solid var(--border-subtle)' }}>
+                                                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.25rem' }}>
+                                                                    <Sparkles size={14} style={{ color: 'var(--accent-primary)' }} />
+                                                                    <span style={{ fontWeight: 500, color: 'var(--text-primary)' }}>Vocabulary Size: Automatic</span>
+                                                                </div>
+                                                                <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', lineHeight: 1.4 }}>
+                                                                    Determined by IntelligentVocabController (~362 base + learned n-grams)
+                                                                </span>
+                                                            </div>
+                                                            <LogSlider
+                                                                label="Context Window"
+                                                                value={contextWindow}
+                                                                stops={CONTEXT_STOPS}
+                                                                maxValue={limits.maxContextWindow}
+                                                                onChange={setContextWindow}
+                                                            />
+                                                        </div>
+
+                                                        {/* Parameter Budget - HPO finds optimal architecture within this constraint */}
+                                                        <div className="config-section config-section-architecture">
+                                                            <div className="config-section-header">
+                                                                <Layers size={18} />
+                                                                <span>Parameter Budget</span>
+                                                                <span className="param-indicator">
+                                                                    <span className="param-count param-count-safe">
+                                                                        {formatParams(paramBudget)} max
+                                                                    </span>
+                                                                </span>
+                                                            </div>
+                                                            <div className="param-budget-content">
+                                                                <p className="budget-explanation">
+                                                                    Set your target model size. HPO will automatically discover the optimal
+                                                                    architecture (reasoning blocks, MoE experts, embedding dimension, etc.)
+                                                                    within this parameter budget.
+                                                                </p>
+                                                                <LogSlider
+                                                                    label="Maximum Parameters"
+                                                                    value={paramBudget}
+                                                                    stops={PARAM_STOPS}
+                                                                    maxValue={LITE_LIMITS.maxParams}
+                                                                    onChange={setParamBudget}
+                                                                    formatValue={formatParams}
+                                                                />
+                                                                <div className="budget-presets">
+                                                                    <span className="budget-preset-label">Quick Presets:</span>
+                                                                    <button className="budget-preset-btn" onClick={() => setParamBudget(500_000_000)}>500M</button>
+                                                                    <button className="budget-preset-btn" onClick={() => setParamBudget(1_000_000_000)}>1B</button>
+                                                                    <button className="budget-preset-btn" onClick={() => setParamBudget(3_000_000_000)}>3B</button>
+                                                                    <button className="budget-preset-btn" onClick={() => setParamBudget(7_000_000_000)}>7B</button>
+                                                                    <button className="budget-preset-btn" onClick={() => setParamBudget(13_000_000_000)}>13B</button>
+                                                                    <button className="budget-preset-btn" onClick={() => setParamBudget(20_000_000_000)}>20B</button>
+                                                                </div>
+                                                            </div>
+                                                        </div>
+
+                                                        {/* Advanced Options - Collapsible */}
+                                                        <div className="config-section config-section-advanced">
+                                                            <button
+                                                                className="config-section-header config-section-toggle"
+                                                                onClick={() => limits.advancedOptions ? setAdvancedOpen(!advancedOpen) : showUpgradeModal('Advanced Options', 'pro')}
+                                                            >
+                                                                <Settings size={18} />
+                                                                <span>Advanced Options</span>
+                                                                {!limits.advancedOptions && (
+                                                                    <span className="locked-badge">
+                                                                        <Lock size={12} />
+                                                                        Pro
+                                                                    </span>
+                                                                )}
+                                                                {limits.advancedOptions && (
+                                                                    advancedOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />
+                                                                )}
+                                                            </button>
+
+                                                            {advancedOpen && limits.advancedOptions && (
+                                                                <div className="advanced-options">
+                                                                    <div className="config-grid">
+                                                                        <div className="config-field">
+                                                                            <label className="config-label">Search Strategy</label>
+                                                                            <div className="auto-tuned-indicator" style={{ padding: '12px', borderRadius: '8px', background: 'linear-gradient(135deg, rgba(139, 92, 246, 0.15), rgba(59, 130, 246, 0.15))' }}>
+                                                                                <Sparkles size={16} />
+                                                                                <span style={{ fontWeight: 600 }}>Quantum Adaptive HPO (QAHPO)</span>
+                                                                            </div>
+                                                                            <p className="auto-tuned-hint" style={{ marginTop: '4px' }}>
+                                                                                Uses quantum-inspired amplitude selection, thermal annealing, and tunneling.
+                                                                            </p>
+                                                                        </div>
+                                                                        <div className="config-field">
+                                                                            <label className="config-label">Optimizer</label>
+                                                                            <Select
+                                                                                options={[
+                                                                                    { value: 'sophiag', label: 'SophiaG (Recommended)' },
+                                                                                    { value: 'qiao', label: 'QIAO (Quantum-Inspired Alternating)' },
+                                                                                    { value: 'grover', label: 'Grover-Q (Quantum-Enhanced)' },
+                                                                                    { value: 'sympflow', label: 'SympFlow (Symplectic Hamiltonian)' },
+                                                                                    { value: 'sympflowqng', label: 'SympFlowQNG (Quantum Natural Gradient)' },
+                                                                                    { value: 'adamw', label: 'AdamW' },
+                                                                                    { value: 'adam', label: 'Adam' },
+                                                                                    { value: 'lion', label: 'Lion' },
+                                                                                ].filter(o => limits.allowedOptimizers.includes(o.value))}
+                                                                                value={selectedOptimizers[0]}
+                                                                                onChange={(e) => setSelectedOptimizers([e.target.value])}
+                                                                                fullWidth
+                                                                            />
+                                                                        </div>
+                                                                    </div>
+                                                                    {/* Learning rate auto-tuning indicator */}
+                                                                    <div className="config-field auto-tuned-field">
+                                                                        <div className="auto-tuned-indicator">
+                                                                            <Sparkles size={16} />
+                                                                            <span>Learning rate will be auto-tuned for {selectedOptimizers[0] === 'sophiag' ? 'SophiaG' : selectedOptimizers[0] === 'qiao' ? 'QIAO' : selectedOptimizers[0]}</span>
+                                                                        </div>
+                                                                        <p className="auto-tuned-hint">
+                                                                            Uses optimizer-specific ranges with log-uniform sampling for stable training.
+                                                                        </p>
+                                                                    </div>
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            )}
+
+                                            {/* Step 3: Review & Start */}
+                                            {currentStep === 2 && (
+                                                <div className="wizard-step">
+                                                    <h3 className="wizard-step-title">Ready to optimize</h3>
+                                                    <p className="wizard-step-desc">
+                                                        Review your configuration and start
+                                                    </p>
+
+                                                    <div className="review-summary">
+                                                        <div className="review-item">
+                                                            <span className="review-label">Curriculum</span>
+                                                            <span className="review-value">{curriculum?.name}</span>
+                                                        </div>
+                                                        <div className="review-item review-item-highlight">
+                                                            <span className="review-label">Parameter Budget</span>
+                                                            <span className="review-value review-value-safe">
+                                                                Up to {formatParams(paramBudget)}
+                                                            </span>
+                                                        </div>
+                                                        <div className="review-item">
+                                                            <span className="review-label">Vocabulary</span>
+                                                            <span className="review-value">Automatic (Quantum)</span>
+                                                        </div>
+                                                        <div className="review-item">
+                                                            <span className="review-label">Context</span>
+                                                            <span className="review-value">{formatNumber(contextWindow)} tokens</span>
+                                                        </div>
+                                                        <div className="review-item">
+                                                            <span className="review-label">Termination</span>
+                                                            <span className="review-value">Automatic (runs until convergence)</span>
+                                                        </div>
+                                                        <div className="review-item">
+                                                            <span className="review-label">Strategy</span>
+                                                            <span className="review-value">
+                                                                Quantum Adaptive HPO
+                                                            </span>
+                                                        </div>
+                                                        <div className="review-item">
+                                                            <span className="review-label">Optimizer</span>
+                                                            <span className="review-value">
+                                                                {selectedOptimizers[0] === 'sophiag' ? 'SophiaG' :
+                                                                    selectedOptimizers[0] === 'qiao' ? 'QIAO (Quantum-Inspired Alternating)' :
+                                                                        selectedOptimizers[0] === 'grover' ? 'Grover-Q (Quantum-Enhanced)' :
+                                                                            selectedOptimizers[0] === 'sympflow' ? 'SympFlow (Symplectic Hamiltonian)' :
+                                                                                selectedOptimizers[0] === 'sympflowqng' ? 'SympFlowQNG (Quantum Natural Gradient)' :
+                                                                                    selectedOptimizers[0] === 'adamw' ? 'AdamW' :
+                                                                                        selectedOptimizers[0] === 'adam' ? 'Adam' :
+                                                                                            selectedOptimizers[0] === 'lion' ? 'Lion' :
+                                                                                                selectedOptimizers[0]}
+                                                            </span>
+                                                        </div>
+                                                    </div>
+
+                                                    <div className="auto-config-note">
+                                                        <Sparkles size={16} />
+                                                        <span>Architecture, learning rate, batch size, and scheduler will be auto-optimized</span>
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </div>
+
+                                        {/* Wizard Navigation */}
+                                        <div className="wizard-nav">
+                                            {currentStep > 0 && (
+                                                <Button variant="ghost" onClick={handleBack}>Back</Button>
+                                            )}
+                                            <div className="wizard-nav-spacer" />
+                                            {currentStep < steps.length - 1 ? (
+                                                <Button variant="primary" onClick={handleNext} disabled={!canProceed()}>
+                                                    Continue
+                                                </Button>
+                                            ) : (
+                                                <Button variant="primary" leftIcon={<Play size={16} />} onClick={handleStartSweep} disabled={isRunning}>
+                                                    Start Optimization
+                                                </Button>
+                                            )}
+                                        </div>
+                                    </CardContent>
+                                </Card>
+                            </div>
+
+                            {/* Right Column: Status & Results */}
+                            <div className="hpo-results-column">
+                                <Card padding="lg">
+                                    <CardHeader title="Status" />
+                                    <CardContent>
+                                        <div className="sweep-status">
+                                            <div className="status-indicator">
+                                                <span className={`status-dot ${isRunning ? 'status-running' : 'status-idle'}`}></span>
+                                                <span className="status-text">{isRunning ? 'Running' : 'Ready'}</span>
+                                                <span className="status-strategy">QAHPO</span>
+                                            </div>
+                                            <div className="status-metrics">
+                                                <div className="status-metric">
+                                                    <span className="metric-label">Trials</span>
+                                                    <span className="metric-value">{trials.length}</span>
+                                                </div>
+                                                <div className="status-metric">
+                                                    <span className="metric-label">Best Loss</span>
+                                                    <span className="metric-value">{sweepStatus?.best_loss?.toFixed(4) ?? '—'}</span>
+                                                </div>
+                                                <div className="status-metric">
+                                                    <span className="metric-label">Best Composite</span>
+                                                    <span className="metric-value">{sweepStatus?.best_composite_score?.toFixed(4) ?? '—'}</span>
+                                                </div>
+                                                <div className="status-metric">
+                                                    <span className="metric-label">Best PPL</span>
+                                                    <span className="metric-value">{sweepStatus?.best_perplexity?.toFixed(2) ?? '—'}</span>
+                                                </div>
+                                            </div>
+                                            {isRunning && (
+                                                <div className="convergence-indicator">
+                                                    <span className="convergence-text">Running until convergence...</span>
+                                                </div>
+                                            )}
+                                        </div>
+                                    </CardContent>
+                                </Card>
+
+                                <Card padding="lg">
+                                    <CardHeader
+                                        title="Best Found"
+                                        action={<Button variant="ghost" size="sm" leftIcon={<Download size={14} />}>Export</Button>}
+                                    />
+                                    <CardContent>
+                                        {sweepStatus?.best_hyperparams ? (
+                                            <div className="best-params">
+                                                {Object.entries(sweepStatus.best_hyperparams).map(([key, value]) => (
+                                                    <div key={key} className="param-row-display">
+                                                        <span className="param-key">{key}</span>
+                                                        <span className="param-value">{String(value)}</span>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        ) : (
+                                            <div className="empty-state-sm">
+                                                <Info size={24} />
+                                                <p>Start optimization to find best params</p>
+                                            </div>
+                                        )}
+                                    </CardContent>
+                                </Card>
+
+                                {/* Budget Enforcement Stats */}
+                                {budgetStats && budgetStats.total_skipped > 0 && (
+                                    <Card padding="lg" className="budget-stats-card">
+                                        <CardHeader
+                                            title="Budget Enforcement"
+                                            subtitle="Parameter budget optimization"
+                                        />
+                                        <CardContent>
+                                            <div className="budget-stats">
+                                                <div className="budget-stat">
+                                                    <span className="stat-label">Budget</span>
+                                                    <span className="stat-value">{formatNumber(budgetStats.param_budget)}</span>
+                                                </div>
+                                                <div className="budget-stat">
+                                                    <span className="stat-label">Skipped</span>
+                                                    <span className="stat-value stat-warning">{budgetStats.total_skipped}</span>
+                                                </div>
+                                                <div className="budget-stat">
+                                                    <span className="stat-label">Skip Rate</span>
+                                                    <span className="stat-value">{(budgetStats.skip_rate * 100).toFixed(1)}%</span>
+                                                </div>
+                                            </div>
+                                            {budgetStats.safe_bounds && (
+                                                <div className="safe-bounds">
+                                                    <span className="safe-bounds-title">Safe Architecture Bounds:</span>
+                                                    <div className="bounds-grid">
+                                                        <span>Embed: {budgetStats.safe_bounds.max_embedding_dim}</span>
+                                                        <span>Blocks: {budgetStats.safe_bounds.max_reasoning_blocks}</span>
+                                                        <span>Experts: {budgetStats.safe_bounds.max_moe_experts}</span>
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </CardContent>
+                                    </Card>
+                                )}
+
+                                <Card padding="none" className="trials-card">
+                                    <CardHeader
+                                        title="Trial Results"
+                                        action={<Button variant="ghost" size="sm" leftIcon={<RefreshCw size={14} />}>Refresh</Button>}
+                                    />
+                                    <div className="trials-table-wrapper">
+                                        <table className="trials-table">
+                                            <thead>
+                                                <tr>
+                                                    <th>Trial</th>
+                                                    <th>Status</th>
+                                                    <th>LR</th>
+                                                    <th>Loss</th>
+                                                    <th>PPL</th>
+                                                    <th>Conf</th>
+                                                    <th>Composite</th>
+                                                    <th>Memory</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {trials.length === 0 ? (
+                                                    <tr>
+                                                        <td colSpan={8} className="trials-empty">
+                                                            No trials yet
+                                                        </td>
+                                                    </tr>
+                                                ) : (
+                                                    trials.map((trial) => (
+                                                        <tr key={trial.trial_id}>
+                                                            <td>#{trial.trial_id}</td>
+                                                            <td>
+                                                                <span className={`trial-status trial-status-${trial.status}`}>
+                                                                    {trial.status}
+                                                                </span>
+                                                            </td>
+                                                            <td>{trial.learning_rate ? trial.learning_rate.toExponential(2) : '—'}</td>
+                                                            <td>{trial.loss?.toFixed(4) ?? '—'}</td>
+                                                            <td>{trial.perplexity?.toFixed(2) ?? '—'}</td>
+                                                            <td>{trial.mean_confidence?.toFixed(3) ?? '—'}</td>
+                                                            <td>{trial.composite_score?.toFixed(4) ?? '—'}</td>
+                                                            <td>{trial.memory_mb ? `${trial.memory_mb.toFixed(0)} MB` : '—'}</td>
+                                                        </tr>
+                                                    ))
+                                                )}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </Card>
+
+                                {/* Training Console - Real-time logs */}
+                                <TrainingConsole
+                                    sweepId={sweepStatus?.sweep_id || null}
+                                    isRunning={isRunning}
+                                    devMode={devMode}
+                                />
+                            </div>
+                        </div>
+
+                        {/* Upgrade Modal */}
+                        <UpgradeModal
+                            isOpen={upgradeModal.open}
+                            onClose={() => setUpgradeModal({ ...upgradeModal, open: false })}
+                            feature={upgradeModal.feature}
+                            requiredTier={upgradeModal.tier}
+                        />
+                    </>
+                )}
             </div>
         </LicenseContext.Provider>
     );

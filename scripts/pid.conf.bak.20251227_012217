@@ -1,11 +1,11 @@
 [metric_names]
-loss learning_rate
+loss gradient_norm
 
 [control_input_names]
-loss learning_rate
+loss gradient_norm
 
 [Setpoint]
-learning_rate = 0.000000
+gradient_norm = 0.000000
 loss = 2.500000
 
 [Kp_matrix]
@@ -31,3 +31,4 @@ error_threshold = 2.500000
 hysteresis = 0.030000
 output_amplitude = 1.500000
 patience = 50.000000
+

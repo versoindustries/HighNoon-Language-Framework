@@ -44,11 +44,13 @@ OPTIMIZER_LR_RANGES: dict[str, tuple[float, float]] = {
     "adam": (1e-5, 1e-3),
     "adamw": (1e-5, 3e-4),
     "sophiag": (1e-5, 1e-4),  # Conservative for second-order optimizer
-    "qiao": (1e-5, 2e-4),  # Quantum-inspired alternating optimizer
+    "qiao": (1e-5, 5e-4),  # Quantum-inspired alternating optimizer (mixer steps add stability)
     "grover": (1e-5, 5e-4),  # Grover-enhanced optimizer
-    "sympflow": (1e-5, 3e-4),  # Symplectic Hamiltonian flow
+    "sympflow": (1e-5, 5e-4),  # Symplectic Hamiltonian flow (symplectic integration is stable)
+    "sympflowqng": (1e-5, 2e-4),  # S12: SympFlow + QNG geodesic (conservative for geodesic corrections)
     "lion": (1e-5, 1e-4),  # Lion needs lower LR than Adam-family
 }
+
 
 # Default LR range when optimizer is not specified or unknown
 DEFAULT_LR_RANGE: tuple[float, float] = (1e-5, 3e-4)
@@ -168,12 +170,20 @@ class HPOSearchSpace:
     - num_reasoning_blocks: max 24
     - num_moe_experts: max 12
 
+    Quantum Parameter Limits (Lite vs Enterprise):
+    - VQC layers: max 8 (Lite) vs 16+ (Enterprise)
+    - MPQR paths: max 8 (Lite) vs 32+ (Enterprise)
+    - Grover iterations: max 5 (Lite) vs 12+ (Enterprise)
+    - QCOT steps: max 5 (Lite) vs 12+ (Enterprise)
+
     Memory-Aware Shrinking:
     When memory_failure_count > 0, the sampler automatically reduces
     architecture sizes to prevent repeated OOM/swap failures.
     """
 
-    # Training hyperparameters
+    # =========================================================================
+    # CORE TRAINING HYPERPARAMETERS
+    # =========================================================================
     # Note: LR range is now auto-derived from optimizer selection.
     # This default is a safe fallback; actual range comes from OPTIMIZER_LR_RANGES.
     learning_rate: tuple[float, float] = (1e-5, 3e-4)
@@ -182,7 +192,9 @@ class HPOSearchSpace:
     warmup_steps: tuple[int, int] = (0, 1000)
     weight_decay: tuple[float, float] = (0.0, 0.1)
 
-    # Model architecture params (Lite edition limits)
+    # =========================================================================
+    # MODEL ARCHITECTURE (Lite edition limits)
+    # =========================================================================
     num_reasoning_blocks: list[int] = field(default_factory=lambda: [4, 6, 8, 12, 16, 24])
     hidden_dim: list[int] = field(default_factory=lambda: [256, 512, 768, 1024])
     embedding_dim: list[int] = field(default_factory=lambda: [256, 512, 768, 1024, 2048, 4096])
@@ -195,7 +207,183 @@ class HPOSearchSpace:
     tt_rank_middle: list[int] = field(default_factory=lambda: [8, 16, 32])
     hamiltonian_hidden_dim: list[int] = field(default_factory=lambda: [128, 256, 512])
 
-    # Tokenizer/context config (user-set, not tuned)
+    # =========================================================================
+    # PHASE 44: QUANTUM TELEPORT BUS
+    # =========================================================================
+    teleport_entanglement_dim: list[int] = field(default_factory=lambda: [32, 64, 128])
+    teleport_fidelity_threshold: tuple[float, float] = (0.85, 0.99)
+
+    # =========================================================================
+    # PHASE 45: ENTROPY REGULARIZATION
+    # =========================================================================
+    entropy_reg_weight: tuple[float, float] = (0.001, 0.05)
+    spectral_reg_weight: tuple[float, float] = (0.001, 0.05)
+    target_entropy: tuple[float, float] = (0.3, 0.8)
+
+    # =========================================================================
+    # PHASE 46: SYMPFLOW OPTIMIZER
+    # =========================================================================
+    sympflow_mass: tuple[float, float] = (0.5, 2.0)
+    sympflow_friction: tuple[float, float] = (0.05, 0.3)
+    sympflow_step_size: tuple[float, float] = (0.005, 0.05)
+
+    # =========================================================================
+    # PHASE 47: QUANTUM MEASUREMENT DROPOUT
+    # =========================================================================
+    qmd_drop_rate: tuple[float, float] = (0.05, 0.25)
+    qmd_softening_temp: tuple[float, float] = (0.5, 2.0)
+
+    # =========================================================================
+    # PHASE 50: MAJORANA POSITION ENCODING
+    # =========================================================================
+    majorana_floquet_period: list[int] = field(default_factory=lambda: [4, 8, 16, 32])
+
+    # =========================================================================
+    # PHASE 51-52: QUANTUM LOSS FUNCTIONS
+    # =========================================================================
+    born_rule_temperature: tuple[float, float] = (0.5, 2.0)
+    fidelity_loss_weight: tuple[float, float] = (0.005, 0.05)
+
+    # =========================================================================
+    # PHASE 55: MPQR MULTI-PATH REASONING (Lite: max 8 paths, max 5 Grover)
+    # =========================================================================
+    mpqr_num_paths: list[int] = field(default_factory=lambda: [2, 4, 6, 8])
+    mpqr_grover_iterations: list[int] = field(default_factory=lambda: [1, 2, 3, 4, 5])
+
+    # =========================================================================
+    # PHASE 56: TOPOLOGICAL WAVELET ATTENTION
+    # =========================================================================
+    twa_num_scales: list[int] = field(default_factory=lambda: [2, 3, 4, 6])
+
+    # =========================================================================
+    # PHASE 57: TD-MOE TUCKER DECOMPOSITION
+    # =========================================================================
+    td_moe_tucker_rank: list[int] = field(default_factory=lambda: [8, 16, 24, 32])
+
+    # =========================================================================
+    # PHASE 58: SYMPLECTIC GNN KALMAN
+    # =========================================================================
+    sgkf_dt: tuple[float, float] = (0.005, 0.05)
+
+    # =========================================================================
+    # PHASE 59: ADIABATIC OPTIMIZER
+    # =========================================================================
+    qao_initial_temp: tuple[float, float] = (5.0, 20.0)
+    qao_final_temp: tuple[float, float] = (0.005, 0.05)
+
+    # =========================================================================
+    # PHASE 60: GEODESIC OPTIMIZER
+    # =========================================================================
+    geodesic_momentum: tuple[float, float] = (0.8, 0.99)
+
+    # =========================================================================
+    # PHASE 61: ALPHAQUBIT DECODER (Lite: max 4 layers)
+    # =========================================================================
+    alphaqubit_num_layers: list[int] = field(default_factory=lambda: [1, 2, 3, 4])
+
+    # =========================================================================
+    # PHASE 62: VQEM ERROR MITIGATION
+    # =========================================================================
+    vqem_num_params: list[int] = field(default_factory=lambda: [16, 32, 48, 64])
+
+    # =========================================================================
+    # PHASE 65: QUANTUM CRYSTALLIZATION
+    # =========================================================================
+    crystallization_threshold: tuple[float, float] = (0.4, 0.8)
+    qhpm_crystallization_rate: tuple[float, float] = (0.05, 0.2)
+
+    # =========================================================================
+    # PHASE 68: NEUROMORPHIC MEMORY
+    # =========================================================================
+    neuromorphic_tau: tuple[float, float] = (5.0, 20.0)
+
+    # =========================================================================
+    # PHASE 70: MULTI-STAGE HAMILTONIAN (Lite: max 6 stages)
+    # =========================================================================
+    hamiltonian_num_stages: list[int] = field(default_factory=lambda: [2, 3, 4, 5, 6])
+
+    # =========================================================================
+    # PHASE 71: INTRINSIC PLASTICITY
+    # =========================================================================
+    plasticity_learning_rate: tuple[float, float] = (0.005, 0.05)
+
+    # =========================================================================
+    # PHASE 72: RANDOM NATURAL GRADIENT
+    # =========================================================================
+    rng_num_samples: list[int] = field(default_factory=lambda: [5, 10, 15, 20])
+
+    # =========================================================================
+    # PHASE 76: QUANTUM COHERENCE BUS
+    # =========================================================================
+    qcb_num_nodes: list[int] = field(default_factory=lambda: [4, 6, 8, 12])
+    qcb_fidelity_threshold: tuple[float, float] = (0.85, 0.98)
+
+    # =========================================================================
+    # PHASE 78: SPINI INTEGRATOR
+    # =========================================================================
+    spini_friction: tuple[float, float] = (0.05, 0.3)
+
+    # =========================================================================
+    # PHASE 79: QCOT REASONING (Lite: max 5 steps)
+    # =========================================================================
+    qcot_reasoning_steps: list[int] = field(default_factory=lambda: [1, 2, 3, 4, 5])
+
+    # =========================================================================
+    # PHASE 80: WAVEFORM ATTENTION
+    # =========================================================================
+    # (no tunable params beyond enable/disable)
+
+    # =========================================================================
+    # PHASE 87: COCONUT MULTI-PATH EXPLORATION (Lite: max 8 paths)
+    # =========================================================================
+    coconut_num_paths: list[int] = field(default_factory=lambda: [1, 2, 4, 8])
+    coconut_collapse_threshold: tuple[float, float] = (0.5, 0.95)
+    coconut_crystallize_threshold: tuple[float, float] = (0.7, 0.99)
+
+    # =========================================================================
+    # PHASE 127: UNIFIED QUANTUM BUS
+    # =========================================================================
+    unified_bus_mps_bond_dim: list[int] = field(default_factory=lambda: [16, 32, 48, 64])
+    unified_bus_coherence_threshold: tuple[float, float] = (0.8, 0.95)
+
+    # =========================================================================
+    # PHASE 130: QUANTUM SYNERGY PARAMETERS
+    # =========================================================================
+    # S3: VQC Adaptive Depth (Lite: max 8 layers)
+    vqc_min_layers: list[int] = field(default_factory=lambda: [1, 2])
+    vqc_max_layers: list[int] = field(default_factory=lambda: [4, 6, 8])
+    # S6: Hopfield base beta (MPS Entropy → Hopfield β adaptation)
+    hopfield_base_beta: tuple[float, float] = (0.5, 2.0)
+    hopfield_beta_min: tuple[float, float] = (0.3, 0.8)
+    hopfield_beta_max: tuple[float, float] = (2.0, 6.0)
+    # S10: DTC Floquet Period (Bus Entanglement → Floquet Period)
+    dtc_floquet_period: list[int] = field(default_factory=lambda: [2, 4, 6, 8])
+    # S12: SympFlow + QNG Geodesic Weight
+    sympflow_geodesic_weight: tuple[float, float] = (0.05, 0.3)
+
+    # =========================================================================
+    # QMAMBA / Q-SSM PARAMETERS
+    # =========================================================================
+    qmamba_superposition_states: list[int] = field(default_factory=lambda: [2, 4, 8])
+    qmamba_entanglement_depth: list[int] = field(default_factory=lambda: [1, 2, 3])
+    qmamba_entanglement_strength: tuple[float, float] = (0.3, 0.9)
+    q_ssm_vqc_layers: list[int] = field(default_factory=lambda: [1, 2, 3, 4])
+
+    # =========================================================================
+    # QASA ATTENTION PARAMETERS
+    # =========================================================================
+    qasa_vqc_layers: list[int] = field(default_factory=lambda: [1, 2, 3, 4])
+    qasa_entanglement_strength: tuple[float, float] = (0.2, 0.8)
+
+    # =========================================================================
+    # QMOE ROUTING PARAMETERS
+    # =========================================================================
+    qmoe_vqc_layers: list[int] = field(default_factory=lambda: [1, 2, 3])
+    qmoe_measurement_temp: tuple[float, float] = (0.5, 2.0)
+
+    # =========================================================================
+    # USER-SET FIXED PARAMETERS (not tuned)
+    # =========================================================================
     vocab_size: int | None = None
     context_window: int | None = None
     position_embedding: str | None = None
@@ -211,6 +399,7 @@ class HPOSearchSpace:
     memory_failure_count: int = 0
 
     # Smart tuner: track skipped trials for WebUI and adaptive sampling
+
     _budget_tracker: OversizedConfigTracker | None = None
 
     def record_memory_failure(self) -> None:
@@ -427,6 +616,147 @@ class HPOSearchSpace:
             "superposition_dim": random.choice(self.superposition_dim),
             "tt_rank_middle": random.choice(self.tt_rank_middle),
             "hamiltonian_hidden_dim": random.choice(self.hamiltonian_hidden_dim),
+            # =================================================================
+            # PHASE 44: Quantum Teleport Bus
+            # =================================================================
+            "teleport_entanglement_dim": random.choice(self.teleport_entanglement_dim),
+            "teleport_fidelity_threshold": random.uniform(*self.teleport_fidelity_threshold),
+            # =================================================================
+            # PHASE 45: Entropy Regularization
+            # =================================================================
+            "entropy_reg_weight": random.uniform(*self.entropy_reg_weight),
+            "spectral_reg_weight": random.uniform(*self.spectral_reg_weight),
+            "target_entropy": random.uniform(*self.target_entropy),
+            # =================================================================
+            # PHASE 46: SympFlow Optimizer
+            # =================================================================
+            "sympflow_mass": random.uniform(*self.sympflow_mass),
+            "sympflow_friction": random.uniform(*self.sympflow_friction),
+            "sympflow_step_size": random.uniform(*self.sympflow_step_size),
+            # =================================================================
+            # PHASE 47: Quantum Measurement Dropout
+            # =================================================================
+            "qmd_drop_rate": random.uniform(*self.qmd_drop_rate),
+            "qmd_softening_temp": random.uniform(*self.qmd_softening_temp),
+            # =================================================================
+            # PHASE 50: Majorana Position Encoding
+            # =================================================================
+            "majorana_floquet_period": random.choice(self.majorana_floquet_period),
+            # =================================================================
+            # PHASE 51-52: Quantum Loss Functions
+            # =================================================================
+            "born_rule_temperature": random.uniform(*self.born_rule_temperature),
+            "fidelity_loss_weight": random.uniform(*self.fidelity_loss_weight),
+            # =================================================================
+            # PHASE 55: MPQR Multi-Path Reasoning
+            # =================================================================
+            "mpqr_num_paths": random.choice(self.mpqr_num_paths),
+            "mpqr_grover_iterations": random.choice(self.mpqr_grover_iterations),
+            # =================================================================
+            # PHASE 56: Topological Wavelet Attention
+            # =================================================================
+            "twa_num_scales": random.choice(self.twa_num_scales),
+            # =================================================================
+            # PHASE 57: TD-MoE Tucker Decomposition
+            # =================================================================
+            "td_moe_tucker_rank": random.choice(self.td_moe_tucker_rank),
+            # =================================================================
+            # PHASE 58: Symplectic GNN Kalman
+            # =================================================================
+            "sgkf_dt": random.uniform(*self.sgkf_dt),
+            # =================================================================
+            # PHASE 59: Adiabatic Optimizer
+            # =================================================================
+            "qao_initial_temp": random.uniform(*self.qao_initial_temp),
+            "qao_final_temp": random.uniform(*self.qao_final_temp),
+            # =================================================================
+            # PHASE 60: Geodesic Optimizer
+            # =================================================================
+            "geodesic_momentum": random.uniform(*self.geodesic_momentum),
+            # =================================================================
+            # PHASE 61: AlphaQubit Decoder
+            # =================================================================
+            "alphaqubit_num_layers": random.choice(self.alphaqubit_num_layers),
+            # =================================================================
+            # PHASE 62: VQEM Error Mitigation
+            # =================================================================
+            "vqem_num_params": random.choice(self.vqem_num_params),
+            # =================================================================
+            # PHASE 65: Quantum Crystallization
+            # =================================================================
+            "crystallization_threshold": random.uniform(*self.crystallization_threshold),
+            "qhpm_crystallization_rate": random.uniform(*self.qhpm_crystallization_rate),
+            # =================================================================
+            # PHASE 68: Neuromorphic Memory
+            # =================================================================
+            "neuromorphic_tau": random.uniform(*self.neuromorphic_tau),
+            # =================================================================
+            # PHASE 70: Multi-Stage Hamiltonian
+            # =================================================================
+            "hamiltonian_num_stages": random.choice(self.hamiltonian_num_stages),
+            # =================================================================
+            # PHASE 71: Intrinsic Plasticity
+            # =================================================================
+            "plasticity_learning_rate": random.uniform(*self.plasticity_learning_rate),
+            # =================================================================
+            # PHASE 72: Random Natural Gradient
+            # =================================================================
+            "rng_num_samples": random.choice(self.rng_num_samples),
+            # =================================================================
+            # PHASE 76: Quantum Coherence Bus
+            # =================================================================
+            "qcb_num_nodes": random.choice(self.qcb_num_nodes),
+            "qcb_fidelity_threshold": random.uniform(*self.qcb_fidelity_threshold),
+            # =================================================================
+            # PHASE 78: SPINI Integrator
+            # =================================================================
+            "spini_friction": random.uniform(*self.spini_friction),
+            # =================================================================
+            # PHASE 79: QCOT Reasoning
+            # =================================================================
+            "qcot_reasoning_steps": random.choice(self.qcot_reasoning_steps),
+            # =================================================================
+            # PHASE 87: CoCoNut Multi-Path Exploration
+            # =================================================================
+            "coconut_num_paths": random.choice(self.coconut_num_paths),
+            "coconut_collapse_threshold": random.uniform(*self.coconut_collapse_threshold),
+            "coconut_crystallize_threshold": random.uniform(*self.coconut_crystallize_threshold),
+            # =================================================================
+            # PHASE 127: Unified Quantum Bus
+            # =================================================================
+            "unified_bus_mps_bond_dim": random.choice(self.unified_bus_mps_bond_dim),
+            "unified_bus_coherence_threshold": random.uniform(*self.unified_bus_coherence_threshold),
+            # =================================================================
+            # PHASE 130: Quantum Synergy Parameters
+            # =================================================================
+            # S3: VQC Adaptive Depth
+            "vqc_min_layers": random.choice(self.vqc_min_layers),
+            "vqc_max_layers": random.choice(self.vqc_max_layers),
+            # S6: Hopfield adaptive beta
+            "hopfield_base_beta": random.uniform(*self.hopfield_base_beta),
+            "hopfield_beta_min": random.uniform(*self.hopfield_beta_min),
+            "hopfield_beta_max": random.uniform(*self.hopfield_beta_max),
+            # S10: DTC Floquet Period
+            "dtc_floquet_period": random.choice(self.dtc_floquet_period),
+            # S12: SympFlow Geodesic Weight
+            "sympflow_geodesic_weight": random.uniform(*self.sympflow_geodesic_weight),
+            # =================================================================
+            # QMamba / Q-SSM Parameters
+            # =================================================================
+            "qmamba_superposition_states": random.choice(self.qmamba_superposition_states),
+            "qmamba_entanglement_depth": random.choice(self.qmamba_entanglement_depth),
+            "qmamba_entanglement_strength": random.uniform(*self.qmamba_entanglement_strength),
+            "q_ssm_vqc_layers": random.choice(self.q_ssm_vqc_layers),
+            # =================================================================
+            # QASA Attention Parameters
+            # =================================================================
+            "qasa_vqc_layers": random.choice(self.qasa_vqc_layers),
+            "qasa_entanglement_strength": random.uniform(*self.qasa_entanglement_strength),
+            # =================================================================
+            # QMoE Routing Parameters
+            # =================================================================
+            "qmoe_vqc_layers": random.choice(self.qmoe_vqc_layers),
+            "qmoe_measurement_temp": random.uniform(*self.qmoe_measurement_temp),
         }
 
         # Add user-set tokenizer/context config if provided

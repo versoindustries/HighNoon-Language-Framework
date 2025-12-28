@@ -67,84 +67,67 @@ def create_scheduler(
 ) -> HPOSchedulerBase:
     """Create scheduler based on strategy string.
 
+    As of Phase 11, all strategies default to QAHPO (Quantum Adaptive HPO).
+    Legacy strategy names are supported for backward compatibility but
+    route to QAHPO.
+
     Args:
-        strategy: Scheduler strategy name. One of:
-            - "random": Simple random sampling
-            - "bayesian": TPE via Optuna
-            - "hyperband": Adaptive resource allocation
-            - "successive_halving": Single-bracket early stopping
-            - "pbt": Population-based training (not yet implemented)
+        strategy: Scheduler strategy name. Recommended:
+            - "quantum" / "qahpo": Quantum Adaptive HPO (default)
+            Legacy (all route to QAHPO):
+            - "random", "bayesian", "hyperband", "successive_halving", "pbt"
         config: SweepConfig with scheduler parameters
         search_space: Optional custom search space
 
     Returns:
-        Configured HPO scheduler instance
-
-    Raises:
-        ValueError: If unknown strategy specified
+        Configured QAHPO scheduler instance
     """
-    from highnoon.services.hpo_schedulers import HyperbandScheduler, SuccessiveHalvingScheduler
+    from highnoon.services.quantum_hpo_scheduler import QuantumAdaptiveHPOScheduler, QAHPOConfig
 
     # Default search space sampler
     def default_sampler(trial_id: int) -> dict[str, Any]:
         return sample_search_space(search_space, trial_id)
 
     max_budget = getattr(config, "max_epochs", 100)
-    min_budget = getattr(config, "min_epochs", 1)
-    eta = getattr(config, "hyperband_eta", 3)
+    min_budget = getattr(config, "min_epochs", 10)
+    population_size = getattr(config, "population_size", 8)
 
-    if strategy == "hyperband":
-        logger.info(
-            f"[HPO] Creating Hyperband scheduler (eta={eta}, "
-            f"min_budget={min_budget}, max_budget={max_budget})"
-        )
-        return HyperbandScheduler(
-            max_budget=max_budget,
-            min_budget=min_budget,
-            eta=eta,
-            search_space_sampler=default_sampler,
-        )
+    # All strategies now route to QAHPO
+    strategy_lower = strategy.lower()
 
-    elif strategy == "successive_halving":
-        logger.info(
-            f"[HPO] Creating Successive Halving scheduler "
-            f"(min_budget={min_budget}, max_budget={max_budget})"
-        )
-        return SuccessiveHalvingScheduler(
-            max_budget=max_budget,
-            min_budget=min_budget,
-            reduction_factor=eta,
-            search_space_sampler=default_sampler,
-        )
+    # Map legacy names to QAHPO with appropriate messages
+    if strategy_lower in ("quantum", "qahpo", "adaptive"):
+        logger.info("[HPO] Creating Quantum Adaptive HPO scheduler (QAHPO)")
+    elif strategy_lower == "pbt":
+        logger.info("[HPO] PBT → Using Quantum Adaptive HPO (QAHPO, quantum-enhanced PBT)")
+    elif strategy_lower == "bayesian":
+        logger.info("[HPO] Bayesian → Using Quantum Adaptive HPO (QAHPO with amplitude selection)")
+    elif strategy_lower == "hyperband":
+        logger.info("[HPO] Hyperband → Using Quantum Adaptive HPO (QAHPO with adaptive budgets)")
+    elif strategy_lower == "successive_halving":
+        logger.info("[HPO] Successive Halving → Using Quantum Adaptive HPO (QAHPO)")
+    else:
+        logger.info(f"[HPO] Strategy '{strategy}' → Using Quantum Adaptive HPO (QAHPO)")
 
-    elif strategy == "bayesian":
-        # Try to use Optuna-based scheduler
-        try:
-            from highnoon.services.hpo_optuna_sampler import OPTUNA_AVAILABLE
+    # Configure QAHPO
+    qahpo_config = QAHPOConfig(
+        population_size=population_size,
+        initial_temperature=2.0,
+        final_temperature=0.1,
+        tunneling_probability=0.15,
+        mutation_strength=0.3,
+        crossover_rate=0.4,
+        elite_fraction=0.25,
+    )
 
-            if OPTUNA_AVAILABLE:
-                logger.info("[HPO] Creating Optuna Bayesian scheduler (TPE)")
-                return _create_optuna_scheduler(config, search_space, default_sampler)
-            else:
-                logger.warning("[HPO] Optuna not available, falling back to random scheduler")
-                return _create_random_scheduler(max_budget, default_sampler)
-        except ImportError:
-            logger.warning("[HPO] Optuna sampler not available, falling back to random scheduler")
-            return _create_random_scheduler(max_budget, default_sampler)
+    return QuantumAdaptiveHPOScheduler(
+        max_budget=max_budget,
+        min_budget=min_budget,
+        search_space_sampler=default_sampler,
+        config=qahpo_config,
+    )
 
-    elif strategy == "pbt":
-        logger.warning("[HPO] PBT scheduler not yet implemented, falling back to Hyperband")
-        return HyperbandScheduler(
-            max_budget=max_budget,
-            min_budget=min_budget,
-            eta=eta,
-            search_space_sampler=default_sampler,
-        )
 
-    else:  # random or unknown
-        if strategy != "random":
-            logger.warning(f"[HPO] Unknown strategy '{strategy}', using random")
-        return _create_random_scheduler(max_budget, default_sampler)
 
 
 def _create_random_scheduler(

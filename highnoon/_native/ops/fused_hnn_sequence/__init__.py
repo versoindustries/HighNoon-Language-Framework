@@ -65,7 +65,11 @@ from tensorflow.python.framework import ops as _ops
 
 @_ops.RegisterGradient("FusedHNNSequence")
 def _fused_hnn_sequence_grad(op: tf.Operation, *grads):
-    """Gradient for FusedHNNSequence using C++ kernel."""
+    """Gradient for FusedHNNSequence using C++ kernel.
+
+    Raises:
+        RuntimeError: If C++ grad op is not available.
+    """
     # grads contains gradients for all outputs:
     # grad_output_sequence, grad_final_q, grad_final_p, grad_h_initial_seq, grad_h_final_seq
     grad_output_sequence = grads[0]
@@ -77,9 +81,10 @@ def _fused_hnn_sequence_grad(op: tf.Operation, *grads):
     native_module = _ensure_loaded()
 
     if native_module is None or not hasattr(native_module, "fused_hnn_sequence_grad"):
-        # Fall back to returning zeros if grad op not available
-        logger.warning("FusedHNNSequenceGrad not available, returning zero gradients")
-        return tuple(tf.zeros_like(inp) for inp in op.inputs)
+        raise RuntimeError(
+            "FusedHNNSequenceGrad C++ op not available. Build with: "
+            "cd highnoon/_native && ./build_secure.sh"
+        )
 
     # Get inputs from forward op
     sequence_input = op.inputs[0]
@@ -100,29 +105,25 @@ def _fused_hnn_sequence_grad(op: tf.Operation, *grads):
     op.outputs[1]
     op.outputs[2]
 
-    try:
-        # Call the C++ gradient kernel
-        grad_results = native_module.fused_hnn_sequence_grad(
-            grad_output_sequence=grad_output_sequence,
-            grad_final_q=grad_final_q,
-            grad_final_p=grad_final_p,
-            sequence_input=sequence_input,
-            initial_q=initial_q,
-            initial_p=initial_p,
-            w1=w1,
-            b1=b1,
-            w2=w2,
-            b2=b2,
-            w3=w3,
-            b3=b3,
-            w_out=w_out,
-            b_out=b_out,
-            evolution_time_param=evolution_time,
-        )
-        return tuple(grad_results)
-    except Exception as e:
-        logger.warning(f"FusedHNNSequenceGrad failed: {e}, returning zeros")
-        return tuple(tf.zeros_like(inp) for inp in op.inputs)
+    # Call the C++ gradient kernel
+    grad_results = native_module.fused_hnn_sequence_grad(
+        grad_output_sequence=grad_output_sequence,
+        grad_final_q=grad_final_q,
+        grad_final_p=grad_final_p,
+        sequence_input=sequence_input,
+        initial_q=initial_q,
+        initial_p=initial_p,
+        w1=w1,
+        b1=b1,
+        w2=w2,
+        b2=b2,
+        w3=w3,
+        b3=b3,
+        w_out=w_out,
+        b_out=b_out,
+        evolution_time_param=evolution_time,
+    )
+    return tuple(grad_results)
 
 
 def fused_hnn_sequence(
@@ -139,7 +140,7 @@ def fused_hnn_sequence(
     b_out: tf.Tensor,
     evolution_time: tf.Tensor,
 ) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]:
-    """Compute HNN sequence dynamics using fused C++ kernel or Python fallback.
+    """Compute HNN sequence dynamics using fused C++ kernel.
 
     Args:
         sequence_input: Input sequence tensor [batch, seq_len, input_dim].
@@ -157,30 +158,19 @@ def fused_hnn_sequence(
 
     Returns:
         Tuple of (output_sequence, final_q, final_p, h_initial_seq, h_final_seq).
+
+    Raises:
+        RuntimeError: If C++ op is not available.
     """
     native_module = _ensure_loaded()
 
-    if native_module is not None and hasattr(native_module, "fused_hnn_sequence"):
-        try:
-            return native_module.fused_hnn_sequence(
-                sequence_input=sequence_input,
-                initial_q=initial_q,
-                initial_p=initial_p,
-                w1=w1,
-                b1=b1,
-                w2=w2,
-                b2=b2,
-                w3=w3,
-                b3=b3,
-                w_out=w_out,
-                b_out=b_out,
-                evolution_time_param=evolution_time,
-            )
-        except Exception as e:
-            logger.warning(f"Native FusedHNNSequence failed: {e}. Using fallback.")
+    if native_module is None or not hasattr(native_module, "fused_hnn_sequence"):
+        raise RuntimeError(
+            "FusedHNNSequence C++ op not available. Build with: "
+            "cd highnoon/_native && ./build_secure.sh"
+        )
 
-    # Python fallback implementation using TensorArray for graph compatibility
-    return _python_hnn_sequence(
+    return native_module.fused_hnn_sequence(
         sequence_input=sequence_input,
         initial_q=initial_q,
         initial_p=initial_p,
@@ -192,165 +182,8 @@ def fused_hnn_sequence(
         b3=b3,
         w_out=w_out,
         b_out=b_out,
-        evolution_time=evolution_time,
+        evolution_time_param=evolution_time,
     )
-
-
-def _python_hnn_sequence(
-    sequence_input: tf.Tensor,
-    initial_q: tf.Tensor,
-    initial_p: tf.Tensor,
-    w1: tf.Tensor,
-    b1: tf.Tensor,
-    w2: tf.Tensor,
-    b2: tf.Tensor,
-    w3: tf.Tensor,
-    b3: tf.Tensor,
-    w_out: tf.Tensor,
-    b_out: tf.Tensor,
-    evolution_time: tf.Tensor,
-) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]:
-    """Pure TensorFlow fallback for HNN sequence dynamics.
-
-    Implements a simplified symplectic leapfrog integration. Uses TensorArray
-    and tf.while_loop for graph mode compatibility.
-    """
-    tf.shape(sequence_input)[0]
-    seq_len = tf.shape(sequence_input)[1]
-    tf.shape(sequence_input)[2]
-    tf.shape(initial_q)[1]
-    tf.shape(b_out)[0]
-
-    # Use epsilon directly
-    epsilon = tf.cast(evolution_time, tf.float32)
-
-    # Create TensorArrays for graph-mode compatible accumulation
-    output_ta = tf.TensorArray(dtype=tf.float32, size=seq_len, dynamic_size=False)
-    h_init_ta = tf.TensorArray(dtype=tf.float32, size=seq_len, dynamic_size=False)
-    h_final_ta = tf.TensorArray(dtype=tf.float32, size=seq_len, dynamic_size=False)
-
-    def compute_hamiltonian_and_grad(q, p, x):
-        """Compute Hamiltonian and its gradients w.r.t. q and p."""
-        z = tf.concat([q, p, x], axis=-1)  # [batch, D_in]
-
-        # Forward pass
-        h1 = tf.nn.tanh(tf.matmul(z, w1) + b1)
-        h2 = tf.nn.tanh(tf.matmul(h1, w2) + b2)
-        H = tf.reduce_sum(tf.matmul(h2, w3), axis=-1) + b3  # [batch]
-
-        # Backward pass for gradient (manual derivative)
-        # dH/dz = dH/dh2 * dh2/dh1 * dh1/dz
-        # For simplicity, use approximation: gradient of H w.r.t q is similar in structure
-        # This is a simplified fallback - production uses the C++ version
-
-        # Numerical gradient approximation for symplectic stability
-        # Compute gradient w.r.t q
-        eps = 1e-4
-        z_q_plus = tf.concat([q + eps, p, x], axis=-1)
-        z_q_minus = tf.concat([q - eps, p, x], axis=-1)
-        H_q_plus = (
-            tf.reduce_sum(
-                tf.matmul(
-                    tf.nn.tanh(tf.matmul(tf.nn.tanh(tf.matmul(z_q_plus, w1) + b1), w2) + b2), w3
-                ),
-                axis=-1,
-            )
-            + b3
-        )
-        H_q_minus = (
-            tf.reduce_sum(
-                tf.matmul(
-                    tf.nn.tanh(tf.matmul(tf.nn.tanh(tf.matmul(z_q_minus, w1) + b1), w2) + b2), w3
-                ),
-                axis=-1,
-            )
-            + b3
-        )
-        dH_dq = (H_q_plus - H_q_minus) / (2 * eps)  # [batch]
-        dH_dq = tf.reshape(dH_dq, [-1, 1]) * tf.ones_like(q)  # Broadcast to [batch, D_state]
-
-        # Gradient w.r.t p
-        z_p_plus = tf.concat([q, p + eps, x], axis=-1)
-        z_p_minus = tf.concat([q, p - eps, x], axis=-1)
-        H_p_plus = (
-            tf.reduce_sum(
-                tf.matmul(
-                    tf.nn.tanh(tf.matmul(tf.nn.tanh(tf.matmul(z_p_plus, w1) + b1), w2) + b2), w3
-                ),
-                axis=-1,
-            )
-            + b3
-        )
-        H_p_minus = (
-            tf.reduce_sum(
-                tf.matmul(
-                    tf.nn.tanh(tf.matmul(tf.nn.tanh(tf.matmul(z_p_minus, w1) + b1), w2) + b2), w3
-                ),
-                axis=-1,
-            )
-            + b3
-        )
-        dH_dp = (H_p_plus - H_p_minus) / (2 * eps)
-        dH_dp = tf.reshape(dH_dp, [-1, 1]) * tf.ones_like(p)
-
-        return H, dH_dq, dH_dp
-
-    def loop_body(i, q_t, p_t, output_ta_i, h_init_ta_i, h_final_ta_i):
-        """Process one sequence step."""
-        # Get input for this step
-        x_l = sequence_input[:, i, :]  # [batch, D_input]
-
-        # Compute initial Hamiltonian
-        H_init, dH_dq_init, dH_dp_init = compute_hamiltonian_and_grad(q_t, p_t, x_l)
-
-        # Symplectic leapfrog integration
-        # Half step in momentum
-        p_half = p_t - 0.5 * epsilon * dH_dq_init
-
-        # Full step in position using gradient at half-step momentum
-        _, _, dH_dp_half = compute_hamiltonian_and_grad(q_t, p_half, x_l)
-        q_next = q_t + epsilon * dH_dp_half
-
-        # Half step in momentum at new position
-        _, dH_dq_next, _ = compute_hamiltonian_and_grad(q_next, p_half, x_l)
-        p_next = p_half - 0.5 * epsilon * dH_dq_next
-
-        # Compute final Hamiltonian
-        H_final, _, _ = compute_hamiltonian_and_grad(q_next, p_next, x_l)
-
-        # Output projection
-        final_state = tf.concat([q_next, p_next], axis=-1)  # [batch, 2*D_state]
-        output_l = tf.matmul(final_state, w_out) + b_out  # [batch, D_output]
-
-        # Store results in TensorArrays
-        output_ta_i = output_ta_i.write(i, output_l)
-        h_init_ta_i = h_init_ta_i.write(i, H_init[:, None])
-        h_final_ta_i = h_final_ta_i.write(i, H_final[:, None])
-
-        return i + 1, q_next, p_next, output_ta_i, h_init_ta_i, h_final_ta_i
-
-    # Run the loop
-    _, final_q, final_p, output_ta, h_init_ta, h_final_ta = tf.while_loop(
-        cond=lambda i, *_: i < seq_len,
-        body=loop_body,
-        loop_vars=(
-            tf.constant(0, dtype=tf.int32),
-            initial_q,
-            initial_p,
-            output_ta,
-            h_init_ta,
-            h_final_ta,
-        ),
-        parallel_iterations=1,
-        back_prop=True,
-    )
-
-    # Stack TensorArrays into tensors
-    output_sequence = tf.transpose(output_ta.stack(), [1, 0, 2])  # [batch, seq_len, D_output]
-    h_initial_seq = tf.transpose(h_init_ta.stack(), [1, 0, 2])  # [batch, seq_len, 1]
-    h_final_seq = tf.transpose(h_final_ta.stack(), [1, 0, 2])  # [batch, seq_len, 1]
-
-    return output_sequence, final_q, final_p, h_initial_seq, h_final_seq
 
 
 __all__ = ["fused_hnn_sequence"]

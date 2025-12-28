@@ -96,6 +96,31 @@ def __getattr__(name):
         from highnoon.services.hpo_manager import HPOTrialManager
 
         return HPOTrialManager
+    # New exports for serialization and HPO bridge
+    elif name == "save_model":
+        from highnoon.serialization import save_model
+
+        return save_model
+    elif name == "load_model":
+        from highnoon.serialization import load_model
+
+        return load_model
+    elif name == "load_tokenizer":
+        from highnoon.serialization import load_tokenizer
+
+        return load_tokenizer
+    elif name == "HPOTrainingConfig":
+        from highnoon.services.hpo_training_bridge import HPOTrainingConfig
+
+        return HPOTrainingConfig
+    elif name == "TrainingEngine":
+        from highnoon.training.training_engine import TrainingEngine
+
+        return TrainingEngine
+    elif name == "EnterpriseTrainingConfig":
+        from highnoon.training.training_engine import EnterpriseTrainingConfig
+
+        return EnterpriseTrainingConfig
     raise AttributeError(f"module 'highnoon' has no attribute {name!r}")
 
 
@@ -112,4 +137,13 @@ __all__ = [
     "TrainingConfig",
     "QWTTextTokenizer",
     "HPOTrialManager",
+    # Model serialization
+    "save_model",
+    "load_model",
+    "load_tokenizer",
+    # HPO-TrainingEngine integration
+    "HPOTrainingConfig",
+    "TrainingEngine",
+    "EnterpriseTrainingConfig",
 ]
+

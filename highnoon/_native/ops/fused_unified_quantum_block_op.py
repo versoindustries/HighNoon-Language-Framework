@@ -87,13 +87,10 @@ def holographic_bind(a: tf.Tensor, b: tf.Tensor, name: str = "holographic_bind")
         Bound tensor [B, D].
     """
     if not _ensure_lib_loaded():
-        # Python fallback using FFT-based circular convolution
-        a_c = tf.cast(a, tf.complex64)
-        b_c = tf.cast(b, tf.complex64)
-        fft_a = tf.signal.fft(a_c)
-        fft_b = tf.signal.fft(b_c)
-        result = tf.signal.ifft(fft_a * fft_b)
-        return tf.cast(tf.math.real(result), a.dtype)
+        raise RuntimeError(
+            "Unified quantum C++ ops not available. Build with: "
+            "cd highnoon/_native && ./build_secure.sh"
+        )
 
     return _lib.high_noon_holographic_bind(a, b, name=name)
 
@@ -124,13 +121,10 @@ def holographic_unbind(
         Unbound tensor [B, D].
     """
     if not _ensure_lib_loaded():
-        # Fallback using TF FFT
-        composite_c = tf.cast(composite, tf.complex64)
-        key_c = tf.cast(key, tf.complex64)
-        fft_c = tf.signal.fft(composite_c)
-        fft_k = tf.signal.fft(key_c)
-        result = tf.signal.ifft(fft_c * tf.math.conj(fft_k))
-        return tf.cast(tf.math.real(result), composite.dtype)
+        raise RuntimeError(
+            "Unified quantum C++ ops not available. Build with: "
+            "cd highnoon/_native && ./build_secure.sh"
+        )
 
     # Use the bind op with conjugated key for unbinding
     # unbind(c, k) = bind(c, reverse(k))
@@ -169,12 +163,10 @@ def port_hamiltonian_step(
         Next state [B, D].
     """
     if not _ensure_lib_loaded():
-        # Python fallback
-        jmr = j_matrix - r_matrix  # [D, D]
-        dx = tf.einsum("ij,bj->bi", jmr, grad_h)
-        if external_input is not None:
-            dx = dx + external_input
-        return state + dt * dx
+        raise RuntimeError(
+            "Unified quantum C++ ops not available. Build with: "
+            "cd highnoon/_native && ./build_secure.sh"
+        )
 
     if external_input is None:
         external_input = tf.zeros_like(state)
@@ -205,13 +197,10 @@ def thermodynamic_route(
         Tuple of (routing_weights [B, N, E], entropy [B]).
     """
     if not _ensure_lib_loaded():
-        # Python fallback
-        scaled = logits / tf.maximum(temperature, 1e-6)
-        weights = tf.nn.softmax(scaled, axis=-1)
-        entropy = -tf.reduce_sum(weights * tf.math.log(weights + 1e-10), axis=[-1, -2]) / tf.cast(
-            tf.shape(logits)[1], tf.float32
+        raise RuntimeError(
+            "Unified quantum C++ ops not available. Build with: "
+            "cd highnoon/_native && ./build_secure.sh"
         )
-        return weights, entropy
 
     return _lib.high_noon_thermodynamic_route(logits, temperature=temperature, name=name)
 
@@ -236,13 +225,10 @@ def orthogonalize_keys(
         Tuple of (orthogonalized_keys [B, H, L, D], penalty [B, H]).
     """
     if not _ensure_lib_loaded():
-        # Simplified fallback: just normalize keys
-        keys_norm = tf.nn.l2_normalize(keys, axis=-1)
-        # Compute simple penalty estimate
-        ktk = tf.einsum("bhid,bhjd->bhij", keys_norm, keys_norm)
-        eye = tf.eye(tf.shape(keys)[2], dtype=keys.dtype)
-        penalty = tf.reduce_sum(tf.square(ktk - eye), axis=[-1, -2])
-        return keys_norm, penalty
+        raise RuntimeError(
+            "Unified quantum C++ ops not available. Build with: "
+            "cd highnoon/_native && ./build_secure.sh"
+        )
 
     return _lib.high_noon_orthogonalize_keys(keys, name=name)
 
@@ -269,22 +255,10 @@ def qsvt_activation(
         Activated output [B, L, D].
     """
     if not _ensure_lib_loaded():
-        # Python fallback using Chebyshev recurrence
-        x_clipped = tf.clip_by_value(x, -1.0, 1.0)
-        t_nm1 = tf.ones_like(x_clipped)  # T_0 = 1
-        t_n = x_clipped  # T_1 = x
-        result = coefficients[0] * t_nm1
-
-        if degree >= 1:
-            result = result + coefficients[1] * t_n
-
-        for n in range(2, degree + 1):
-            t_np1 = 2.0 * x_clipped * t_n - t_nm1
-            result = result + coefficients[n] * t_np1
-            t_nm1 = t_n
-            t_n = t_np1
-
-        return result
+        raise RuntimeError(
+            "Unified quantum C++ ops not available. Build with: "
+            "cd highnoon/_native && ./build_secure.sh"
+        )
 
     return _lib.high_noon_qsvt_activation(x, coefficients, degree=degree, name=name)
 
@@ -354,29 +328,10 @@ def quantum_reservoir(
         Tuple of (output [B, L, D_out], new_reservoir_state [B, R]).
     """
     if not _ensure_lib_loaded():
-        # Python fallback
-        tf.shape(x)[0]
-        seq_len = tf.shape(x)[1]
-        tf.shape(x)[2]
-        tf.shape(readout_weights)[0]
-
-        # Simple reservoir dynamics
-        state = reservoir_state
-        outputs = []
-
-        for t in range(seq_len):
-            x_t = x[:, t, :]  # [B, D_in]
-            for _ in range(evolution_steps):
-                # state_input = [state, x_t]
-                combined = tf.concat([state, x_t], axis=-1)  # [B, R + D_in]
-                state = tf.tanh(tf.einsum("ij,bj->bi", reservoir_weights, combined))
-
-            # Readout
-            out = tf.einsum("ij,bj->bi", readout_weights, state)
-            outputs.append(out)
-
-        output = tf.stack(outputs, axis=1)
-        return output, state
+        raise RuntimeError(
+            "Unified quantum C++ ops not available. Build with: "
+            "cd highnoon/_native && ./build_secure.sh"
+        )
 
     return _lib.high_noon_quantum_reservoir(
         x,
@@ -414,9 +369,10 @@ def entanglement_loss(
         Loss value [1].
     """
     if not _ensure_lib_loaded():
-        # Python fallback
-        loss = weight * tf.reduce_mean(tf.maximum(0.0, min_entropy - bond_entropies))
-        return loss
+        raise RuntimeError(
+            "Unified quantum C++ ops not available. Build with: "
+            "cd highnoon/_native && ./build_secure.sh"
+        )
 
     return _lib.high_noon_entanglement_loss(
         bond_entropies, min_entropy=min_entropy, weight=weight, name=name
@@ -449,9 +405,10 @@ def quantum_memory_replay(
         Actually, the Op returns (output, replay_buffer).
     """
     if not _ensure_lib_loaded():
-        # Fallback: Just return inputs (identity) as placeholder since replay is complex
-        # to replicate in pure Python efficiently without custom gradient tape context.
-        return inputs, tf.zeros_like(inputs)
+        raise RuntimeError(
+            "Unified quantum C++ ops not available. Build with: "
+            "cd highnoon/_native && ./build_secure.sh"
+        )
 
     # Note: Variable number of weight inputs not fully supported by this simple wrapper
     # unless we pack them. The Op definition expects input "weights" as a list.
@@ -499,11 +456,10 @@ def quantum_holographic_memory(
         values = tf.tile(values, [batch_size, 1, 1])
 
     if not _ensure_lib_loaded():
-        # Python fallback using dot-product attention
-        scores = tf.matmul(query[:, tf.newaxis, :], keys, transpose_b=True)  # [B, 1, M]
-        weights = tf.nn.softmax(scores, axis=-1)
-        retrieved = tf.matmul(weights, values)[:, 0, :]  # [B, D]
-        return retrieved, keys, values
+        raise RuntimeError(
+            "Unified quantum C++ ops not available. Build with: "
+            "cd highnoon/_native && ./build_secure.sh"
+        )
 
     # Use C++ op - QuantumHolographicMemory takes (inputs, memory_bank, beta)
     # We concatenate keys as memory_bank for the Hopfield-style lookup

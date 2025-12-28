@@ -75,6 +75,14 @@ def __getattr__(name):
         from highnoon.models.spatial.mamba import ReasoningMamba2Block
 
         return ReasoningMamba2Block
+    elif name == "FloquetTimeCrystalBlock":
+        from highnoon.models.hamiltonian import FloquetTimeCrystalBlock
+
+        return FloquetTimeCrystalBlock
+    elif name == "FloquetTimeCrystalSequenceBlock":
+        from highnoon.models.hamiltonian import FloquetTimeCrystalSequenceBlock
+
+        return FloquetTimeCrystalSequenceBlock
     raise AttributeError(f"module 'highnoon.models' has no attribute {name!r}")
 
 
@@ -152,6 +160,8 @@ __all__ = [
     "HamiltonianNN",
     "TimeCrystalBlock",
     "TimeCrystalSequenceBlock",
+    "FloquetTimeCrystalBlock",
+    "FloquetTimeCrystalSequenceBlock",
     "SpatialBlock",
     "ReasoningMamba2Block",
     "create_model",

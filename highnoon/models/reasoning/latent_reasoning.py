@@ -307,6 +307,11 @@ class LatentReasoningBlock(FusedReasoningBlockMixin, tf.keras.layers.Layer):
             # Pre-build the block
             self.continuous_thought_block.build(input_shape)
 
+            # S2 Synergy: Apply deferred QMamba wiring if pending
+            if hasattr(self, '_pending_qmamba_source') and self._pending_qmamba_source is not None:
+                self.continuous_thought_block.set_qmamba_amplitude_provider(self._pending_qmamba_source)
+                self._pending_qmamba_source = None  # Clear pending reference
+
         # Phase 25: Holographic Memory State
         if getattr(self, "use_holographic_memory", False):
             # Keys and Values for holographic association
@@ -459,6 +464,29 @@ class LatentReasoningBlock(FusedReasoningBlockMixin, tf.keras.layers.Layer):
         # Phase 14.3: Apply COCONUT continuous thought enhancement
         if self.use_continuous_thought and self.continuous_thought_block is not None:
             output = self.continuous_thought_block(output, training=training)
+        elif self.continuous_thought_block is not None:
+            # GRADIENT PASSTHROUGH: Even when continuous thought is disabled at runtime,
+            # ensure gradient flow to the block's weights to prevent "Gradients do not exist" warnings.
+            # This is zero-weighted to not affect the output numerically.
+            pooled = tf.reduce_mean(output, axis=1, keepdims=True)  # [B, 1, D]
+            # Call key layers with zero weight
+            ct_block = self.continuous_thought_block
+            dummy_norm = ct_block.input_norm(pooled)
+            dummy_agg = ct_block.thought_aggregator(tf.squeeze(pooled, axis=1))
+            dummy_proj = ct_block.thought_projector(tf.squeeze(dummy_norm, axis=1))
+            dummy_broadcast = ct_block.broadcast_projection(dummy_agg)
+            dummy_gate = ct_block.gate(pooled)
+            dummy_out_norm = ct_block.output_norm(pooled)
+            # Combine with zero weight
+            passthrough = (
+                tf.reduce_mean(dummy_norm) +
+                tf.reduce_mean(dummy_agg) +
+                tf.reduce_mean(dummy_proj) +
+                tf.reduce_mean(dummy_broadcast) +
+                tf.reduce_mean(dummy_gate) +
+                tf.reduce_mean(dummy_out_norm)
+            )
+            output = output + 0.0 * passthrough
 
         # Phase 25: Holographic Memory
         if (
@@ -709,6 +737,22 @@ class LatentReasoningBlock(FusedReasoningBlockMixin, tf.keras.layers.Layer):
             "dropout_rate": float(self.dropout_rate),
             "exit_threshold": float(self.exit_threshold),
         }
+
+    def set_qmamba_source(self, qmamba_block: object) -> None:
+        """Set QMamba block as amplitude source for COCONUT path selection (S2 Synergy).
+
+        Enables the S2 synergy where QMamba's learned quantum amplitudes are used
+        to guide COCONUT's multi-path BFS exploration in latent reasoning.
+
+        Args:
+            qmamba_block: QMambaBlock or UnifiedQSSMBlock instance with
+                amplitudes_real and amplitudes_imag weights.
+        """
+        if self.continuous_thought_block is not None:
+            self.continuous_thought_block.set_qmamba_amplitude_provider(qmamba_block)
+        else:
+            # Block not built yet - store for deferred wiring in build()
+            self._pending_qmamba_source = qmamba_block
 
     def get_weights_for_fused_op(self) -> list[tf.Tensor]:
         """Return weights in the order expected by fused_latent_reasoning."""

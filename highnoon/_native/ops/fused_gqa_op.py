@@ -109,38 +109,31 @@ def fused_gqa(
         )
 
         def grad(grad_output):
-            """Compute gradients using C++ grad op or fallback."""
-            if _fused_gqa_grad_op is not None:
-                # Placeholder for saved attention weights
-                attn_weights = tf.zeros([1], dtype=tf.float32)
-                grad_x, grad_q, grad_k, grad_v, grad_out = _fused_gqa_grad_op(
-                    grad_output=grad_output,
-                    x=x_in,
-                    q_weight=q_w,
-                    k_weight=k_w,
-                    v_weight=v_w,
-                    out_weight=out_w,
-                    attention_weights=attn_weights,
-                    num_heads=num_heads,
-                    num_kv_heads=num_kv_heads,
-                    head_dim=head_dim,
-                    causal=causal,
+            """Compute gradients using C++ grad op."""
+            if _fused_gqa_grad_op is None:
+                raise RuntimeError(
+                    "FusedGQAGrad C++ op not available. Build with: "
+                    "cd highnoon/_native && ./build_ops.sh fused_gqa"
                 )
-                # Gradient for gamma and beta from LayerNorm
-                grad_gamma = tf.zeros_like(gamma)
-                grad_beta = tf.zeros_like(beta)
-                return grad_x, grad_q, grad_k, grad_v, grad_out, grad_gamma, grad_beta
-            else:
-                # Fallback: return zeros (will use TF auto-diff)
-                return (
-                    tf.zeros_like(x_in),
-                    tf.zeros_like(q_w),
-                    tf.zeros_like(k_w),
-                    tf.zeros_like(v_w),
-                    tf.zeros_like(out_w),
-                    tf.zeros_like(gamma),
-                    tf.zeros_like(beta),
-                )
+            # Placeholder for saved attention weights
+            attn_weights = tf.zeros([1], dtype=tf.float32)
+            grad_x, grad_q, grad_k, grad_v, grad_out = _fused_gqa_grad_op(
+                grad_output=grad_output,
+                x=x_in,
+                q_weight=q_w,
+                k_weight=k_w,
+                v_weight=v_w,
+                out_weight=out_w,
+                attention_weights=attn_weights,
+                num_heads=num_heads,
+                num_kv_heads=num_kv_heads,
+                head_dim=head_dim,
+                causal=causal,
+            )
+            # Gradient for gamma and beta from LayerNorm
+            grad_gamma = tf.zeros_like(gamma)
+            grad_beta = tf.zeros_like(beta)
+            return grad_x, grad_q, grad_k, grad_v, grad_out, grad_gamma, grad_beta
 
         return output, grad
 

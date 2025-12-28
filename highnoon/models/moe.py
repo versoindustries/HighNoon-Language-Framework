@@ -55,6 +55,7 @@ from highnoon.config import (  # Phase 14.2: MoE Innovations; Phase 19.4: Thermo
     ENABLE_EXPERT_PROBING,
     NEUMANN_CAYLEY_TERMS,
     NUM_SHARED_EXPERTS,
+    QMOE_USE_FLOQUET_PHASE,  # S4: Floquet-QMoE phase routing
     SUPERPOSITION_DIM,
     SUPERPOSITION_MICRO_BATCH_SIZE,
     USE_ADAPTIVE_K,
@@ -422,6 +423,14 @@ class MoELayer(layers.Layer):
         use_sigmoid_routing: bool = USE_SIGMOID_ROUTING,
         # Phase 14.2.5: Null Expert Pool (capacity overflow)
         use_null_expert: bool = True,
+        # Phase 86: Hopfield-Boosted Expert Selection
+        use_hopfield_routing: bool = False,
+        hopfield_beta: float = 1.0,
+        hopfield_energy_threshold: float = 0.0,
+        hopfield_routing_weight: float = 0.3,
+        # S4: Floquet Phase → Expert Routing
+        use_floquet_routing: bool = QMOE_USE_FLOQUET_PHASE,
+        floquet_routing_weight: float = 0.25,
         **kwargs,
     ):
         """Initialize MoELayer.
@@ -448,6 +457,10 @@ class MoELayer(layers.Layer):
             ada_k_base: Base number of experts for Ada-K.
             ada_k_min: Minimum experts per token for Ada-K.
             ada_k_max: Maximum experts per token for Ada-K.
+            use_hopfield_routing: Enable Phase 86 Hopfield energy-based routing.
+            hopfield_beta: Inverse temperature for Hopfield energy (higher = sharper).
+            hopfield_energy_threshold: Energy threshold for OOD detection.
+            hopfield_routing_weight: Weight for Hopfield routing bias.
             **kwargs: Additional layer arguments.
 
         Raises:
@@ -499,6 +512,17 @@ class MoELayer(layers.Layer):
 
         # Phase 14.2.5: Null Expert Pool
         self.use_null_expert = use_null_expert
+
+        # Phase 86: Hopfield-Boosted Expert Selection
+        self.use_hopfield_routing = use_hopfield_routing
+        self.hopfield_beta = hopfield_beta
+        self.hopfield_energy_threshold = hopfield_energy_threshold
+        self.hopfield_routing_weight = hopfield_routing_weight
+
+        # S4: Floquet Phase → Expert Routing
+        self.use_floquet_routing = use_floquet_routing
+        self.floquet_routing_weight = floquet_routing_weight
+        self._floquet_phase: tf.Tensor | None = None  # Set externally by TimeCrystalBlock
 
         # Router network
         self.router = layers.Dense(num_experts, use_bias=True, name="router")
@@ -561,6 +585,10 @@ class MoELayer(layers.Layer):
             log.info(f"  - Phase 14.2.4: Adaptive-K ({ada_k_min}-{ada_k_max}) enabled")
         if use_null_expert:
             log.info("  - Phase 14.2.5: Null Expert Pool enabled (overflow → identity)")
+        if use_hopfield_routing:
+            log.info(f"  - Phase 86: Hopfield Routing enabled (β={hopfield_beta})")
+        if use_floquet_routing:
+            log.info(f"  - S4: Floquet Phase Routing enabled (weight={floquet_routing_weight})")
 
     def build(self, input_shape):
         """Build layer weights."""
@@ -605,6 +633,33 @@ class MoELayer(layers.Layer):
         else:
             self.expert_embeddings = None
 
+        # Phase 86: Hopfield expert patterns for energy-based routing
+        if self.use_hopfield_routing:
+            self.expert_patterns = self.add_weight(
+                name="expert_patterns",
+                shape=(self.num_experts, self.d_model),
+                initializer="glorot_uniform",
+                trainable=True,
+            )
+            # EMA for pattern updates
+            self.pattern_ema = self.add_weight(
+                name="pattern_ema",
+                shape=(self.num_experts, self.d_model),
+                initializer="zeros",
+                trainable=False,
+            )
+            # Load C++ ops if available
+            self._hopfield_cpp_available = False
+            try:
+                from highnoon._native.ops.hopfield_memory_op import hopfield_ops_available
+                self._hopfield_cpp_available = hopfield_ops_available()
+            except ImportError:
+                self._hopfield_cpp_available = False
+        else:
+            self.expert_patterns = None
+            self.pattern_ema = None
+            self._hopfield_cpp_available = False
+
         super().build(input_shape)
 
     def _build_expert(self, index):
@@ -633,6 +688,127 @@ class MoELayer(layers.Layer):
             superposition_dim=self.superposition_dim,
             name=f"superposed_{name}",
         )
+
+    def _compute_hopfield_routing_bias(
+        self, token_states: tf.Tensor
+    ) -> tf.Tensor:
+        """Compute Hopfield energy-based routing bias for MoE.
+
+        Phase 86 implementation: Uses Modern Hopfield Network energy to detect
+        out-of-distribution tokens and route them to specialized experts.
+
+        High energy indicates OOD tokens that should be boosted toward an
+        uncertainty expert. Low energy tokens use standard routing.
+
+        CRITICAL: Requires C++ native ops. No Python fallback.
+
+        Args:
+            token_states: Token embeddings [num_tokens, d_model].
+
+        Returns:
+            Routing bias [num_tokens, num_experts].
+
+        Raises:
+            RuntimeError: If C++ ops are not available.
+        """
+        if not self._hopfield_cpp_available:
+            raise RuntimeError(
+                "HopfieldMoeRoutingBias C++ operator is required but not available. "
+                "Run ./build_secure.sh to compile. NO PYTHON FALLBACK IS PROVIDED."
+            )
+
+        from highnoon._native.ops.hopfield_memory_op import hopfield_moe_routing_bias
+        return hopfield_moe_routing_bias(
+            token_states,
+            self.expert_patterns,
+            beta=self.hopfield_beta,
+            uncertainty_expert_idx=-1,  # Last expert
+            energy_threshold=self.hopfield_energy_threshold,
+        )
+
+    def _update_expert_patterns(
+        self,
+        token_states: tf.Tensor,
+        expert_indices: tf.Tensor,
+        training: bool,
+    ) -> None:
+        """Update expert patterns using EMA from routed tokens.
+
+        Called during training to adapt expert patterns to token distributions.
+
+        Args:
+            token_states: Token embeddings [num_tokens, d_model].
+            expert_indices: Expert assignments [num_tokens].
+            training: Whether in training mode.
+        """
+        if not training or self.pattern_ema is None:
+            return
+
+        # EMA decay for pattern updates
+        ema_decay = 0.99
+
+        # Compute mean token per expert
+        for e in range(self.num_experts):
+            mask = tf.equal(expert_indices, e)
+            expert_tokens = tf.boolean_mask(token_states, mask)
+
+            if tf.size(expert_tokens) > 0:
+                mean_token = tf.reduce_mean(expert_tokens, axis=0)
+                # Update EMA
+                old_pattern = self.pattern_ema[e]
+                new_pattern = ema_decay * old_pattern + (1 - ema_decay) * mean_token
+                self.pattern_ema[e].assign(new_pattern)
+
+    def set_floquet_phase(self, phase: tf.Tensor) -> None:
+        """S4: Set Floquet phase from TimeCrystalBlock for phase-specialist routing.
+
+        This enables Floquet-phase-conditioned expert selection, where different
+        experts specialize in different Floquet drive phases. The phase modulates
+        routing to create phase-specialist experts.
+
+        Called by TimeCrystalSequenceBlock during forward pass to communicate
+        the current Floquet phase.
+
+        Args:
+            phase: Floquet phase tensor [batch, 1] or scalar in [0, 2π].
+        """
+        if self.use_floquet_routing:
+            self._floquet_phase = phase
+
+    def _compute_floquet_routing_bias(self) -> tf.Tensor:
+        """S4: Compute Floquet phase-based routing bias.
+
+        Maps Floquet phase to expert preferences using sinusoidal encoding.
+        Each expert gets a preferential phase range, creating phase-specialists:
+        - Expert 0: prefers phase ≈ 0
+        - Expert 1: prefers phase ≈ 2π/num_experts
+        - Expert k: prefers phase ≈ 2πk/num_experts
+
+        This creates a natural periodicity matching the Floquet drive.
+
+        Returns:
+            Routing bias [1, num_experts] that can be broadcast to tokens.
+        """
+        if self._floquet_phase is None:
+            return tf.zeros([1, self.num_experts], dtype=tf.float32)
+
+        # Ensure phase is scalar or broadcastable
+        phase = tf.reduce_mean(self._floquet_phase)  # Collapse to scalar
+
+        # Phase preferences for each expert (evenly distributed around circle)
+        expert_phases = tf.linspace(0.0, 2.0 * 3.14159265, self.num_experts + 1)
+        expert_phases = expert_phases[:-1]  # [num_experts]
+
+        # Compute similarity to each expert's preferred phase
+        # cos(phase - expert_phase) = 1 when aligned, -1 when opposite
+        phase_diff = phase - expert_phases
+        routing_bias = tf.cos(phase_diff)  # [num_experts]
+
+        # Expand to [1, num_experts] for broadcasting
+        routing_bias = tf.reshape(routing_bias, [1, self.num_experts])
+
+        return routing_bias
+
 
     def call(
         self, inputs, training=None
@@ -679,6 +855,16 @@ class MoELayer(layers.Layer):
                 inputs_3d = tf.reshape(inputs, original_shape)
                 freq_bias = self.wavelet_router.compute_frequency_routing_bias(inputs_3d)
                 router_logits = router_logits + self.wavelet_routing_weight * freq_bias
+
+        # Phase 86: Hopfield-Boosted Expert Selection
+        if self.use_hopfield_routing and self.expert_patterns is not None:
+            hopfield_bias = self._compute_hopfield_routing_bias(reshaped_inputs)
+            router_logits = router_logits + self.hopfield_routing_weight * hopfield_bias
+
+        # S4: Floquet Phase → Expert Routing
+        if self.use_floquet_routing and self._floquet_phase is not None:
+            floquet_bias = self._compute_floquet_routing_bias()
+            router_logits = router_logits + self.floquet_routing_weight * floquet_bias
 
         if training:
             log_load = tf.math.log(tf.stop_gradient(self.load_vector) + 1e-6)
@@ -937,6 +1123,11 @@ class MoELayer(layers.Layer):
                 "ada_k_max": self.ada_k_max,
                 # Phase 14.2.5: Null Expert Pool
                 "use_null_expert": self.use_null_expert,
+                # Phase 86: Hopfield Routing
+                "use_hopfield_routing": self.use_hopfield_routing,
+                "hopfield_beta": self.hopfield_beta,
+                "hopfield_energy_threshold": self.hopfield_energy_threshold,
+                "hopfield_routing_weight": self.hopfield_routing_weight,
             }
         )
         return config

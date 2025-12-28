@@ -53,6 +53,7 @@ import numpy as np
 import tensorflow as tf
 
 from highnoon import config
+from highnoon.config import GALORE_VQC_AWARE, GALORE_VQC_VARIANCE_BOOST
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +110,8 @@ class TensorGaLoreCompressor:
             self._projections = {}
         if not hasattr(self, "_step_counter"):
             self._step_counter = 0
+        # Phase 130.2: VQC gradient variance tracking for adaptive rank
+        self._vqc_gradient_variance: dict[str, float] = {}
 
     def _initialize_projection(
         self,
@@ -137,6 +140,16 @@ class TensorGaLoreCompressor:
             d1, d2 = shape
             rank = min(self.rank, d1, d2)
 
+            # Phase 130.2: Boost rank for high-variance VQC layers
+            if GALORE_VQC_AWARE and variable_name in self._vqc_gradient_variance:
+                vqc_var = self._vqc_gradient_variance[variable_name]
+                if vqc_var > 0.1:  # High variance threshold
+                    rank = min(int(rank * GALORE_VQC_VARIANCE_BOOST), d1, d2)
+                    logger.debug(
+                        "[GALORE] Boosted rank for VQC layer %s: variance=%.4f, new_rank=%d",
+                        variable_name, vqc_var, rank
+                    )
+
             # Compute SVD: G = U @ S @ V^T
             s, u, v = tf.linalg.svd(gradient)
 
@@ -153,17 +166,21 @@ class TensorGaLoreCompressor:
                 factor_matrices.append(v[:, :rank])  # V_r: d2 x rank
 
         else:
-            # For higher-order tensors, use HOSVD-style mode-wise SVD
-            for mode in range(ndim):
-                mode_dim = shape[mode]
-                mode_rank = min(self.rank, mode_dim)
-
-                # Unfold tensor along this mode
-                unfolded = self._tensor_unfold(gradient, mode)
-
-                # SVD of unfolded matrix
-                _, u, _ = tf.linalg.svd(unfolded)
-                factor_matrices.append(u[:, :mode_rank])
+            # Higher-order tensors (3D+): Skip projection - will pass through unchanged
+            # HOSVD mode-product has dimension tracking issues that need fixing
+            # TODO: Implement proper HOSVD with correct dimension tracking
+            logger.debug(
+                "[GALORE] Skipping projection init for %dD tensor '%s'",
+                ndim, variable_name
+            )
+            # Return minimal state - compression/decompression will skip this
+            return ProjectionState(
+                variable_name=variable_name,
+                shape=tuple(shape),
+                factor_matrices=[],  # Empty - signals skip
+                last_update_step=self._step_counter,
+                compression_ratio=1.0,  # No compression
+            )
 
         # Compute compression ratio
         original_size = np.prod(shape)
@@ -206,8 +223,7 @@ class TensorGaLoreCompressor:
         permuted = tf.transpose(tensor, perm)
 
         mode_dim = tensor.shape[mode]
-        np.prod([tensor.shape[i].numpy() for i in range(ndim) if i != mode])
-
+        # Use -1 for dynamic reshape to infer the product of other dimensions
         return tf.reshape(permuted, [mode_dim, -1])
 
     def _compute_core_size(self, shape: tuple[int, ...], rank: int) -> int:
@@ -227,22 +243,28 @@ class TensorGaLoreCompressor:
             variable: Associated weight variable.
 
         Returns:
-            Tuple of (compressed gradient, variable name).
+            Tuple of (compressed gradient, variable identifier for decompress).
         """
         if not self.enabled:
-            return gradient, variable.name
+            return gradient, str(id(variable))
 
-        var_name = variable.name
+        # Use id(variable) as unique key to avoid name collisions
+        # Multiple layers can have variables named 'kernel', 'bias', etc.
+        var_id = str(id(variable))
+        var_name = variable.name  # For logging only
         shape = gradient.shape.as_list()
         ndim = len(shape)
 
         # Initialize or update projection if needed
-        if var_name not in self._projections:
-            self._projections[var_name] = self._initialize_projection(var_name, gradient)
-        elif self._projections[var_name].needs_update(self._step_counter, self.update_proj_gap):
-            self._projections[var_name] = self._initialize_projection(var_name, gradient)
+        needs_reinit = (
+            var_id not in self._projections
+            or self._projections[var_id].needs_update(self._step_counter, self.update_proj_gap)
+            or tuple(shape) != self._projections[var_id].shape  # Shape mismatch
+        )
+        if needs_reinit:
+            self._projections[var_id] = self._initialize_projection(var_name, gradient)
 
-        state = self._projections[var_name]
+        state = self._projections[var_id]
 
         if ndim == 2:
             # 2D case: project to low-rank subspace
@@ -255,14 +277,17 @@ class TensorGaLoreCompressor:
                 # v is V_r (d2 x rank), so G @ v -> (d1 x d2) @ (d2 x rank) = (d1 x rank)
                 compressed = tf.matmul(gradient, v)
         else:
-            # Higher-order: mode-wise projection (Tucker core)
-            compressed = gradient
-            for mode in range(ndim):
-                u = state.factor_matrices[mode]
-                # Contract tensor with U^T along mode
-                compressed = self._mode_product(compressed, u, mode, transpose_u=True)
+            # Higher-order tensors (3D+): Skip compression for now
+            # The HOSVD mode-product implementation has shape tracking issues
+            # that require a more substantial fix. 2D covers most parameters.
+            # TODO: Fix HOSVD dimension tracking across mode products
+            logger.debug(
+                "[GALORE] Skipping %dD tensor '%s' - HOSVD not yet supported",
+                ndim, var_name
+            )
+            return gradient, var_id  # Return var_id for consistent decompress lookup
 
-        return compressed, var_name
+        return compressed, var_id  # Return var_id for consistent decompress lookup
 
     def decompress(
         self,
@@ -285,6 +310,10 @@ class TensorGaLoreCompressor:
         shape = state.shape
         ndim = len(shape)
 
+        # Skip decompression if compression was skipped (empty factor_matrices or 3D+)
+        if not state.factor_matrices or ndim != 2:
+            return compressed_update * self.scale
+
         if ndim == 2:
             u, v = state.factor_matrices[0], state.factor_matrices[1]
             if u is not None:
@@ -296,12 +325,10 @@ class TensorGaLoreCompressor:
                 # G_c @ v^T -> (d1 x rank) @ (rank x d2) = (d1 x d2)
                 full_update = tf.matmul(compressed_update, v, transpose_b=True)
         else:
-            # Higher-order: mode-wise reconstruction
-            full_update = compressed_update
-            for mode in range(ndim):
-                u = state.factor_matrices[mode]
-                # Contract with U along mode (no transpose)
-                full_update = self._mode_product(full_update, u, mode, transpose_u=False)
+            # Higher-order tensors (3D+): Skip decompression since compression was skipped
+            # The compressed_update is already the original gradient
+            # TODO: Implement proper HOSVD reconstruction when compression is fixed
+            return compressed_update * self.scale
 
         return full_update * self.scale
 
@@ -385,7 +412,36 @@ class TensorGaLoreCompressor:
         """Reset all compression state."""
         self._projections.clear()
         self._step_counter = 0
+        self._vqc_gradient_variance.clear()
         logger.info("[GALORE] Compressor state reset")
+
+    def register_vqc_gradient(
+        self,
+        variable_name: str,
+        gradient: tf.Tensor,
+    ) -> None:
+        """Register VQC layer gradient for variance tracking (Phase 130.2).
+
+        Tracks the variance of gradients from VQC layers to inform rank allocation.
+        Layers with higher gradient variance get boosted rank budgets.
+
+        Args:
+            variable_name: Name of the VQC-related variable.
+            gradient: Gradient tensor from VQC layer.
+        """
+        if not GALORE_VQC_AWARE:
+            return
+
+        # Compute gradient variance
+        variance = float(tf.math.reduce_variance(gradient).numpy())
+
+        # Exponential moving average with previous variance
+        alpha = 0.1
+        if variable_name in self._vqc_gradient_variance:
+            old_var = self._vqc_gradient_variance[variable_name]
+            variance = alpha * variance + (1 - alpha) * old_var
+
+        self._vqc_gradient_variance[variable_name] = variance
 
 
 class GaLoreOptimizerWrapper:
@@ -518,8 +574,472 @@ class GaLoreOptimizerWrapper:
         return update
 
 
+@dataclass
+class QuantumGaLoreCompressor:
+    """Phase 91: Quantum-enhanced GaLore with dynamic rank selection.
+
+    Extends standard Tensor-GaLore with:
+    - Entropy-based effective rank computation from gradient eigenvalue spectrum
+    - Block-wise rank budget allocation using Taylor expansion influence scores
+    - Quantum random feature projection for stable subspace updates
+
+    Attributes:
+        max_rank: Maximum projection rank per variable.
+        min_rank: Minimum projection rank.
+        update_proj_gap: Steps between projection matrix updates.
+        scale: Scaling factor for gradient after decompression.
+        enabled: Whether compression is active.
+        use_block_allocation: Enable block-wise rank allocation.
+        total_rank_budget: Total rank budget for block allocation.
+
+    Example:
+        >>> compressor = QuantumGaLoreCompressor(max_rank=64, min_rank=8)
+        >>> compressed, var_name = compressor.compress(gradient, variable)
+        >>> update = optimizer.apply(compressed)
+        >>> full_update = compressor.decompress(update, var_name)
+    """
+
+    max_rank: int = field(default_factory=lambda: config.GALORE_RANK)
+    min_rank: int = field(default=4)
+    update_proj_gap: int = field(default_factory=lambda: config.GALORE_UPDATE_PROJ_GAP)
+    scale: float = field(default_factory=lambda: config.GALORE_SCALE)
+    enabled: bool = field(default_factory=lambda: config.USE_TENSOR_GALORE)
+    use_block_allocation: bool = field(default=False)
+    total_rank_budget: int = field(default=256)
+
+    # Internal state
+    _projections: dict[str, dict[str, Any]] = field(default_factory=dict)
+    _step_counter: int = 0
+    _block_ranks: dict[str, int] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """Initialize quantum random features and internal state."""
+        if not hasattr(self, "_projections") or self._projections is None:
+            self._projections = {}
+        if not hasattr(self, "_step_counter"):
+            self._step_counter = 0
+        if not hasattr(self, "_block_ranks"):
+            self._block_ranks = {}
+
+        # Phase 130.2: VQC gradient variance tracking
+        self._vqc_gradient_variance: dict[str, float] = {}
+
+        # Try to import native ops
+        self._native_available = False
+        try:
+            from highnoon._native.ops.quantum_galore_ops import is_native_available
+
+            self._native_available = is_native_available()
+        except ImportError:
+            pass
+
+        logger.info(
+            "[QUANTUM_GALORE] Initialized: max_rank=%d, min_rank=%d, native=%s",
+            self.max_rank,
+            self.min_rank,
+            self._native_available,
+        )
+
+    def _compute_effective_rank(self, gradient: tf.Tensor) -> int:
+        """Compute effective rank from gradient eigenvalue spectrum.
+
+        Uses Shannon entropy: effective_rank = exp(-Σ p_i log(p_i))
+
+        Args:
+            gradient: Gradient tensor to analyze.
+
+        Returns:
+            Effective rank clamped to [min_rank, max_rank].
+        """
+        # Get singular values via SVD (eigenvalues of G^T G)
+        s = tf.linalg.svd(gradient, compute_uv=False)
+
+        if self._native_available:
+            from highnoon._native.ops.quantum_galore_ops import (
+                compute_effective_rank,
+            )
+            rank = compute_effective_rank(s, self.max_rank, self.min_rank)
+            return int(rank.numpy())
+
+        # Vectorized fallback (fast) - only entropy computation
+        s = tf.maximum(s, 0.0)
+        total = tf.reduce_sum(s) + 1e-8
+        p = s / total + 1e-8
+        entropy = -tf.reduce_sum(p * tf.math.log(p))
+        effective_rank = tf.exp(entropy)
+
+        rank = int(tf.round(effective_rank).numpy())
+        base_rank = max(self.min_rank, min(self.max_rank, rank))
+
+        # Phase 130.2: Boost rank for high-variance VQC layers
+        # Note: This will be applied at compress time using variable name
+        return base_rank
+
+    def _init_quantum_features(
+        self,
+        var_name: str,
+        rows: int,
+        cols: int,
+        rank: int,
+    ) -> dict[str, tf.Tensor]:
+        """Initialize quantum random feature parameters for a variable.
+
+        Args:
+            var_name: Variable name for seeding.
+            rows: Number of rows in gradient.
+            cols: Number of columns in gradient.
+            rank: Target projection rank.
+
+        Returns:
+            Dict with rotation_matrix and bias tensors.
+        """
+        # Deterministic seed from variable name
+        seed = hash(var_name) % (2**31)
+        tf.random.set_seed(seed)
+
+        project_rows = rows >= cols
+        dim = rows if project_rows else cols
+
+        scale = 1.0 / np.sqrt(dim)
+
+        rotation_matrix = tf.Variable(
+            tf.random.normal([rank, dim], stddev=scale),
+            trainable=False,
+            name=f"qgalore_rotation/{var_name}",
+        )
+
+        bias = tf.Variable(
+            tf.random.uniform([rank], 0, 2 * np.pi),
+            trainable=False,
+            name=f"qgalore_bias/{var_name}",
+        )
+
+        return {
+            "rotation_matrix": rotation_matrix,
+            "bias": bias,
+            "project_rows": project_rows,
+        }
+
+    def compress(
+        self,
+        gradient: tf.Tensor,
+        variable: tf.Variable,
+    ) -> tuple[tf.Tensor, str]:
+        """Compress gradient using quantum random projection with dynamic rank.
+
+        Args:
+            gradient: Full gradient tensor.
+            variable: Associated weight variable.
+
+        Returns:
+            Tuple of (compressed gradient, variable name).
+        """
+        if not self.enabled:
+            return gradient, variable.name
+
+        var_name = variable.name
+        shape = gradient.shape.as_list()
+
+        if len(shape) != 2:
+            # Only handle 2D for now, pass through others
+            return gradient, var_name
+
+        rows, cols = shape
+
+        # Initialize or update projection if needed
+        needs_update = (
+            var_name not in self._projections
+            or (self._step_counter - self._projections[var_name]["last_update"])
+            >= self.update_proj_gap
+        )
+
+        if needs_update:
+            # Compute dynamic effective rank
+            effective_rank = self._compute_effective_rank(gradient)
+
+            # Use block-allocated rank if available
+            if self.use_block_allocation and var_name in self._block_ranks:
+                effective_rank = self._block_ranks[var_name]
+
+            # Phase 130.2: Boost rank for high-variance VQC layers
+            if GALORE_VQC_AWARE and var_name in self._vqc_gradient_variance:
+                vqc_var = self._vqc_gradient_variance[var_name]
+                if vqc_var > 0.1:  # High variance threshold
+                    effective_rank = min(
+                        int(effective_rank * GALORE_VQC_VARIANCE_BOOST),
+                        rows, cols
+                    )
+                    logger.debug(
+                        "[QUANTUM_GALORE] VQC boost for %s: var=%.4f, rank=%d",
+                        var_name, vqc_var, effective_rank
+                    )
+
+            # Initialize quantum features
+            features = self._init_quantum_features(var_name, rows, cols, effective_rank)
+
+            self._projections[var_name] = {
+                "rank": effective_rank,
+                "shape": (rows, cols),
+                "rotation_matrix": features["rotation_matrix"],
+                "bias": features["bias"],
+                "project_rows": features["project_rows"],
+                "last_update": self._step_counter,
+            }
+
+            # Compute compression ratio
+            original_size = rows * cols
+            compressed_size = effective_rank * (cols if features["project_rows"] else rows)
+            ratio = original_size / max(compressed_size, 1)
+
+            logger.debug(
+                "[QUANTUM_GALORE] %s: rank=%d (eff), shape=%s, compression=%.2fx",
+                var_name,
+                effective_rank,
+                shape,
+                ratio,
+            )
+
+        proj = self._projections[var_name]
+
+        # Apply quantum random projection via C++ or SVD fallback
+        if self._native_available:
+            from highnoon._native.ops.quantum_galore_ops import (
+                quantum_galore_project,
+            )
+            s = tf.linalg.svd(gradient, compute_uv=False)
+            compressed, _ = quantum_galore_project(
+                gradient,
+                s,
+                proj["rotation_matrix"],
+                proj["bias"],
+                max_rank=self.max_rank,
+                min_rank=self.min_rank,
+            )
+            return compressed, var_name
+
+        # Vectorized SVD fallback (fast)
+        rank = proj["rank"]
+        if proj["project_rows"]:
+            _, u, _ = tf.linalg.svd(gradient)
+            compressed = tf.matmul(u[:, :rank], gradient, transpose_a=True)
+        else:
+            _, _, v = tf.linalg.svd(gradient)
+            compressed = tf.matmul(gradient, v[:, :rank])
+
+        return compressed, var_name
+
+    def decompress(
+        self,
+        compressed_update: tf.Tensor,
+        variable_name: str,
+    ) -> tf.Tensor:
+        """Decompress low-rank update to full tensor.
+
+        Args:
+            compressed_update: Update in low-rank space.
+            variable_name: Name of the associated variable.
+
+        Returns:
+            Full-rank update tensor.
+        """
+        if not self.enabled or variable_name not in self._projections:
+            return compressed_update
+
+        proj = self._projections[variable_name]
+        rows, cols = proj["shape"]
+
+        if self._native_available:
+            from highnoon._native.ops.quantum_galore_ops import (
+                quantum_galore_deproject,
+            )
+            full_update = quantum_galore_deproject(
+                compressed_update,
+                proj["rotation_matrix"],
+                proj["bias"],
+                (rows, cols),
+                row_projection=proj["project_rows"],
+            )
+            return full_update * self.scale
+
+        # Vectorized fallback using cosine features
+        rank = proj["rank"]
+        rotation = proj["rotation_matrix"]
+
+        if proj["project_rows"]:
+            full_update = tf.matmul(
+                tf.cos(rotation[:, :rows]),
+                compressed_update,
+                transpose_a=True,
+            ) / np.sqrt(rank)
+        else:
+            full_update = tf.matmul(
+                compressed_update,
+                tf.cos(rotation[:, :cols]),
+            ) / np.sqrt(rank)
+
+        return full_update * self.scale
+
+    def allocate_block_ranks(
+        self,
+        variables: list[tf.Variable],
+        gradients: list[tf.Tensor],
+        critical_indices: list[int] | None = None,
+    ) -> None:
+        """Allocate rank budget across blocks based on influence scores.
+
+        Call this before training loop to enable block-wise allocation.
+
+        Args:
+            variables: List of weight variables.
+            gradients: List of gradients (can be from a sample batch).
+            critical_indices: Indices of critical blocks (first/last layers).
+        """
+        if not self.use_block_allocation:
+            return
+
+        num_blocks = len(variables)
+        if num_blocks == 0:
+            return
+
+        # Compute gradient and weight norms
+        grad_norms = []
+        weight_norms = []
+
+        for var, grad in zip(variables, gradients):
+            if grad is not None:
+                grad_norms.append(tf.norm(grad).numpy())
+                weight_norms.append(tf.norm(var).numpy())
+            else:
+                grad_norms.append(0.0)
+                weight_norms.append(1.0)
+
+        grad_norms = tf.constant(grad_norms, dtype=tf.float32)
+        weight_norms = tf.constant(weight_norms, dtype=tf.float32)
+
+        if self._native_available:
+            from highnoon._native.ops.quantum_galore_ops import (
+                allocate_block_ranks,
+                compute_block_influence,
+            )
+            influence = compute_block_influence(grad_norms, weight_norms)
+            if critical_indices is None:
+                critical_indices = [0, num_blocks - 1]
+            ranks = allocate_block_ranks(
+                influence,
+                self.total_rank_budget,
+                self.min_rank,
+                critical_indices,
+            )
+            for i, var in enumerate(variables):
+                self._block_ranks[var.name] = int(ranks[i].numpy())
+            logger.info(
+                "[QUANTUM_GALORE] Block allocation: %d blocks, budget=%d",
+                num_blocks,
+                self.total_rank_budget,
+            )
+            return
+
+        # Vectorized fallback
+        w_norm = weight_norms + 1e-8
+        influence = (grad_norms**2) / (w_norm**2)
+        total_influence = tf.reduce_sum(influence) + 1e-8
+        influence = influence / total_influence
+
+        for i, var in enumerate(variables):
+            rank = max(
+                self.min_rank,
+                int(influence[i].numpy() * self.total_rank_budget),
+            )
+            self._block_ranks[var.name] = min(rank, self.max_rank)
+
+    def step(self) -> None:
+        """Increment step counter. Call once per training step."""
+        self._step_counter += 1
+
+    def get_statistics(self) -> dict[str, Any]:
+        """Get compression statistics for all tracked variables."""
+        stats = {
+            "enabled": self.enabled,
+            "max_rank": self.max_rank,
+            "min_rank": self.min_rank,
+            "step_counter": self._step_counter,
+            "num_variables": len(self._projections),
+            "native_available": self._native_available,
+            "variables": {},
+        }
+
+        total_original = 0
+        total_compressed = 0
+
+        for name, proj in self._projections.items():
+            rows, cols = proj["shape"]
+            rank = proj["rank"]
+            original_size = rows * cols
+
+            if proj["project_rows"]:
+                compressed_size = rank * cols
+            else:
+                compressed_size = rows * rank
+
+            total_original += original_size
+            total_compressed += compressed_size
+
+            stats["variables"][name] = {
+                "shape": proj["shape"],
+                "rank": rank,
+                "compression_ratio": original_size / max(compressed_size, 1),
+            }
+
+        if total_original > 0:
+            stats["overall_compression_ratio"] = total_original / max(
+                total_compressed, 1
+            )
+        else:
+            stats["overall_compression_ratio"] = 1.0
+
+        return stats
+
+    def reset(self) -> None:
+        """Reset all compression state."""
+        self._projections.clear()
+        self._block_ranks.clear()
+        self._step_counter = 0
+        self._vqc_gradient_variance.clear()
+        logger.info("[QUANTUM_GALORE] Compressor state reset")
+
+    def register_vqc_gradient(
+        self,
+        variable_name: str,
+        gradient: tf.Tensor,
+    ) -> None:
+        """Register VQC layer gradient for variance tracking (Phase 130.2).
+
+        Tracks the variance of gradients from VQC layers to inform rank allocation.
+        Layers with higher gradient variance get boosted rank budgets.
+
+        Args:
+            variable_name: Name of the VQC-related variable.
+            gradient: Gradient tensor from VQC layer.
+        """
+        if not GALORE_VQC_AWARE:
+            return
+
+        # Compute gradient variance
+        variance = float(tf.math.reduce_variance(gradient).numpy())
+
+        # Exponential moving average with previous variance
+        alpha = 0.1
+        if variable_name in self._vqc_gradient_variance:
+            old_var = self._vqc_gradient_variance[variable_name]
+            variance = alpha * variance + (1 - alpha) * old_var
+
+        self._vqc_gradient_variance[variable_name] = variance
+
+
 __all__ = [
     "TensorGaLoreCompressor",
     "GaLoreOptimizerWrapper",
     "ProjectionState",
+    "QuantumGaLoreCompressor",
 ]
+

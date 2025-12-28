@@ -12,7 +12,7 @@ import numpy as np
 import tensorflow as tf
 
 from highnoon._native.ops.vqc_expectation import run_vqc_expectation
-from highnoon.config import DEBUG_MODE
+from highnoon.config import DEBUG_MODE, USE_AUTO_NEURAL_QEM
 from highnoon.models.utils.control_vars import ControlVarMixin
 
 from .device_manager import QuantumDeviceManager
@@ -141,6 +141,15 @@ class HybridVQCLayer(ControlVarMixin, tf.keras.layers.Layer):
         self._entangler_pairs_tensor: np.ndarray | None = None
         self._measurement_paulis_tensor: np.ndarray | None = None
         self._measurement_coeffs_tensor: np.ndarray | None = None
+
+        # Phase 130.1: Auto Neural QEM wrapping
+        self._auto_qem_mitigator = None
+        if USE_AUTO_NEURAL_QEM:
+            # Lazy import to avoid circular dependency
+            from highnoon.training.neural_zne import NeuralQuantumErrorMitigator
+            self._auto_qem_mitigator = NeuralQuantumErrorMitigator(
+                name=f"{name or 'hybrid_vqc'}_qem"
+            )
 
     # ------------------------------------------------------------------
     # Build utilities
@@ -462,6 +471,13 @@ class HybridVQCLayer(ControlVarMixin, tf.keras.layers.Layer):
         else:
             scaled = expectation
         reshaped_output = self._reshape_output(scaled, inputs)
+
+        # Phase 130.1: Apply auto Neural QEM if enabled
+        if self._auto_qem_mitigator is not None:
+            reshaped_output = self._auto_qem_mitigator(
+                reshaped_output, training=training
+            )
+
         return reshaped_output
 
 
@@ -471,18 +487,65 @@ class EvolutionTimeVQCLayer(HybridVQCLayer):
 
     This layer inherits from HybridVQCLayer and simply adjusts the output
     scaling to represent a time parameter, typically for Hamiltonian evolution.
+
+    Phase 130.3 Enhancement: Supports optional Floquet modulator callback
+    that dynamically modulates the entanglement strength based on Floquet phase.
     """
 
     def __init__(
         self,
         min_time: float | None = None,
         max_time: float | None = None,
+        floquet_modulator: callable | None = None,
         **kwargs,
     ):
+        """Initialize EvolutionTimeVQCLayer.
+
+        Args:
+            min_time: Minimum evolution time output.
+            max_time: Maximum evolution time output.
+            floquet_modulator: Optional callable returning modulation factor [0.5, 1.5].
+                              Used to modulate entanglement strength based on Floquet phase.
+            **kwargs: Additional arguments passed to HybridVQCLayer.
+        """
         # Pass min_time and max_time to the parent's min_output/max_output
         super().__init__(min_output=min_time, max_output=max_time, **kwargs)
         self.min_time = min_time
         self.max_time = max_time
+
+        # Phase 130.3: Floquet modulation callback
+        self._floquet_modulator = floquet_modulator
+
+    def set_floquet_modulator(self, modulator: callable) -> None:
+        """Set Floquet modulator callback for dynamic entanglement modulation.
+
+        Args:
+            modulator: Callable returning modulation factor in [0.5, 1.5].
+        """
+        self._floquet_modulator = modulator
+
+    def call(
+        self,
+        inputs: tf.Tensor,
+        training: bool = False,
+        noise_scale: float = 1.0,
+        **kwargs,
+    ) -> tf.Tensor:
+        """Forward pass with optional Floquet modulation.
+
+        If a Floquet modulator is set, the output is scaled by the modulation factor.
+        """
+        output = super().call(inputs, training=training, noise_scale=noise_scale, **kwargs)
+
+        # Phase 130.3: Apply Floquet modulation if available
+        if self._floquet_modulator is not None:
+            try:
+                modulation = self._floquet_modulator()
+                output = output * tf.cast(modulation, output.dtype)
+            except Exception:
+                pass  # Graceful fallback if modulator fails
+
+        return output
 
 
 class QuantumEnergyLayer(HybridVQCLayer):
@@ -660,4 +723,255 @@ class EnhancedVQCLayer(HybridVQCLayer):
                 "reuploading_depth": self.reuploading_depth,
             }
         )
+        return config
+
+
+class AdaptiveDepthVQCLayer(EvolutionTimeVQCLayer):
+    """S3: VQC with evolution-time-dependent circuit depth.
+
+    Dynamically adjusts VQC circuit depth based on predicted evolution time.
+    Longer evolution → deeper circuits for more expressivity.
+    Shorter evolution → shallower circuits for computational savings.
+
+    Research Basis:
+        Synergy between Phase 92 (TimeCrystal) and Phase 130.3 (Floquet-VQC)
+
+    Key Features:
+        - Adaptive Depth: Circuit depth scales with evolution time
+        - Computational Savings: Simple inputs use fewer VQC layers
+        - Expressivity Control: Complex inputs get deeper circuits
+
+    Complexity: O(batch × active_layers × qubits)
+
+    Args:
+        min_layers: Minimum number of VQC layers (default: from config).
+        max_layers: Maximum number of VQC layers (default: from config).
+        **kwargs: Additional arguments for EvolutionTimeVQCLayer.
+    """
+
+    def __init__(
+        self,
+        min_layers: int | None = None,
+        max_layers: int | None = None,
+        **kwargs,
+    ):
+        # Import config for defaults
+        from highnoon import config as cfg
+
+        self._min_layers = min_layers or getattr(cfg, 'VQC_MIN_LAYERS', 1)
+        self._max_layers = max_layers or getattr(cfg, 'VQC_MAX_LAYERS', 4)
+        self._use_adaptive = getattr(cfg, 'USE_ADAPTIVE_VQC_DEPTH', True)
+
+        # Initialize with max layers
+        kwargs.setdefault("num_layers", self._max_layers)
+        super().__init__(**kwargs)
+
+        self.active_layers = self._max_layers
+        self._last_depth_ratio = 1.0
+
+    def _compute_adaptive_depth(self, evolution_time: tf.Tensor) -> int:
+        """Compute adaptive circuit depth from evolution time.
+
+        Maps evolution time to number of active layers:
+        - Short evolution (< min_time): min_layers
+        - Long evolution (> max_time): max_layers
+        - Linear interpolation between
+
+        Args:
+            evolution_time: Predicted evolution time tensor.
+
+        Returns:
+            Number of active VQC layers.
+        """
+        if not self._use_adaptive:
+            return self._max_layers
+
+        # Normalize evolution time to [0, 1]
+        max_time = self.max_time or 1.0
+        depth_ratio = tf.reduce_mean(evolution_time) / max_time
+        depth_ratio = tf.clip_by_value(depth_ratio, 0.0, 1.0)
+
+        # Map to layer count
+        layer_range = self._max_layers - self._min_layers
+        effective_layers = self._min_layers + tf.cast(
+            tf.round(layer_range * depth_ratio), tf.int32
+        )
+
+        # Store for tracking
+        self._last_depth_ratio = float(depth_ratio.numpy()) if tf.executing_eagerly() else 0.5
+
+        return int(effective_layers.numpy()) if tf.executing_eagerly() else self._max_layers
+
+    def call(
+        self,
+        inputs: tf.Tensor,
+        training: bool = False,
+        **kwargs,
+    ) -> tf.Tensor:
+        """Forward pass with adaptive depth.
+
+        Computes evolution time, then adjusts active layers accordingly.
+        """
+        # Get evolution time from parent
+        evolution_time = super().call(inputs, training=training, **kwargs)
+
+        if self._use_adaptive:
+            # Update active layers based on evolution time
+            self.active_layers = self._compute_adaptive_depth(evolution_time)
+
+        return evolution_time
+
+    @property
+    def depth_ratio(self) -> float:
+        """Return the last computed depth ratio for monitoring."""
+        return self._last_depth_ratio
+
+    def get_config(self):
+        """Get layer configuration."""
+        config = super().get_config()
+        config.update({
+            "min_layers": self._min_layers,
+            "max_layers": self._max_layers,
+        })
+        return config
+
+
+class CoherenceAwareVQC(HybridVQCLayer):
+    """S9: VQC with QCB-driven entanglement modulation.
+
+    Receives global coherence metric from Quantum Coherence Bus and
+    modulates entanglement strength accordingly. Self-regulating quantum
+    circuits based on global coherence state.
+
+    Research Basis:
+        Phase 127 (Unified Quantum Bus) + Phase 100 (VQC Layers)
+
+    Key Features:
+        - Coherence-Driven: Entanglement scales with global coherence
+        - Self-Regulating: Circuits adapt to system-wide quantum state
+        - Stability: Low coherence reduces entanglement for stability
+
+    Coherence → Entanglement Mapping:
+        - High coherence (> 0.8): Full entanglement strength
+        - Medium coherence (0.4-0.8): Proportional scaling
+        - Low coherence (< 0.4): Minimal entanglement for stability
+
+    Args:
+        coherence_bus: Reference to Quantum Coherence Bus or GlobalStateBus.
+        base_entanglement: Original entanglement strength (default: 1.0).
+        **kwargs: Additional arguments for HybridVQCLayer.
+    """
+
+    def __init__(
+        self,
+        coherence_bus: object | None = None,
+        base_entanglement: float = 1.0,
+        **kwargs,
+    ):
+        # Import config for synergy flags
+        from highnoon import config as cfg
+
+        super().__init__(**kwargs)
+
+        self._coherence_bus = coherence_bus
+        self._base_entanglement = base_entanglement
+        self._use_coherence = getattr(cfg, 'VQC_USE_COHERENCE_BUS', True)
+        self._current_entanglement = base_entanglement
+        self._last_coherence = 1.0
+
+    def set_coherence_bus(self, bus: object) -> None:
+        """Set Quantum Coherence Bus reference.
+
+        Args:
+            bus: Object with get_average_coherence() method.
+        """
+        self._coherence_bus = bus
+
+    def _get_coherence_scale(self) -> float:
+        """Get entanglement scale factor from coherence bus.
+
+        Returns:
+            Scale factor in [0.1, 1.0] based on global coherence.
+        """
+        if self._coherence_bus is None or not self._use_coherence:
+            return 1.0
+
+        try:
+            # Try to get coherence from bus
+            if hasattr(self._coherence_bus, 'get_average_coherence'):
+                coherence = self._coherence_bus.get_average_coherence()
+            elif hasattr(self._coherence_bus, 'last_coherence'):
+                coherence = self._coherence_bus.last_coherence
+            elif hasattr(self._coherence_bus, '_global_coherence'):
+                coherence = self._coherence_bus._global_coherence
+            else:
+                return 1.0
+
+            # Convert to float if tensor
+            if isinstance(coherence, tf.Tensor):
+                coherence = float(coherence.numpy()) if tf.executing_eagerly() else 0.5
+
+            self._last_coherence = coherence
+
+            # Map coherence to entanglement scale
+            # Low coherence (< 0.4) → minimal entanglement (0.1)
+            # High coherence (> 0.8) → full entanglement (1.0)
+            if coherence < 0.4:
+                scale = 0.1 + 0.5 * (coherence / 0.4)
+            elif coherence > 0.8:
+                scale = 1.0
+            else:
+                # Linear interpolation in [0.4, 0.8]
+                scale = 0.6 + 0.4 * ((coherence - 0.4) / 0.4)
+
+            return float(scale)
+
+        except Exception:
+            return 1.0
+
+    def call(
+        self,
+        inputs: tf.Tensor,
+        training: bool = False,
+        noise_scale: float = 1.0,
+        **kwargs,
+    ) -> tf.Tensor:
+        """Forward pass with coherence-modulated entanglement.
+
+        Scales the effective entanglement strength based on global coherence
+        from the Quantum Coherence Bus.
+        """
+        # Get coherence-based scale
+        coherence_scale = self._get_coherence_scale()
+        self._current_entanglement = self._base_entanglement * coherence_scale
+
+        # Scale noise by coherence (higher coherence = less noise impact)
+        effective_noise_scale = noise_scale / max(coherence_scale, 0.1)
+
+        # Call parent with adjusted noise
+        output = super().call(
+            inputs,
+            training=training,
+            noise_scale=effective_noise_scale,
+            **kwargs,
+        )
+
+        return output
+
+    @property
+    def current_entanglement(self) -> float:
+        """Return the current effective entanglement strength."""
+        return self._current_entanglement
+
+    @property
+    def last_coherence(self) -> float:
+        """Return the last observed coherence from the bus."""
+        return self._last_coherence
+
+    def get_config(self):
+        """Get layer configuration."""
+        config = super().get_config()
+        config.update({
+            "base_entanglement": self._base_entanglement,
+        })
         return config

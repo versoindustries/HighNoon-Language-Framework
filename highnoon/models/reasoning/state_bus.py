@@ -60,6 +60,12 @@ from highnoon.config import (
     STATE_BUS_SUPERPOSITION,
     STATE_BUS_TYPED,
     USE_FUSED_STATE_BUS,
+    # Phase 127: Unified Quantum Bus config
+    UNIFIED_BUS_ADAPTIVE,
+    UNIFIED_BUS_COHERENCE_THRESHOLD,
+    UNIFIED_BUS_ENTANGLEMENT_INIT,
+    UNIFIED_BUS_MPS_BOND_DIM,
+    UNIFIED_BUS_PROPAGATION_RATE,
 )
 
 logger = logging.getLogger(__name__)
@@ -825,4 +831,420 @@ class GlobalStateBus(tf.keras.layers.Layer):
         return config
 
 
-__all__ = ["GlobalStateBus", "gumbel_softmax"]
+class CoherenceTracker(tf.keras.layers.Layer):
+    """Phase 127: Tracks quantum coherence across block states.
+
+    Computes pairwise coherence measures between blocks to determine
+    entanglement strength for cross-block communication.
+
+    Attributes:
+        bus_dim: Dimension of bus communication.
+        coherence_threshold: Minimum coherence for propagation.
+    """
+
+    def __init__(
+        self,
+        bus_dim: int,
+        coherence_threshold: float = 0.85,
+        name: str = "coherence_tracker",
+        **kwargs: Any,
+    ) -> None:
+        """Initialize CoherenceTracker.
+
+        Args:
+            bus_dim: Dimension of state vectors.
+            coherence_threshold: Minimum coherence threshold.
+            name: Layer name.
+            **kwargs: Additional layer arguments.
+        """
+        super().__init__(name=name, **kwargs)
+        self.bus_dim = bus_dim
+        self.coherence_threshold = coherence_threshold
+
+        # Learnable coherence projection
+        self.coherence_proj = tf.keras.layers.Dense(
+            bus_dim,
+            name=f"{name}_coherence_proj",
+        )
+
+    def call(self, block_states: tf.Tensor) -> tf.Tensor:
+        """Compute coherence between block states.
+
+        Args:
+            block_states: Block states [batch, num_blocks, dim].
+
+        Returns:
+            Coherence matrix [num_blocks, num_blocks] averaged over batch.
+        """
+        # Project for coherence computation
+        projected = self.coherence_proj(block_states)  # [B, num_blocks, bus_dim]
+
+        # Normalize
+        norms = tf.norm(projected, axis=-1, keepdims=True) + 1e-8
+        normalized = projected / norms  # [B, num_blocks, bus_dim]
+
+        # Compute pairwise coherence via inner product
+        # [B, num_blocks, bus_dim] @ [B, bus_dim, num_blocks] -> [B, num_blocks, num_blocks]
+        coherence = tf.matmul(normalized, normalized, transpose_b=True)
+
+        # Average over batch and apply absolute value
+        coherence = tf.reduce_mean(tf.abs(coherence), axis=0)  # [num_blocks, num_blocks]
+
+        return coherence
+
+    def get_config(self) -> dict[str, Any]:
+        """Get layer configuration for serialization."""
+        config = super().get_config()
+        config.update(
+            {
+                "bus_dim": self.bus_dim,
+                "coherence_threshold": self.coherence_threshold,
+            }
+        )
+        return config
+
+
+class UnifiedQuantumBus(tf.keras.layers.Layer):
+    """Phase 127: Unified Quantum Entanglement Bus.
+
+    Combines existing quantum buses (GlobalStateBus, Quantum Coherence Bus,
+    Quantum Teleport Bus) into a single coherent entanglement-mediated
+    cross-block communication system with adaptive entanglement strength.
+
+    Key features:
+    - Integrates GlobalStateBus for slot-based communication
+    - Uses CoherenceTracker for pairwise coherence measurement
+    - MPS-based entanglement representation for efficient memory
+    - Learnable entanglement weights between block pairs
+
+    Complexity: O(n · d) for entanglement propagation
+    Memory: O(χ² · d) with MPS bond dimension χ
+
+    Attributes:
+        bus_dim: Dimension of bus communication.
+        num_blocks: Number of reasoning blocks.
+        mps_bond_dim: MPS bond dimension for entanglement.
+    """
+
+    def __init__(
+        self,
+        bus_dim: int,
+        num_blocks: int,
+        mps_bond_dim: int = UNIFIED_BUS_MPS_BOND_DIM,
+        use_adaptive: bool = UNIFIED_BUS_ADAPTIVE,
+        coherence_threshold: float = UNIFIED_BUS_COHERENCE_THRESHOLD,
+        entanglement_init: float = UNIFIED_BUS_ENTANGLEMENT_INIT,
+        propagation_rate: float = UNIFIED_BUS_PROPAGATION_RATE,
+        name: str = "unified_quantum_bus",
+        **kwargs: Any,
+    ) -> None:
+        """Initialize UnifiedQuantumBus.
+
+        Args:
+            bus_dim: Dimension of bus communication.
+            num_blocks: Number of reasoning blocks.
+            mps_bond_dim: MPS bond dimension for entanglement.
+            use_adaptive: Enable adaptive entanglement strength.
+            coherence_threshold: Minimum coherence for propagation.
+            entanglement_init: Initial entanglement strength.
+            propagation_rate: Rate for entanglement updates.
+            name: Layer name.
+            **kwargs: Additional layer arguments.
+        """
+        super().__init__(name=name, **kwargs)
+        self.bus_dim = bus_dim
+        self.num_blocks = num_blocks
+        self.mps_bond_dim = mps_bond_dim
+        self.use_adaptive = use_adaptive
+        self.coherence_threshold = coherence_threshold
+        self.entanglement_init = entanglement_init
+        self.propagation_rate = propagation_rate
+
+        # Integrate existing GlobalStateBus
+        # Note: Disable superposition on internal state bus since UnifiedQuantumBus
+        # handles entanglement at a higher level
+        self.state_bus = GlobalStateBus(
+            bus_dim=bus_dim,
+            num_slots=num_blocks,
+            use_adaptive=use_adaptive,
+            use_superposition=False,  # Entanglement handled by UnifiedQuantumBus
+            name=f"{name}_state_bus",
+        )
+
+        # Coherence tracking
+        self.coherence_tracker = CoherenceTracker(
+            bus_dim=bus_dim,
+            coherence_threshold=coherence_threshold,
+            name=f"{name}_coherence",
+        )
+
+        # Entanglement strength projection
+        self.entanglement_proj = tf.keras.layers.Dense(
+            num_blocks,
+            activation="sigmoid",
+            name=f"{name}_entanglement_proj",
+        )
+
+        # Output projection
+        self.output_proj = tf.keras.layers.Dense(
+            bus_dim,
+            name=f"{name}_output_proj",
+        )
+
+        # Learnable entanglement strength matrix [num_blocks, num_blocks]
+        self._entanglement_strength: tf.Variable | None = None
+        self._initialized = False
+
+        logger.info(
+            f"UnifiedQuantumBus: Initialized with {num_blocks} blocks, "
+            f"bond_dim={mps_bond_dim}, adaptive={use_adaptive}"
+        )
+
+    def build(self, input_shape: tf.TensorShape) -> None:
+        """Build layer weights.
+
+        Args:
+            input_shape: Shape of input tensor.
+        """
+        # Initialize entanglement strength matrix
+        self._entanglement_strength = self.add_weight(
+            name=f"{self.name}_entanglement_strength",
+            shape=[self.num_blocks, self.num_blocks],
+            initializer=tf.keras.initializers.Constant(self.entanglement_init),
+            trainable=self.use_adaptive,
+        )
+        super().build(input_shape)
+
+    def initialize(self, batch_size: int) -> None:
+        """Initialize bus state for a batch.
+
+        Args:
+            batch_size: Batch size for initialization.
+        """
+        self.state_bus.initialize_slots(batch_size)
+        self._initialized = True
+
+    def propagate_entanglement(
+        self,
+        block_states: tf.Tensor,
+        training: bool = False,
+    ) -> tuple[tf.Tensor, tf.Tensor]:
+        """Propagate quantum correlations across blocks via MPS.
+
+        This is the core operation of the unified bus. It:
+        1. Computes pairwise coherence between blocks
+        2. Weights cross-block communication by entanglement strength
+        3. Returns entangled states and coherence measurements
+
+        Args:
+            block_states: States from all blocks [batch, num_blocks, dim].
+            training: Whether in training mode.
+
+        Returns:
+            Tuple of:
+            - entangled_states: Entanglement-weighted states [batch, num_blocks, dim]
+            - coherence: Pairwise coherence matrix [num_blocks, num_blocks]
+        """
+        batch_size = tf.shape(block_states)[0]
+
+        if not self._initialized:
+            self.initialize(batch_size)
+
+        if not self.built:
+            self.build(block_states.shape)
+
+        # Compute pairwise coherence
+        coherence = self.coherence_tracker(block_states)  # [num_blocks, num_blocks]
+
+        # Get effective entanglement strength (gated by coherence)
+        effective_entanglement = self._entanglement_strength * coherence
+
+        # Apply coherence threshold
+        mask = tf.cast(coherence > self.coherence_threshold, tf.float32)
+        effective_entanglement = effective_entanglement * mask
+
+        # Normalize rows for proper weighting
+        row_sums = tf.reduce_sum(effective_entanglement, axis=1, keepdims=True) + 1e-8
+        normalized_entanglement = effective_entanglement / row_sums
+
+        # Weight cross-block communication by entanglement strength
+        # [num_blocks, num_blocks] @ [batch, num_blocks, dim] -> [batch, num_blocks, dim]
+        # Use einsum for batched operation
+        entangled_states = tf.einsum(
+            "ij,bjd->bid",
+            normalized_entanglement,
+            block_states,
+        )
+
+        # Update entanglement strength based on coherence if adaptive
+        if self.use_adaptive and training:
+            # Compute coherence-based update
+            coherence_update = (coherence - self.coherence_threshold) * self.propagation_rate
+            new_strength = self._entanglement_strength + coherence_update
+            # Clip to [0, 1] range
+            new_strength = tf.clip_by_value(new_strength, 0.0, 1.0)
+            self._entanglement_strength.assign(new_strength)
+
+        return entangled_states, coherence
+
+    def read(
+        self,
+        query: tf.Tensor,
+        batch_size: int | None = None,
+        training: bool = False,
+    ) -> tf.Tensor:
+        """Read from unified bus using query-based attention.
+
+        Args:
+            query: Query tensor [batch, dim].
+            batch_size: Batch size (required if not initialized).
+            training: Whether in training mode.
+
+        Returns:
+            Read context [batch, bus_dim].
+        """
+        return self.state_bus.read(query, batch_size=batch_size, training=training)
+
+    def write(self, value: tf.Tensor, training: bool = False) -> None:
+        """Write to unified bus.
+
+        Args:
+            value: Value to write [batch, dim].
+            training: Whether in training mode.
+        """
+        self.state_bus.write(value, training=training)
+
+    def call(
+        self,
+        block_states: tf.Tensor,
+        query: tf.Tensor | None = None,
+        training: bool = False,
+    ) -> tuple[tf.Tensor, tf.Tensor]:
+        """Forward pass through unified quantum bus.
+
+        Args:
+            block_states: States from all blocks [batch, num_blocks, dim].
+            query: Optional query for bus read [batch, dim].
+            training: Whether in training mode.
+
+        Returns:
+            Tuple of:
+            - entangled_states: Entanglement-propagated states [batch, num_blocks, dim]
+            - coherence: Coherence matrix [num_blocks, num_blocks]
+        """
+        # Propagate entanglement
+        entangled_states, coherence = self.propagate_entanglement(
+            block_states, training=training
+        )
+
+        # Apply output projection first
+        entangled_states = self.output_proj(entangled_states)
+
+        # Optionally read/write via state bus
+        if query is not None:
+            # Ensure state bus is built
+            if not self.state_bus.built:
+                self.state_bus.build(query.shape)
+            bus_context = self.read(query, training=training)
+            # Combine with entangled states (broadcast across blocks)
+            # bus_context: [batch, bus_dim] -> [batch, 1, bus_dim]
+            entangled_states = entangled_states + bus_context[:, None, :]
+
+        return entangled_states, coherence
+
+    def get_entanglement_strength(self) -> tf.Tensor:
+        """Get current entanglement strength matrix.
+
+        Returns:
+            Entanglement strength matrix [num_blocks, num_blocks].
+        """
+        return self._entanglement_strength
+
+    def receive_block_coherence(
+        self,
+        block_index: int,
+        coherence: float,
+    ) -> None:
+        """Receive coherence report from a quantum block (Phase 130.3).
+
+        Integrates coherence from QMamba/Q-SSM blocks to modulate
+        entanglement propagation strength.
+
+        Args:
+            block_index: Index of the reporting block.
+            coherence: Coherence value in [0, 1] from block's last_coherence.
+        """
+        if self._entanglement_strength is not None and block_index < self.num_blocks:
+            # Modulate row/column for this block based on coherence
+            # High coherence -> stronger entanglement with other blocks
+            current = self._entanglement_strength.numpy()
+            scale = 0.5 + 0.5 * coherence  # Map [0,1] -> [0.5, 1.0]
+
+            # Update using propagation rate for smooth adaptation
+            current[block_index, :] = (
+                (1 - self.propagation_rate) * current[block_index, :] +
+                self.propagation_rate * scale * current[block_index, :]
+            )
+            current[:, block_index] = (
+                (1 - self.propagation_rate) * current[:, block_index] +
+                self.propagation_rate * scale * current[:, block_index]
+            )
+            self._entanglement_strength.assign(current)
+
+    def receive_hopfield_energy(
+        self,
+        energy: tf.Tensor,
+        block_indices: list[int] | None = None,
+    ) -> None:
+        """Receive Hopfield energy scores for downstream conditioning (Phase 130.5).
+
+        Energy scores modulate the coherence threshold for entanglement propagation.
+        High energy (strong retrieval) -> lower threshold -> more propagation.
+        Low energy (weak retrieval) -> higher threshold -> less propagation.
+
+        Args:
+            energy: Hopfield energy score(s) [batch] or scalar.
+            block_indices: Optional indices of blocks to affect (None = all).
+        """
+        # Normalize energy to [0, 1] via sigmoid
+        normalized_energy = tf.nn.sigmoid(energy)
+        mean_energy = tf.reduce_mean(normalized_energy).numpy()
+
+        # Adjust coherence threshold based on energy
+        # High energy -> lower threshold for easier propagation
+        energy_adjustment = 0.1 * (mean_energy - 0.5)  # [-0.05, 0.05]
+        adjusted_threshold = max(0.5, min(0.95,
+            self.coherence_threshold - energy_adjustment
+        ))
+
+        # Store for use in next propagate_entanglement call
+        self._energy_adjusted_threshold = adjusted_threshold
+
+    def reset(self) -> None:
+        """Reset bus state."""
+        self.state_bus.reset_slots()
+        if self._entanglement_strength is not None:
+            self._entanglement_strength.assign(
+                tf.ones([self.num_blocks, self.num_blocks]) * self.entanglement_init
+            )
+        self._initialized = False
+        self._energy_adjusted_threshold = None
+
+    def get_config(self) -> dict[str, Any]:
+        """Get layer configuration for serialization."""
+        config = super().get_config()
+        config.update(
+            {
+                "bus_dim": self.bus_dim,
+                "num_blocks": self.num_blocks,
+                "mps_bond_dim": self.mps_bond_dim,
+                "use_adaptive": self.use_adaptive,
+                "coherence_threshold": self.coherence_threshold,
+                "entanglement_init": self.entanglement_init,
+                "propagation_rate": self.propagation_rate,
+            }
+        )
+        return config
+
+
+__all__ = ["GlobalStateBus", "gumbel_softmax", "CoherenceTracker", "UnifiedQuantumBus"]

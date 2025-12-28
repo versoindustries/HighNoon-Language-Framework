@@ -71,9 +71,9 @@ def _load_selective_scan_op():
             logger.info("Loaded SelectiveScan from individual .so file")
             return
     except (tf.errors.NotFoundError, OSError) as e:
-        logger.warning(
-            f"Could not load C++ _selective_scan_op. "
-            f"Falling back to pure Python implementation. Error: {e}"
+        logger.error(
+            f"Could not load C++ _selective_scan_op: {e}. "
+            "NO PYTHON FALLBACK IS PROVIDED - native op is required."
         )
         selective_scan_op = None
         selective_scan_grad_op = None
@@ -147,19 +147,10 @@ def selective_scan(
     ) -> tuple[tuple[tf.Tensor, ...], list[tf.Tensor | None]]:
         """Gradient function for selective scan."""
         if selective_scan_grad_op is None:
-            # Simplified fallback gradient
-            grad_u = dy * d
-            grad_d = tf.reduce_sum(dy * u, axis=[0, 1], keepdims=True)
-            input_grads = (
-                grad_u,
-                tf.zeros_like(delta),
-                tf.zeros_like(a_log),
-                tf.zeros_like(b),
-                tf.zeros_like(c),
-                grad_d,
+            raise NotImplementedError(
+                "The C++ SelectiveScanGrad operator could not be loaded. "
+                "NO PYTHON FALLBACK IS PROVIDED - native op is required."
             )
-            variable_grads_list = [None] * len(variables) if variables is not None else []
-            return input_grads, variable_grads_list
 
         # If hidden_states output was not used, provide zeros
         if d_hidden_states is None:

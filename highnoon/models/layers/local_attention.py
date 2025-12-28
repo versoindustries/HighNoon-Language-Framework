@@ -46,8 +46,20 @@ from highnoon.config import (
     LOCAL_ATTENTION_WINDOW,
     LOCAL_ATTENTION_WINDOW_MAX,
     LOCAL_ATTENTION_WINDOW_MIN,
+    # Phase 119: QASA config
+    USE_QASA_ATTENTION,
+    QASA_VQC_LAYERS,
+    QASA_ENTANGLEMENT_STRENGTH,
+    # Phase 130: Quantum integration config
+    USE_AUTO_NEURAL_QEM,
+    QASA_MPS_GATING,
+    QASA_MPS_ENTROPY_THRESHOLD,
 )
 from highnoon.models.reasoning.fused_contract import FusedReasoningBlockMixin
+
+# Phase 119: QASA ops (lazy import for availability check)
+_qasa_ops = None
+_qasa_available = None
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +126,11 @@ class LocalAttentionBlock(FusedReasoningBlockMixin, layers.Layer):
         quantum_rank: int = LOCAL_ATTENTION_QUANTUM_RANK,
         # Enhancement 6: Mask Caching
         cache_masks: bool = LOCAL_ATTENTION_CACHE_MASK,
+        # Phase 119: QASA Quantum Adaptive Self-Attention
+        use_qasa_attention: bool = USE_QASA_ATTENTION,
+        qasa_vqc_layers: int = QASA_VQC_LAYERS,
+        qasa_entanglement_strength: float = QASA_ENTANGLEMENT_STRENGTH,
+        qasa_num_qubits: int = 4,
         **kwargs,
     ):
         """Initialize Local Attention block with enhancements.
@@ -186,6 +203,26 @@ class LocalAttentionBlock(FusedReasoningBlockMixin, layers.Layer):
         self.cache_masks = cache_masks
         self._mask_cache: dict[tuple[int, int, bool], tf.Tensor] = {}
 
+        # Phase 119: QASA Quantum Adaptive Self-Attention
+        self.use_qasa_attention = use_qasa_attention
+        self.qasa_vqc_layers = qasa_vqc_layers
+        self.qasa_entanglement_strength = qasa_entanglement_strength
+        self.qasa_num_qubits = qasa_num_qubits
+        self._qasa_initialized = False
+
+        # Phase 130.1: Auto Neural QEM mitigator for QASA output
+        self._qasa_qem_mitigator = None
+        if USE_AUTO_NEURAL_QEM and use_qasa_attention:
+            from highnoon.training.neural_zne import NeuralQuantumErrorMitigator
+            self._qasa_qem_mitigator = NeuralQuantumErrorMitigator(
+                name="qasa_qem"
+            )
+
+        # Phase 130.6: MPS entropy gating for QASA
+        self.use_mps_gating = QASA_MPS_GATING and use_qasa_attention
+        self.mps_entropy_threshold = QASA_MPS_ENTROPY_THRESHOLD
+        self._mps_layer = None
+
         # Q, K, V projections
         self.proj_q = layers.Dense(embedding_dim, name="proj_q")
         self.proj_k = layers.Dense(embedding_dim, name="proj_k")
@@ -213,6 +250,19 @@ class LocalAttentionBlock(FusedReasoningBlockMixin, layers.Layer):
 
         if not self.norm.built:
             self.norm.build(input_shape)
+
+        # Phase 119: Initialize QASA VQC parameters if enabled
+        if self.use_qasa_attention and not self._qasa_initialized:
+            # VQC params: 2 * vqc_layers * num_qubits (for Q and K encoding)
+            num_vqc_params = 2 * self.qasa_vqc_layers * self.qasa_num_qubits
+            self.vqc_params = self.add_weight(
+                name="qasa_vqc_params",
+                shape=(num_vqc_params,),
+                initializer=tf.keras.initializers.RandomUniform(-0.1, 0.1),
+                trainable=True,
+                dtype=tf.float32,
+            )
+            self._qasa_initialized = True
 
         super().build(input_shape)
 
@@ -271,30 +321,37 @@ class LocalAttentionBlock(FusedReasoningBlockMixin, layers.Layer):
         v = tf.reshape(v, [batch_size, seq_len, self.num_heads, self.head_dim])
         v = tf.transpose(v, [0, 2, 1, 3])
 
-        # Compute attention scores
-        # [batch, heads, seq_len, head_dim] @ [batch, heads, head_dim, seq_len]
-        # -> [batch, heads, seq_len, seq_len]
-        scores = tf.matmul(q, k, transpose_b=True) * self.scale
+        # Phase 119: QASA path - use VQC-based attention scoring
+        if self.use_qasa_attention and self._is_qasa_available():
+            attn_output = self._qasa_attention(q, k, v, training=training)
+        else:
+            # Standard attention path
+            # Compute attention scores
+            # [batch, heads, seq_len, head_dim] @ [batch, heads, head_dim, seq_len]
+            # -> [batch, heads, seq_len, seq_len]
+            scores = tf.matmul(q, k, transpose_b=True) * self.scale
 
-        # Create and apply local attention mask
-        mask = self._create_local_mask(seq_len)
-        mask = tf.cast(mask, scores.dtype)
+            # Create and apply local attention mask
+            mask = self._create_local_mask(seq_len)
+            mask = tf.cast(mask, scores.dtype)
 
-        # Apply mask: set non-local positions to -inf
-        mask_value = tf.constant(-1e9, dtype=scores.dtype)
-        scores = tf.where(mask[tf.newaxis, tf.newaxis, :, :] > 0, scores, mask_value)
+            # Apply mask: set non-local positions to -inf
+            mask_value = tf.constant(-1e9, dtype=scores.dtype)
+            scores = tf.where(mask[tf.newaxis, tf.newaxis, :, :] > 0, scores, mask_value)
 
-        # Softmax attention weights
-        attn_weights = tf.nn.softmax(scores, axis=-1)
+            # Softmax attention weights
+            attn_weights = tf.nn.softmax(scores, axis=-1)
 
-        # Apply dropout to attention weights
-        if self.attn_dropout is not None and training:
-            attn_weights = self.attn_dropout(attn_weights, training=training)
+            # Apply dropout to attention weights
+            if self.attn_dropout is not None and training:
+                attn_weights = self.attn_dropout(attn_weights, training=training)
 
-        # Apply attention to values
-        # [batch, heads, seq_len, seq_len] @ [batch, heads, seq_len, head_dim]
-        # -> [batch, heads, seq_len, head_dim]
-        attn_output = tf.matmul(attn_weights, v)
+            # Apply attention to values
+            # [batch, heads, seq_len, seq_len] @ [batch, heads, seq_len, head_dim]
+            # -> [batch, heads, seq_len, head_dim]
+            attn_output = tf.matmul(attn_weights, v)
+
+
 
         # Reshape back: [batch, num_heads, seq_len, head_dim] -> [batch, seq_len, embedding_dim]
         attn_output = tf.transpose(attn_output, [0, 2, 1, 3])
@@ -308,6 +365,112 @@ class LocalAttentionBlock(FusedReasoningBlockMixin, layers.Layer):
 
         return output
 
+    def _is_qasa_available(self) -> bool:
+        """Check if QASA C++ ops are available."""
+        global _qasa_ops, _qasa_available
+        if _qasa_available is not None:
+            return _qasa_available
+        try:
+            from highnoon._native.ops.qasa_ops import is_qasa_available
+            _qasa_available = is_qasa_available()
+        except ImportError:
+            _qasa_available = False
+        return _qasa_available
+
+    def _qasa_attention(
+        self, q: tf.Tensor, k: tf.Tensor, v: tf.Tensor, training: bool = False
+    ) -> tf.Tensor:
+        """Compute QASA attention using VQC-based scoring.
+
+        Args:
+            q: Query tensor [batch, heads, seq_len, head_dim].
+            k: Key tensor [batch, heads, seq_len, head_dim].
+            v: Value tensor [batch, heads, seq_len, head_dim].
+            training: Whether in training mode.
+
+        Returns:
+            Attention output [batch, heads, seq_len, head_dim].
+        """
+        global _qasa_ops
+        if _qasa_ops is None:
+            from highnoon._native.ops import qasa_ops
+            _qasa_ops = qasa_ops
+
+        qasa_output = _qasa_ops.run_qasa_attention(
+            queries=q,
+            keys=k,
+            values=v,
+            vqc_params=self.vqc_params,
+            num_qubits=self.qasa_num_qubits,
+            vqc_layers=self.qasa_vqc_layers,
+            entanglement_strength=self.qasa_entanglement_strength,
+        )
+
+        # Phase 130.6: Apply MPS entropy gating if enabled
+        if self.use_mps_gating:
+            qasa_output = self._apply_mps_gating(qasa_output, q, v)
+
+        # Phase 130.1: Apply auto Neural QEM if enabled
+        if self._qasa_qem_mitigator is not None:
+            # Reshape for QEM: [batch, heads, seq, dim] -> [batch, heads*seq, dim]
+            batch_size = tf.shape(qasa_output)[0]
+            orig_shape = tf.shape(qasa_output)
+            flat_output = tf.reshape(
+                qasa_output, [batch_size, -1, tf.shape(qasa_output)[-1]]
+            )
+            flat_output = self._qasa_qem_mitigator(flat_output, training=training)
+            qasa_output = tf.reshape(flat_output, orig_shape)
+
+        return qasa_output
+
+    def _apply_mps_gating(
+        self, qasa_output: tf.Tensor, q: tf.Tensor, v: tf.Tensor
+    ) -> tf.Tensor:
+        """Apply MPS entropy-based gating to QASA output (Phase 130.6).
+
+        High entanglement entropy -> stronger quantum contribution.
+        Low entanglement entropy -> use classical attention fallback.
+
+        Args:
+            qasa_output: QASA attention output [batch, heads, seq, dim].
+            q: Query tensor for fallback computation.
+            v: Value tensor for fallback computation.
+
+        Returns:
+            Gated output blending QASA with classical attention.
+        """
+        # Compute approximate entanglement entropy from attention patterns
+        # Use query-key overlap as proxy for entanglement
+        batch_size = tf.shape(q)[0]
+        seq_len = tf.shape(q)[2]
+
+        # Compute attention scores for entropy estimation
+        attn_pattern = tf.matmul(q, q, transpose_b=True) / tf.sqrt(
+            tf.cast(tf.shape(q)[-1], tf.float32)
+        )
+        attn_probs = tf.nn.softmax(attn_pattern, axis=-1)
+
+        # Compute entropy: -sum(p * log(p))
+        log_probs = tf.math.log(attn_probs + 1e-10)
+        entropy = -tf.reduce_sum(attn_probs * log_probs, axis=-1)
+        entropy = tf.reduce_mean(entropy, axis=[1, 2])  # [batch]
+
+        # Normalize entropy to [0, 1] range
+        max_entropy = tf.math.log(tf.cast(seq_len, tf.float32))
+        normalized_entropy = entropy / (max_entropy + 1e-10)
+
+        # Compute gate: sigmoid around threshold
+        gate = tf.nn.sigmoid(
+            10.0 * (normalized_entropy - self.mps_entropy_threshold)
+        )
+        gate = tf.reshape(gate, [-1, 1, 1, 1])  # [batch, 1, 1, 1]
+
+        # Classical fallback: simple value averaging
+        classical_output = v
+
+        # Blend QASA output with classical based on entropy
+        return gate * qasa_output + (1.0 - gate) * classical_output
+
     def get_config(self) -> dict[str, Any]:
         """Get layer configuration."""
         config = super().get_config()
@@ -318,6 +481,10 @@ class LocalAttentionBlock(FusedReasoningBlockMixin, layers.Layer):
                 "window_size": self.window_size,
                 "causal": self.causal,
                 "dropout_rate": self.dropout_rate,
+                "use_qasa_attention": self.use_qasa_attention,
+                "qasa_vqc_layers": self.qasa_vqc_layers,
+                "qasa_entanglement_strength": self.qasa_entanglement_strength,
+                "qasa_num_qubits": self.qasa_num_qubits,
             }
         )
         return config

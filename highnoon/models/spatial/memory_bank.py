@@ -1697,6 +1697,349 @@ class AdaptiveMemory(CompressiveGEM):
         return config
 
 
+class HopfieldMemory(tf.keras.layers.Layer):
+    """Modern Hopfield Network (MHN) Memory with exponential storage capacity.
+
+    Phase 86 enhancement implementing MHN-based associative memory:
+    - Exponential storage capacity (2^d patterns vs d patterns for classical)
+    - Guaranteed convergence via energy-based dynamics
+    - Mathematical equivalence to softmax attention
+
+    Phase 130.6 Enhancement (S6): MPS Bond Entropy → Adaptive Beta
+    When HOPFIELD_ADAPTIVE_BETA is enabled, the inverse temperature β is
+    dynamically adjusted based on MPS bond entropy from spatial layers.
+    High entropy (low entanglement) → lower β for exploration.
+    Low entropy (high entanglement) → higher β for sharper retrieval.
+
+    Energy function:
+        E(s) = -β⁻¹ log(Σᵢ exp(β s^T ξᵢ)) + ½||s||² + β⁻¹ log(M)
+
+    Update rule (single-step retrieval):
+        s_new = Σᵢ softmax(β s^T ξᵢ) * ξᵢ
+
+    Complexity:
+        - Storage: O(M · d) for M patterns of dimension d
+        - Retrieval: O(n · d) per query
+
+    Reference: "Hopfield Networks is All You Need" (2020)
+
+    Example:
+        >>> hm = HopfieldMemory(memory_slots=64, slot_dim=256)
+        >>> x = tf.random.normal((2, 128, 512))
+        >>> memory = hm.initialize_memory(batch_size=2)
+        >>> x_aug, memory = hm(x, memory)
+
+    Attributes:
+        memory_slots: Number of stored patterns (M).
+        slot_dim: Dimension of each pattern.
+        beta: Inverse temperature (higher = sharper retrieval).
+        adaptive_beta: Whether to use MPS entropy for adaptive beta.
+    """
+
+    def __init__(
+        self,
+        memory_slots: int = MEMORY_SLOTS,
+        slot_dim: int = MEMORY_SLOT_DIM,
+        input_dim: int | None = None,
+        beta: float = 1.0,
+        use_cpp: bool = True,
+        adaptive_beta: bool | None = None,
+        beta_min: float = 0.5,
+        beta_max: float = 4.0,
+        name: str = "hopfield_memory",
+        **kwargs: Any,
+    ) -> None:
+        """Initialize HopfieldMemory.
+
+        Args:
+            memory_slots: Number of memory patterns to store (M).
+            slot_dim: Dimension of each pattern.
+            input_dim: Input feature dimension (inferred if None).
+            beta: Base inverse temperature (higher = sharper retrieval).
+            use_cpp: Whether to use C++ ops (recommended).
+            adaptive_beta: Enable MPS entropy-based beta adaptation (S6).
+                Defaults to config.HOPFIELD_ADAPTIVE_BETA.
+            beta_min: Minimum beta for adaptive mode.
+            beta_max: Maximum beta for adaptive mode.
+            name: Layer name.
+            **kwargs: Additional layer arguments.
+        """
+        super().__init__(name=name, **kwargs)
+        self.memory_slots = memory_slots
+        self.slot_dim = slot_dim
+        self._input_dim = input_dim
+        self._base_beta = beta
+        self.beta = beta
+        self.use_cpp = use_cpp
+
+        # S6: Adaptive beta from MPS entropy
+        from highnoon.config import HOPFIELD_ADAPTIVE_BETA
+        self.adaptive_beta = adaptive_beta if adaptive_beta is not None else HOPFIELD_ADAPTIVE_BETA
+        self.beta_min = beta_min
+        self.beta_max = beta_max
+        self._last_mps_entropy: float | None = None
+
+        # Projections (built in build())
+        self.query_proj: tf.keras.layers.Dense | None = None
+        self.value_proj: tf.keras.layers.Dense | None = None
+        self.output_proj: tf.keras.layers.Dense | None = None
+        self.write_gate: tf.keras.layers.Dense | None = None
+
+        # Check C++ availability
+        self._cpp_available = False
+        if use_cpp:
+            try:
+                from highnoon._native.ops.hopfield_memory_op import hopfield_ops_available
+                self._cpp_available = hopfield_ops_available()
+            except ImportError:
+                self._cpp_available = False
+
+    def build(self, input_shape: tf.TensorShape) -> None:
+        """Build layer weights."""
+        input_dim = input_shape[-1] if self._input_dim is None else self._input_dim
+        self._built_input_dim = input_dim
+
+        # Query projection: input -> slot_dim
+        self.query_proj = tf.keras.layers.Dense(
+            self.slot_dim,
+            name=f"{self.name}_query_proj",
+        )
+
+        # Value projection for write: input -> slot_dim
+        self.value_proj = tf.keras.layers.Dense(
+            self.slot_dim,
+            name=f"{self.name}_value_proj",
+        )
+
+        # Output projection: slot_dim -> input_dim
+        self.output_proj = tf.keras.layers.Dense(
+            input_dim,
+            name=f"{self.name}_output_proj",
+        )
+
+        # Write gate for memory updates
+        self.write_gate = tf.keras.layers.Dense(
+            1,
+            activation="sigmoid",
+            name=f"{self.name}_write_gate",
+        )
+
+        super().build(input_shape)
+
+    def initialize_memory(self, batch_size: int) -> tf.Tensor:
+        """Initialize memory patterns.
+
+        Args:
+            batch_size: Batch size for memory initialization.
+
+        Returns:
+            Initialized memory tensor [batch, memory_slots, slot_dim].
+        """
+        # Initialize with small random values for diversity
+        return tf.random.normal(
+            [batch_size, self.memory_slots, self.slot_dim],
+            stddev=0.01,
+        )
+
+    def _hopfield_retrieve_cpp(
+        self,
+        query: tf.Tensor,
+        patterns: tf.Tensor,
+    ) -> tf.Tensor:
+        """Retrieve using C++ SIMD-optimized implementation.
+
+        CRITICAL: Requires C++ native ops. No Python fallback.
+
+        Raises:
+            RuntimeError: If C++ ops are not available.
+        """
+        if not self._cpp_available:
+            raise RuntimeError(
+                "HopfieldMemoryRetrieve C++ operator is required but not available. "
+                "Run ./build_secure.sh to compile. NO PYTHON FALLBACK IS PROVIDED."
+            )
+        from highnoon._native.ops.hopfield_memory_op import hopfield_memory_retrieve
+        return hopfield_memory_retrieve(query, patterns, beta=self.beta)
+
+    def read(
+        self,
+        x: tf.Tensor,
+        memory: tf.Tensor,
+    ) -> tf.Tensor:
+        """Read from memory using Hopfield retrieval.
+
+        CRITICAL: Requires C++ native ops. No Python fallback.
+
+        Args:
+            x: Input tensor [batch, seq_len, dim].
+            memory: Memory patterns [batch, memory_slots, slot_dim].
+
+        Returns:
+            Read output [batch, 1, dim].
+
+        Raises:
+            RuntimeError: If C++ ops are not available.
+        """
+        # Sequence summary for query
+        x_summary = tf.reduce_mean(x, axis=1)  # [B, dim]
+        query = self.query_proj(x_summary)  # [B, slot_dim]
+
+        # Retrieve via Hopfield update (C++ only)
+        retrieved = self._hopfield_retrieve_cpp(query, memory[0])  # Batched retrieval
+
+        # Project to input dimension
+        output = self.output_proj(retrieved[:, tf.newaxis, :])  # [B, 1, dim]
+        return output
+
+    def write(
+        self,
+        x: tf.Tensor,
+        memory: tf.Tensor,
+        training: bool = False,
+    ) -> tf.Tensor:
+        """Write to memory patterns.
+
+        Uses gated EMA update to incorporate new patterns.
+
+        Args:
+            x: Input tensor [batch, seq_len, dim].
+            memory: Current memory [batch, memory_slots, slot_dim].
+            training: Whether in training mode.
+
+        Returns:
+            Updated memory [batch, memory_slots, slot_dim].
+        """
+        # Compute write value from sequence
+        x_summary = tf.reduce_mean(x, axis=1)  # [B, dim]
+        write_value = self.value_proj(x_summary)  # [B, slot_dim]
+        write_gate = self.write_gate(x_summary)  # [B, 1]
+
+        # Compute attention over existing patterns for targeted update
+        query = self.query_proj(x_summary)  # [B, slot_dim]
+
+        # Attention scores for each pattern
+        scores = tf.einsum("bd,bmd->bm", query, memory)  # [B, M]
+        scores = self.beta * scores
+        attention = tf.nn.softmax(scores, axis=-1)  # [B, M]
+
+        # Gated update: blend new value into attended patterns
+        update = write_gate[:, :, tf.newaxis] * write_value[:, tf.newaxis, :]  # [B, 1, slot_dim]
+        weighted_update = attention[:, :, tf.newaxis] * update  # [B, M, slot_dim]
+
+        # EMA update with decay
+        decay = 0.95
+        memory = decay * memory + (1 - decay) * weighted_update
+
+        return memory
+
+    def call(
+        self,
+        x: tf.Tensor,
+        memory: tf.Tensor | None = None,
+        training: bool = False,
+    ) -> tuple[tf.Tensor, tf.Tensor]:
+        """Read from and write to Hopfield memory.
+
+        Args:
+            x: Input tensor [batch, seq_len, dim].
+            memory: Memory tensor [batch, M, slot_dim], or None to initialize.
+            training: Whether in training mode.
+
+        Returns:
+            Tuple of (augmented_x, updated_memory).
+        """
+        if memory is None:
+            batch_size = tf.shape(x)[0]
+            memory = self.initialize_memory(batch_size)
+
+        # Read: retrieve relevant patterns
+        read_out = self.read(x, memory)  # [B, 1, dim]
+        x_augmented = x + read_out  # Broadcast to all positions
+
+        # Write: update memory with current information
+        memory = self.write(x, memory, training=training)
+
+        return x_augmented, memory
+
+    def set_mps_entropy(self, entropy: float) -> None:
+        """S6: Receive MPS bond entropy for adaptive beta adjustment.
+
+        Higher entropy (lower entanglement) indicates more uncertainty,
+        so we use lower beta for softer/exploratory retrieval.
+        Lower entropy (higher entanglement) indicates more certainty,
+        so we use higher beta for sharper/focused retrieval.
+
+        Args:
+            entropy: MPS bond entropy value (typically 0-1, normalized).
+        """
+        if not self.adaptive_beta:
+            return
+
+        self._last_mps_entropy = entropy
+
+        # Map entropy to beta: low entropy -> high beta, high entropy -> low beta
+        # entropy=0 (max entanglement) -> beta_max
+        # entropy=1 (min entanglement) -> beta_min
+        clamped_entropy = max(0.0, min(1.0, entropy))
+        self.beta = self.beta_max - clamped_entropy * (self.beta_max - self.beta_min)
+
+    def get_effective_beta(self) -> float:
+        """Get the current effective beta value.
+
+        Returns:
+            Current beta (may be adapted from MPS entropy if enabled).
+        """
+        return self.beta
+
+    def compute_hopfield_energy(
+        self,
+        query: tf.Tensor,
+        memory: tf.Tensor,
+    ) -> tf.Tensor:
+        """Compute Hopfield energy for a query against memory patterns.
+
+        Energy function: E(s) = -β⁻¹ log(Σᵢ exp(β s^T ξᵢ)) + ½||s||²
+
+        Args:
+            query: Query tensor [batch, slot_dim].
+            memory: Memory patterns [batch, memory_slots, slot_dim].
+
+        Returns:
+            Energy values [batch] (lower = better match).
+        """
+        # Compute similarity scores
+        scores = tf.einsum("bd,bmd->bm", query, memory)  # [B, M]
+        scores = self.beta * scores
+
+        # Log-sum-exp term (normalized by beta)
+        lse = tf.reduce_logsumexp(scores, axis=-1) / self.beta  # [B]
+
+        # Norm term
+        norm_sq = 0.5 * tf.reduce_sum(tf.square(query), axis=-1)  # [B]
+
+        # Energy (negative for optimization direction)
+        energy = -lse + norm_sq
+
+        return energy
+
+    def get_config(self) -> dict[str, Any]:
+        """Get layer configuration."""
+        config = super().get_config()
+        config.update(
+            {
+                "memory_slots": self.memory_slots,
+                "slot_dim": self.slot_dim,
+                "input_dim": self._input_dim,
+                "beta": self._base_beta,
+                "use_cpp": self.use_cpp,
+                "adaptive_beta": self.adaptive_beta,
+                "beta_min": self.beta_min,
+                "beta_max": self.beta_max,
+            }
+        )
+        return config
+
+
 __all__ = [
     "GatedExternalMemory",
     "CompressiveGEM",
@@ -1704,5 +2047,6 @@ __all__ = [
     "QuantumInspiredMemory",
     "TTProjectionMemory",
     "AdaptiveMemory",
+    "HopfieldMemory",
     "create_external_memory",
 ]

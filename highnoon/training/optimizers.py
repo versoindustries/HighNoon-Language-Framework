@@ -479,3 +479,256 @@ class Lion(tf.keras.optimizers.Optimizer):
             }
         )
         return config
+
+
+class SympFlowQNGOptimizer(tf.keras.optimizers.Optimizer):
+    """S12: Symplectic momentum with quantum-natural geodesic corrections.
+
+    Combines the stability of symplectic integration with the efficiency
+    of quantum natural gradient for superior optimization landscape
+    navigation.
+
+    Research Basis:
+        Synergy between Phase 91 (SympFlow) and Phase 100 (QNG)
+
+    Key Features:
+        - Symplectic Integration: Preserves Hamiltonian structure
+        - Quantum Natural Gradient: Adapts to parameter manifold curvature
+        - Geodesic Corrections: Follows natural geodesics on parameter space
+        - NaN/Inf Safety: Skips updates when non-finite gradients detected
+        - Gradient Clipping: Optional per-variable gradient clipping
+
+    Update Rule:
+        1. p_half = p - (lr/2) * g                    (half-step momentum)
+        2. p_half += w * geodesic_correction(p, QFIM) (geodesic correction)
+        3. θ = θ + lr * p_half / mass                 (full-step position)
+        4. p = p_half - (lr/2) * g' - friction * p    (second half-step with friction)
+
+    Args:
+        learning_rate: Learning rate (step size).
+        mass: Effective mass for momentum dynamics.
+        friction: Dissipation rate for momentum.
+        geodesic_weight: Weight for QNG geodesic corrections.
+        clipnorm: Maximum gradient norm for clipping (None to disable).
+        **kwargs: Additional arguments for base optimizer.
+    """
+
+    def __init__(
+        self,
+        learning_rate: float = 0.01,
+        mass: float = 1.0,
+        friction: float = 0.01,
+        geodesic_weight: float = 0.1,
+        clipnorm: float | None = 1.0,
+        name: str = "SympFlowQNG",
+        **kwargs,
+    ):
+        # Pass clipnorm to base class if supported, otherwise handle manually
+        if 'clipnorm' not in kwargs:
+            kwargs['clipnorm'] = clipnorm
+        super().__init__(learning_rate=learning_rate, name=name, **kwargs)
+
+        # Import config for defaults
+        from highnoon import config as cfg
+
+        self.mass = mass or getattr(cfg, 'SYMPFLOW_MASS', 1.0)
+        self.friction = friction or getattr(cfg, 'SYMPFLOW_FRICTION', 0.01)
+        self.geodesic_weight = geodesic_weight or getattr(cfg, 'SYMPFLOW_GEODESIC_WEIGHT', 0.1)
+        self._use_geodesic = getattr(cfg, 'SYMPFLOW_USE_QNG_GEODESIC', True)
+        self._clipnorm = clipnorm
+
+        # Momentum slots
+        self.momentums = []
+        # QFIM diagonal estimates
+        self.qfim_diags = []
+        # NaN recovery: track consecutive NaN updates per variable
+        self._nan_counts = {}
+
+    def build(self, var_list):
+        """Create momentum and QFIM slots."""
+        super().build(var_list)
+
+        self.momentums = []
+        self.qfim_diags = []
+        for var in var_list:
+            # Momentum slot (initialized to zero)
+            self.momentums.append(
+                self.add_variable_from_reference(var, "momentum")
+            )
+            # QFIM diagonal estimate (initialized to 1.0 for stability)
+            qfim_slot = self.add_variable_from_reference(var, "qfim_diag")
+            qfim_slot.assign(tf.ones_like(var))
+            self.qfim_diags.append(qfim_slot)
+
+    def _compute_qfim_approx(
+        self,
+        var: tf.Variable,
+        grad: tf.Tensor,
+        var_index: int,
+    ) -> tf.Tensor:
+        """Approximate diagonal of Quantum Fisher Information Matrix.
+
+        Uses EMA of squared gradients as efficient approximation.
+        This is analogous to the empirical Fisher information.
+
+        Args:
+            var: Variable being optimized.
+            grad: Current gradient.
+            var_index: Index into QFIM slots.
+
+        Returns:
+            QFIM diagonal estimate [same shape as var].
+        """
+        if not self._use_geodesic:
+            return tf.ones_like(grad)
+
+        qfim = self.qfim_diags[var_index]
+
+        # EMA update of squared gradients (empirical Fisher)
+        ema_decay = 0.99
+        grad_sq = tf.square(grad) + 1e-8
+        qfim.assign(ema_decay * qfim + (1.0 - ema_decay) * grad_sq)
+
+        return qfim
+
+    def _geodesic_correction(
+        self,
+        momentum: tf.Tensor,
+        qfim_diag: tf.Tensor,
+    ) -> tf.Tensor:
+        """Compute geodesic correction for manifold-aware updates.
+
+        Uses approximate Christoffel symbols from QFIM to follow
+        natural geodesics on the parameter manifold.
+
+        The correction term is: -0.5 * (∂QFIM/∂θ) / QFIM * p²
+
+        For diagonal approximation, this simplifies to correcting
+        the momentum in regions of high curvature.
+
+        Args:
+            momentum: Current momentum tensor.
+            qfim_diag: Diagonal QFIM estimate.
+
+        Returns:
+            Geodesic correction tensor.
+        """
+        if not self._use_geodesic:
+            return tf.zeros_like(momentum)
+
+        # Approximate Christoffel symbol (diagonal case)
+        # Γ ≈ 0.5 * grad(log(F)) = 0.5 * grad(F) / F
+        # We approximate grad(F) using central differences would be expensive,
+        # so we use a simplified local curvature correction based on QFIM variance
+        qfim_mean = tf.reduce_mean(qfim_diag) + 1e-8
+        qfim_normalized = qfim_diag / qfim_mean
+
+        # High QFIM values indicate high curvature - reduce momentum there
+        # Low QFIM values indicate flat regions - allow larger steps
+        curvature_factor = tf.math.log(qfim_normalized + 1e-8)
+
+        # Geodesic correction: dampens momentum in high-curvature regions
+        correction = -0.5 * curvature_factor * tf.square(momentum) / (qfim_diag + 1e-8)
+
+        return correction
+
+    def update_step(self, grad, var, learning_rate):
+        """Symplectic update with optional geodesic correction.
+
+        Implements leapfrog integration with geodesic modifications.
+        Includes NaN/Inf safety checks and optional gradient clipping.
+        """
+        if grad is None:
+            return
+
+        # NaN/Inf safety check for gradients
+        if isinstance(grad, tf.IndexedSlices):
+            grad_finite = tf.reduce_all(tf.math.is_finite(grad.values))
+        else:
+            grad_finite = tf.reduce_all(tf.math.is_finite(grad))
+
+        # Skip update if gradient is non-finite
+        if not grad_finite:
+            var_name = getattr(var, 'name', 'unknown')
+            logger.warning(f"[SympFlowQNG] Skipping update for {var_name}: non-finite gradient")
+            return
+
+        lr = tf.cast(learning_rate, var.dtype.base_dtype)
+        var_index = self._get_variable_index(var)
+        momentum = self.momentums[var_index]
+
+        # Handle sparse gradients
+        if isinstance(grad, tf.IndexedSlices):
+            # For sparse gradients, use simplified update with clipping
+            grad_values = grad.values
+            if self._clipnorm is not None:
+                grad_norm = tf.linalg.norm(grad_values)
+                grad_values = tf.cond(
+                    grad_norm > self._clipnorm,
+                    lambda: grad_values * (self._clipnorm / (grad_norm + 1e-8)),
+                    lambda: grad_values
+                )
+            m_slices = tf.gather(momentum, grad.indices)
+            new_m = m_slices - lr * grad_values
+            var.scatter_add(tf.IndexedSlices(lr * new_m / self.mass, grad.indices))
+            m_updated = tf.tensor_scatter_nd_update(
+                momentum, tf.expand_dims(grad.indices, -1), new_m * (1.0 - self.friction)
+            )
+            momentum.assign(m_updated)
+            return
+
+        # Dense update with symplectic integration
+
+        # Per-variable gradient clipping if enabled
+        clipped_grad = grad
+        if self._clipnorm is not None:
+            grad_norm = tf.linalg.norm(grad)
+            clipped_grad = tf.cond(
+                grad_norm > self._clipnorm,
+                lambda: grad * (self._clipnorm / (grad_norm + 1e-8)),
+                lambda: grad
+            )
+
+        # Step 1: First half-step for momentum
+        p_half = momentum - 0.5 * lr * clipped_grad
+
+        # Step 2: Apply geodesic correction if enabled
+        if self._use_geodesic:
+            qfim = self._compute_qfim_approx(var, clipped_grad, var_index)
+            geodesic_corr = self._geodesic_correction(p_half, qfim)
+            p_half = p_half + self.geodesic_weight * geodesic_corr
+
+        # Step 3: Full step for position (parameters)
+        update = lr * p_half / self.mass
+
+        # NaN safety: check update before applying
+        if tf.reduce_all(tf.math.is_finite(update)):
+            var.assign_add(update)
+        else:
+            var_name = getattr(var, 'name', 'unknown')
+            logger.warning(f"[SympFlowQNG] Skipping update for {var_name}: non-finite update value")
+            return
+
+        # Step 4: Second half-step for momentum with friction
+        # Note: We use the same gradient for simplicity (Störmer-Verlet)
+        # A more accurate (but expensive) approach would recompute the gradient
+        new_momentum = p_half - 0.5 * lr * clipped_grad
+        new_momentum = new_momentum * (1.0 - self.friction * lr)
+
+        # NaN safety for momentum update
+        if tf.reduce_all(tf.math.is_finite(new_momentum)):
+            momentum.assign(new_momentum)
+        else:
+            # Reset momentum to zero on NaN
+            momentum.assign(tf.zeros_like(momentum))
+
+    def get_config(self):
+        """Get optimizer configuration."""
+        config = super().get_config()
+        config.update({
+            "mass": self.mass,
+            "friction": self.friction,
+            "geodesic_weight": self.geodesic_weight,
+            "clipnorm": self._clipnorm,
+        })
+        return config

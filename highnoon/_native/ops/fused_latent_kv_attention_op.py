@@ -81,19 +81,9 @@ def fused_latent_kv_attention(
         RuntimeError: If C++ op is not available and fallback fails.
     """
     if _fused_latent_kv_attention_op is None:
-        return _latent_kv_attention_fallback(
-            x,
-            q_proj,
-            k_compress,
-            v_compress,
-            k_expand,
-            v_expand,
-            out_proj,
-            latent_dim,
-            num_heads,
-            head_dim,
-            use_linear_attention,
-            use_float64,
+        raise RuntimeError(
+            "FusedLatentKVAttention C++ op not available. Build with: "
+            "cd highnoon/_native && ./build_ops.sh fused_latent_kv_attention"
         )
 
     # Select dtype
@@ -123,109 +113,29 @@ def fused_latent_kv_attention(
         )
 
         def grad(grad_output, grad_latent_k, grad_latent_v):
-            if _fused_latent_kv_attention_grad_op is not None:
-                grads = _fused_latent_kv_attention_grad_op(
-                    grad_output=grad_output,
-                    x=x_in,
-                    q_proj=qp,
-                    k_compress=kc,
-                    v_compress=vc,
-                    k_expand=ke,
-                    v_expand=ve,
-                    out_proj=op,
-                    latent_dim=latent_dim,
-                    num_heads=num_heads,
-                    head_dim=head_dim,
+            if _fused_latent_kv_attention_grad_op is None:
+                raise RuntimeError(
+                    "FusedLatentKVAttentionGrad C++ op not available. Build with: "
+                    "cd highnoon/_native && ./build_ops.sh fused_latent_kv_attention"
                 )
-                return grads
-            else:
-                return tuple(tf.zeros_like(t) for t in [x_in, qp, kc, vc, ke, ve, op])
+            grads = _fused_latent_kv_attention_grad_op(
+                grad_output=grad_output,
+                x=x_in,
+                q_proj=qp,
+                k_compress=kc,
+                v_compress=vc,
+                k_expand=ke,
+                v_expand=ve,
+                out_proj=op,
+                latent_dim=latent_dim,
+                num_heads=num_heads,
+                head_dim=head_dim,
+            )
+            return grads
 
         return (output, latent_k, latent_v), grad
 
     return _inner(x, q_proj, k_compress, v_compress, k_expand, v_expand, out_proj)
-
-
-def _latent_kv_attention_fallback(
-    x: tf.Tensor,
-    q_proj: tf.Tensor,
-    k_compress: tf.Tensor,
-    v_compress: tf.Tensor,
-    k_expand: tf.Tensor,
-    v_expand: tf.Tensor,
-    out_proj: tf.Tensor,
-    latent_dim: int,
-    num_heads: int,
-    head_dim: int,
-    use_linear_attention: bool,
-    use_float64: bool,
-) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
-    """Pure TensorFlow fallback for latent KV attention."""
-    dtype = tf.float64 if use_float64 else tf.float32
-    x = tf.cast(x, dtype)
-
-    batch = tf.shape(x)[0]
-    seq_len = tf.shape(x)[1]
-    embed_dim = tf.shape(x)[2]
-    proj_dim = num_heads * head_dim
-
-    # Reshape for batch matmul: [batch * seq_len, embed_dim]
-    x_flat = tf.reshape(x, [-1, embed_dim])
-
-    # Q = x @ q_proj
-    Q = tf.matmul(x_flat, q_proj)
-    Q = tf.reshape(Q, [batch, seq_len, proj_dim])
-
-    # Compress K and V to latent space
-    latent_k = tf.matmul(x_flat, k_compress)
-    latent_k = tf.reshape(latent_k, [batch, seq_len, latent_dim])
-
-    latent_v = tf.matmul(x_flat, v_compress)
-    latent_v = tf.reshape(latent_v, [batch, seq_len, latent_dim])
-
-    # Expand K and V for attention
-    latent_k_flat = tf.reshape(latent_k, [-1, latent_dim])
-    latent_v_flat = tf.reshape(latent_v, [-1, latent_dim])
-
-    K = tf.matmul(latent_k_flat, k_expand)
-    K = tf.reshape(K, [batch, seq_len, proj_dim])
-
-    V = tf.matmul(latent_v_flat, v_expand)
-    V = tf.reshape(V, [batch, seq_len, proj_dim])
-
-    # Attention
-    scale = tf.cast(1.0 / tf.sqrt(tf.cast(head_dim, dtype)), dtype)
-
-    if use_linear_attention:
-        # O(n) linear attention with ELU+1 feature map
-        Q_feat = tf.where(Q > 0, Q * scale + 1.0, tf.exp(Q * scale))
-        K_feat = tf.where(K > 0, K + 1.0, tf.exp(K))
-
-        # K^T @ V: [batch, proj_dim, proj_dim]
-        KV = tf.einsum("bsd,bsD->bdD", K_feat, V)
-
-        # K.sum(0): [batch, proj_dim]
-        K_sum = tf.reduce_sum(K_feat, axis=1, keepdims=True)
-
-        # Q @ KV: [batch, seq_len, proj_dim]
-        numerator = tf.einsum("bsd,bdD->bsD", Q_feat, KV)
-
-        # Q @ K_sum: [batch, seq_len, 1]
-        denominator = tf.einsum("bsd,bnd->bsn", Q_feat, K_sum)
-
-        attn_out = numerator / (denominator + 1e-10)
-    else:
-        # O(n²) standard attention
-        attn_scores = tf.einsum("bsd,btd->bst", Q, K) * scale
-        attn_weights = tf.nn.softmax(attn_scores, axis=-1)
-        attn_out = tf.einsum("bst,btd->bsd", attn_weights, V)
-
-    # Output projection
-    attn_out_flat = tf.reshape(attn_out, [-1, proj_dim])
-    output = tf.matmul(attn_out_flat, out_proj)
-    output = tf.reshape(output, [batch, seq_len, embed_dim])
-
-    return output, latent_k, latent_v
 
 
 def get_cache_reduction_ratio(embed_dim: int, latent_dim: int) -> float:

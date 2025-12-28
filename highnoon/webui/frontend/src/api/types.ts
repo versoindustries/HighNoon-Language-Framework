@@ -187,6 +187,8 @@ export interface HPOTrialInfo {
     mean_confidence?: number | null;
     expected_calibration_error?: number | null;
     composite_score?: number | null;
+    // Performance metrics
+    throughput_tokens_per_sec?: number | null;
 }
 
 /** Model configuration from HPO sweep */
@@ -319,3 +321,59 @@ export const LITE_LIMITS: LiteEditionLimits = {
     maxMoEExperts: 12,
     maxHPOTrials: 100,
 };
+
+// ============================================================================
+// Unified Smart Tuner Types
+// ============================================================================
+
+/** Smart tuner configuration */
+export interface SmartTunerConfig {
+    enabled: boolean;
+    memory_enabled: boolean;
+    coordination_mode: 'aggressive' | 'balanced' | 'conservative';
+    exploration_decay: number;
+    lr_initial: number;
+    lr_min: number;
+    lr_max: number;
+    galore_rank: number;
+    galore_adaptive_rank: boolean;
+    barren_plateau_threshold: number;
+    barren_plateau_aggressive: boolean;
+    max_grad_norm: number;
+    warmup_steps: number;
+    exploration_steps: number;
+    emergency_grad_threshold: number;
+}
+
+/** Smart tuner current status */
+export interface SmartTunerStatus {
+    enabled: boolean;
+    current_phase: 'idle' | 'warmup' | 'exploration' | 'exploitation' | 'emergency';
+    exploration_factor: number;
+    emergency_mode: boolean;
+    global_step: number;
+    coordination_mode: string;
+    lr_controller_stats: Record<string, unknown>;
+    bp_monitor_stats: Record<string, unknown>;
+    galore_stats: Record<string, unknown>;
+}
+
+/** Cross-trial memory statistics */
+export interface TunerMemoryStats {
+    trial_count: number;
+    best_loss: number | null;
+    best_trial_id: string | null;
+    unique_architectures: number;
+    mean_loss?: number;
+    std_loss?: number;
+    converged_count?: number;
+    error?: string;
+}
+
+/** Suggested tuner configuration from memory */
+export interface TunerSuggestion {
+    initial_lr?: number;
+    galore_rank?: number;
+    exploration_factor?: number;
+    target_lr?: number;
+}

@@ -629,3 +629,98 @@ def grover_single_iteration(
     return _quantum_ops_module.grover_single_iteration(
         amplitudes, quality_scores, quality_threshold=quality_threshold
     )
+
+
+# =============================================================================
+# Phase 51: Born Rule Loss
+# =============================================================================
+
+
+def born_rule_loss(
+    logits: tf.Tensor,
+    targets: tf.Tensor,
+    temperature: float = 1.0,
+    use_qfim: bool = True,
+) -> tuple[tf.Tensor, tf.Tensor]:
+    """Compute Born rule loss with QFIM gradients.
+
+    Enforces |ψ|² = p normalization for VQC outputs. The loss measures
+    how well the model's output amplitudes follow the Born rule when
+    interpreted as quantum probability amplitudes.
+
+    Args:
+        logits: Model output logits [batch, seq_len, vocab_size].
+        targets: Target token IDs [batch, seq_len].
+        temperature: Born rule temperature for sharpness control.
+        use_qfim: If True, use Quantum Fisher Information Matrix for
+            improved gradient flow.
+
+    Returns:
+        Tuple of (loss_per_sample [batch], grad_logits [batch, seq, vocab]).
+
+    Raises:
+        RuntimeError: If native op not available.
+
+    Example:
+        >>> logits = model(input_ids, training=True)
+        >>> loss, grad = born_rule_loss(logits, targets)
+        >>> total_loss = tf.reduce_mean(loss) * config.QULS_BORN_RULE_WEIGHT
+    """
+    _load_quantum_ops()
+    return _quantum_ops_module.born_rule_loss(
+        logits, targets, temperature=temperature, use_qfim=use_qfim
+    )
+
+
+def born_rule_loss_available() -> bool:
+    """Check if Born rule loss op is available."""
+    try:
+        _load_quantum_ops()
+        return hasattr(_quantum_ops_module, "born_rule_loss")
+    except RuntimeError:
+        return False
+
+
+# =============================================================================
+# Phase 52: Quantum Fidelity Loss
+# =============================================================================
+
+
+def quantum_fidelity_loss(
+    pred_states: tf.Tensor,
+    true_states: tf.Tensor,
+) -> tuple[tf.Tensor, tf.Tensor]:
+    """Compute quantum fidelity loss between predicted and true states.
+
+    Implements trace fidelity F(p,q) = (Σ√pᵢ√qᵢ)² for comparing
+    quantum state distributions. Useful for training models to
+    match target probability distributions in a quantum-aware manner.
+
+    Args:
+        pred_states: Predicted probability distributions [batch, dim].
+        true_states: Target probability distributions [batch, dim].
+
+    Returns:
+        Tuple of (loss_per_sample [batch], grad_pred [batch, dim]).
+
+    Raises:
+        RuntimeError: If native op not available.
+
+    Example:
+        >>> pred = tf.nn.softmax(logits[:, -1, :])  # Last token probs
+        >>> target = tf.nn.softmax(target_logits[:, -1, :])
+        >>> loss, grad = quantum_fidelity_loss(pred, target)
+        >>> total_loss = tf.reduce_mean(loss) * config.QULS_FIDELITY_WEIGHT
+    """
+    _load_quantum_ops()
+    return _quantum_ops_module.quantum_fidelity_loss(pred_states, true_states)
+
+
+def quantum_fidelity_loss_available() -> bool:
+    """Check if quantum fidelity loss op is available."""
+    try:
+        _load_quantum_ops()
+        return hasattr(_quantum_ops_module, "quantum_fidelity_loss")
+    except RuntimeError:
+        return False
+

@@ -157,6 +157,263 @@ class BarrenPlateauMonitor:
             self._detection_counts = {}
         if not hasattr(self, "_step_counter"):
             self._step_counter = 0
+        # Global gradient norm tracking for simple update() interface
+        self._global_norm_history: list[float] = []
+        self._global_barren_detected: bool = False
+        self._global_detection_count: int = 0
+
+    def update(
+        self,
+        gradient_norm: float,
+        gradients: list[tf.Tensor] | None = None,
+        variables: list[tf.Variable] | None = None,
+    ) -> bool:
+        """Update monitor with gradient information and detect barren plateaus.
+
+        This method provides a unified API for the TrainingEngine to check
+        for barren plateaus. It supports two modes of operation:
+
+        1. **Global Mode** (gradients/variables not provided):
+           Uses only the global gradient norm for detection. Suitable for
+           models without explicit quantum layers or when per-layer tracking
+           is not needed.
+
+        2. **Per-Layer Mode** (gradients/variables provided):
+           Computes per-layer gradient norms and monitors quantum-enhanced
+           layers specifically. Provides more accurate detection and enables
+           layer-specific mitigation strategies.
+
+        The method tracks gradient norm history, applies EMA smoothing, and
+        requires consecutive low-gradient detections to minimize false positives.
+
+        Args:
+            gradient_norm: The L2 norm of all gradients (global norm).
+            gradients: Optional list of gradient tensors for per-layer tracking.
+            variables: Optional list of corresponding variables for per-layer tracking.
+
+        Returns:
+            True if a barren plateau is currently detected (global or per-layer),
+            False otherwise.
+
+        Raises:
+            ValueError: If only one of gradients/variables is provided.
+
+        Example:
+            >>> monitor = BarrenPlateauMonitor(threshold=1e-6)
+            >>> # Global mode
+            >>> detected = monitor.update(1e-8)
+            >>> # Per-layer mode
+            >>> detected = monitor.update(1e-8, gradients=grads, variables=vars)
+        """
+        if not self.enabled:
+            return False
+
+        # Validate arguments
+        if (gradients is None) != (variables is None):
+            raise ValueError(
+                "Both gradients and variables must be provided together, or neither."
+            )
+
+        self._step_counter += 1
+
+        # Track global norm history
+        self._global_norm_history.append(gradient_norm)
+        if len(self._global_norm_history) > 100:
+            self._global_norm_history = self._global_norm_history[-50:]
+
+        # Compute smoothed global gradient norm using EMA
+        global_ema_norm = self._compute_ema(self._global_norm_history)
+
+        # Per-layer detection if gradients and variables are provided
+        layer_barren_detected = False
+        if gradients is not None and variables is not None:
+            # Compute per-layer gradient norms
+            layer_norms = self._compute_layer_norms(gradients, variables)
+
+            # Update per-layer history and check for barren plateaus
+            for layer_name, norm in layer_norms.items():
+                # Track gradient history per layer
+                if layer_name not in self._gradient_history:
+                    self._gradient_history[layer_name] = []
+                self._gradient_history[layer_name].append(norm)
+
+                # Keep history bounded
+                if len(self._gradient_history[layer_name]) > 100:
+                    self._gradient_history[layer_name] = self._gradient_history[layer_name][-50:]
+
+                # Only monitor quantum layers for per-layer barren plateau
+                if not self._is_quantum_layer(layer_name):
+                    continue
+
+                # Compute smoothed gradient norm for this layer
+                layer_ema_norm = self._compute_ema(self._gradient_history[layer_name])
+
+                # Check for active mitigation in recovery phase
+                if layer_name in self._active_mitigations:
+                    active = self._active_mitigations[layer_name]
+                    active.recovery_steps += 1
+
+                    # Check if recovery is complete
+                    exit_threshold = self.threshold * self.hysteresis_factor
+                    if layer_ema_norm > exit_threshold:
+                        logger.info(
+                            "[BARREN PLATEAU] Layer '%s' recovered: norm=%.2e > %.2e",
+                            layer_name,
+                            layer_ema_norm,
+                            exit_threshold,
+                        )
+                        del self._active_mitigations[layer_name]
+                        self._detection_counts[layer_name] = 0
+                    elif active.recovery_steps >= self.recovery_window:
+                        # Escalate mitigation if not recovering
+                        active.lr_scale_factor = min(
+                            active.lr_scale_factor * 2.0,
+                            self.max_lr_scale,
+                        )
+                        active.consecutive_detections += 1
+                        active.recovery_steps = 0
+                        layer_barren_detected = True
+                        logger.warning(
+                            "[BARREN PLATEAU] Layer '%s' escalating mitigation: "
+                            "lr_scale=%.1f, detections=%d",
+                            layer_name,
+                            active.lr_scale_factor,
+                            active.consecutive_detections,
+                        )
+                    else:
+                        layer_barren_detected = True
+                    continue
+
+                # Check for new barren plateau detection in this layer
+                if layer_ema_norm < self.threshold:
+                    self._detection_counts[layer_name] = self._detection_counts.get(layer_name, 0) + 1
+
+                    # Require consecutive detections to reduce false positives
+                    if self._detection_counts[layer_name] >= 3:
+                        mitigation = LayerMitigation(
+                            layer_name=layer_name,
+                            strategy=MitigationStrategy.LR_SCALE_UP,
+                            lr_scale_factor=config.BARREN_PLATEAU_RECOVERY_LR_SCALE,
+                            noise_scale=1e-3,
+                            consecutive_detections=1,
+                            recovery_steps=0,
+                        )
+                        self._active_mitigations[layer_name] = mitigation
+                        layer_barren_detected = True
+
+                        logger.warning(
+                            "[BARREN PLATEAU] Detected in layer '%s': "
+                            "norm=%.2e < threshold=%.2e. Mitigation activated.",
+                            layer_name,
+                            layer_ema_norm,
+                            self.threshold,
+                        )
+                else:
+                    # Reset detection count if norm recovers
+                    self._detection_counts[layer_name] = 0
+
+        # Global barren plateau detection
+        if self._global_barren_detected:
+            exit_threshold = self.threshold * self.hysteresis_factor
+            if global_ema_norm > exit_threshold:
+                logger.info(
+                    "[BARREN PLATEAU] Global recovery detected: norm=%.2e > %.2e",
+                    global_ema_norm,
+                    exit_threshold,
+                )
+                self._global_barren_detected = False
+                self._global_detection_count = 0
+        else:
+            # Check for new global barren plateau detection
+            if global_ema_norm < self.threshold:
+                self._global_detection_count += 1
+
+                # Require consecutive detections to reduce false positives
+                if self._global_detection_count >= 3:
+                    self._global_barren_detected = True
+                    logger.warning(
+                        "[BARREN PLATEAU] Global barren plateau detected: "
+                        "norm=%.2e < threshold=%.2e",
+                        global_ema_norm,
+                        self.threshold,
+                    )
+            else:
+                self._global_detection_count = 0
+
+        # Return True if either global or per-layer barren plateau detected
+        return self._global_barren_detected or layer_barren_detected
+
+    def _compute_layer_norms(
+        self,
+        gradients: list[tf.Tensor],
+        variables: list[tf.Variable],
+    ) -> dict[str, float]:
+        """Compute gradient L2 norms grouped by layer (internal helper).
+
+        Uses RMS aggregation for layers with multiple variables.
+
+        Args:
+            gradients: List of gradient tensors.
+            variables: Corresponding list of trainable variables.
+
+        Returns:
+            Dictionary mapping layer names to gradient L2 norms.
+        """
+        layer_norms: dict[str, list[float]] = {}
+
+        for grad, var in zip(gradients, variables):
+            if grad is None:
+                continue
+
+            # Extract layer name from variable name
+            # Format: "layer_name/kernel:0" or "model/layer_name/weight:0"
+            name_parts = var.name.split("/")
+            if len(name_parts) >= 2:
+                layer_name = name_parts[-2]
+            else:
+                layer_name = name_parts[0].split(":")[0]
+
+            # Compute L2 norm
+            norm = float(tf.norm(grad, ord=2).numpy())
+
+            if layer_name not in layer_norms:
+                layer_norms[layer_name] = []
+            layer_norms[layer_name].append(norm)
+
+        # Aggregate norms per layer (RMS of individual norms)
+        import numpy as np
+        return {
+            layer: np.sqrt(np.mean([n**2 for n in norms]))
+            for layer, norms in layer_norms.items()
+        }
+
+    def get_active_mitigations(self) -> dict[str, LayerMitigation]:
+        """Get currently active layer mitigations.
+
+        Returns:
+            Dictionary mapping layer names to their active mitigation configs.
+        """
+        return dict(self._active_mitigations)
+
+    def get_lr_scale_factor(self) -> float:
+        """Get the current learning rate scale factor for barren plateau recovery.
+
+        If any layer has an active mitigation, returns the maximum scale factor.
+        Otherwise returns 1.0 (no scaling).
+
+        Returns:
+            Learning rate scale factor (1.0 if no active mitigations).
+        """
+        if not self._active_mitigations and not self._global_barren_detected:
+            return 1.0
+
+        if self._global_barren_detected and not self._active_mitigations:
+            return config.BARREN_PLATEAU_RECOVERY_LR_SCALE
+
+        if self._active_mitigations:
+            return max(m.lr_scale_factor for m in self._active_mitigations.values())
+
+        return 1.0
 
     def _is_quantum_layer(self, layer_name: str) -> bool:
         """Check if a layer name matches quantum layer patterns."""
@@ -397,12 +654,17 @@ class BarrenPlateauMonitor:
         """Reset all monitoring state.
 
         Call this when starting a new training run or after significant
-        model changes.
+        model changes. Resets both per-layer and global tracking state.
         """
+        # Per-layer state
         self._gradient_history.clear()
         self._active_mitigations.clear()
         self._detection_counts.clear()
         self._step_counter = 0
+        # Global state
+        self._global_norm_history.clear()
+        self._global_barren_detected = False
+        self._global_detection_count = 0
         logger.info("[BARREN PLATEAU] Monitor state reset")
 
 

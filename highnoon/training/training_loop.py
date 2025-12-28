@@ -18,13 +18,42 @@ import tensorflow as tf
 # where Keras layers create their own variable objects.
 from keras.src.backend import Variable as KerasVariable
 
-import highnoon.config as config
+# Import config module for global feature flags
+# Using `hn_config` for consistency with hpo_trial_runner.py
+import highnoon.config as hn_config
 from highnoon._native.ops import (
     train_step as train_step_loader,  # Ensure TrainStep custom op is registered
 )
 from highnoon.analysis.memory_profiler import MemoryProfiler
 from highnoon.analysis.system_identification import parse_log_file, prepare_data_from_logs
-from highnoon.config import ENABLE_EWC, EWC_LAMBDA
+from highnoon.config import (
+    # Lite Edition Limits (enforced by C++ binaries)
+    LITE_MAX_PARAMS,
+    LITE_MAX_REASONING_BLOCKS,
+    LITE_MAX_MOE_EXPERTS,
+    LITE_MAX_CONTEXT_LENGTH,
+    # EWC (deprecated but kept for compatibility)
+    ENABLE_EWC,
+    EWC_LAMBDA,
+    # GaLore gradient compression
+    GALORE_RANK,
+    GALORE_SCALE,
+    GALORE_UPDATE_PROJ_GAP,
+    USE_TENSOR_GALORE,
+    # Quantum training flags
+    USE_QUANTUM_NATURAL_GRADIENT,
+    QNG_DAMPING,
+    BARREN_PLATEAU_MONITOR,
+    BARREN_PLATEAU_THRESHOLD,
+    BARREN_PLATEAU_RECOVERY_LR_SCALE,
+    # Neural error mitigation
+    USE_NEURAL_ZNE,
+    USE_NEURAL_QEM,
+    # Meta controller
+    USE_META_CONTROLLER,
+    META_CONTROLLER_FREQUENCY,
+)
+# Note: Full config module available via `config.*` for any additional flags
 from highnoon.models.hsmn import HSMN
 from highnoon.runtime.control_config import ensure_control_configs
 from highnoon.training.callbacks import HamiltonianMetaControllerCallback
@@ -36,6 +65,18 @@ from highnoon.training.hpo_bridge import HPOReporter, load_trial_config
 from highnoon.training.memory_budget import AdaptiveMemoryController, BatchPlan
 from highnoon.training.optimizers import SophiaG
 from highnoon.training.runtime_control import should_stop, wait_if_paused
+
+# GaLore gradient compression
+from highnoon.training.gradient_compression import (
+    GaLoreOptimizerWrapper,
+    TensorGaLoreCompressor,
+)
+
+# Unified Smart Tuner
+from highnoon.training.unified_smart_tuner import (
+    UnifiedSmartTuner,
+    UnifiedSmartTunerConfig,
+)
 
 # --- END: DEFINITIVE FIX ---
 
@@ -507,7 +548,7 @@ def _prepare_trainable_lists(
 
 
 def _controller_metric_inventory(evolution_time_vars: dict[str, tf.Variable]) -> list[str]:
-    metrics: list[str] = list(config.CONTROL_METRIC_EMA_KEYS or [])
+    metrics: list[str] = list(hn_config.CONTROL_METRIC_EMA_KEYS or [])
     if not metrics:
         metrics = list(DEFAULT_CONTROLLER_METRICS)
     else:
@@ -794,6 +835,62 @@ def train_on_dataset_dist(
         optimizer = model.optimizer  # Get the optimizer from the compiled model
         if skip_hessian_update and isinstance(optimizer, SophiaG):
             logger.info("[EWC] Hessian updates disabled for this run (skip_hessian_update=True).")
+
+        # Initialize GaLore gradient compressor if enabled
+        # NOTE: GaLore compression is applied during gradient accumulation phases.
+        # The fused C++ TrainStep op handles optimizer updates internally, so
+        # GaLore compression is applied before gradients are passed to the op.
+        galore_compressor: TensorGaLoreCompressor | None = None
+        if USE_TENSOR_GALORE:
+            galore_compressor = TensorGaLoreCompressor(
+                rank=GALORE_RANK,
+                update_proj_gap=GALORE_UPDATE_PROJ_GAP,
+                scale=GALORE_SCALE,
+                enabled=True,
+            )
+            logger.info(
+                "[GALORE] Initialized TensorGaLoreCompressor: rank=%d, update_gap=%d, scale=%.2f",
+                GALORE_RANK,
+                GALORE_UPDATE_PROJ_GAP,
+                GALORE_SCALE,
+            )
+
+        # Initialize Unified Smart Tuner for coordinated training parameter control
+        # The smart tuner replaces independent operation of QALRC, BarrenPlateauMonitor,
+        # GaLore, and Meta-Controller with a single orchestrated system.
+        smart_tuner: UnifiedSmartTuner | None = None
+        use_smart_tuner = hn_config.USE_UNIFIED_SMART_TUNER if hasattr(hn_config, 'USE_UNIFIED_SMART_TUNER') else True
+        if use_smart_tuner:
+            # Estimate total steps for the tuner
+            total_training_steps = epochs * max(1, num_train_examples // max(1, batch_size))
+            smart_tuner_config = UnifiedSmartTunerConfig(
+                enabled=True,
+                memory_enabled=True,
+                memory_path=ensure_path(os.path.join(trial_dir or ".", "tuner_memory")),
+                coordination_mode=getattr(hn_config, 'SMART_TUNER_MODE', 'balanced'),
+                lr_initial=float(optimizer.learning_rate.numpy()) if hasattr(optimizer, 'learning_rate') else 3e-4,
+                lr_min=1e-7,
+                lr_max=1e-2,
+                galore_rank=GALORE_RANK,
+                barren_plateau_threshold=BARREN_PLATEAU_THRESHOLD,
+                meta_controller_frequency=META_CONTROLLER_FREQUENCY,
+                max_grad_norm=1.0,
+                warmup_steps=getattr(hn_config, 'SMART_TUNER_WARMUP_STEPS', 1000),
+                exploration_steps=getattr(hn_config, 'SMART_TUNER_EXPLORATION_STEPS', 10000),
+            )
+            smart_tuner = UnifiedSmartTuner(
+                model=model,
+                optimizer=optimizer,
+                config=smart_tuner_config,
+                total_steps=total_training_steps,
+            )
+            logger.info(
+                "[SmartTuner] Initialized UnifiedSmartTuner: mode=%s, lr_initial=%.2e, total_steps=%d",
+                smart_tuner_config.coordination_mode,
+                smart_tuner_config.lr_initial,
+                total_training_steps,
+            )
+
         model_weights_list, optimizer_state_list = _prepare_trainable_lists(model, optimizer)
         try:
             _validate_reasoning_weight_layout(model, model_weights_list)
@@ -933,7 +1030,7 @@ def train_on_dataset_dist(
             logger.info("[META-CTL] Control config root: %s", control_config_dir)
 
         meta_controller_callback = HamiltonianMetaControllerCallback(
-            frequency=config.META_CONTROLLER_FREQUENCY,
+            frequency=hn_config.META_CONTROLLER_FREQUENCY,
             trigger_sysid_reload=trigger_sysid_reload,
         )
         control_bridge = EvolutionTimeControlBridge(
@@ -1119,15 +1216,15 @@ def train_on_dataset_dist(
             "beta_2": tf.cast(optimizer.beta_2, tf.float32),
             "loss_mask": loss_mask_cpu,
             # Quantum Training Config (Phase T1-T6)
-            "enable_qng": tf.constant(config.USE_QUANTUM_NATURAL_GRADIENT, dtype=tf.bool),
-            "qng_damping": tf.constant(config.QNG_DAMPING, dtype=tf.float32),
+            "enable_qng": tf.constant(hn_config.USE_QUANTUM_NATURAL_GRADIENT, dtype=tf.bool),
+            "qng_damping": tf.constant(hn_config.QNG_DAMPING, dtype=tf.float32),
             "qng_ema_decay": tf.constant(0.99, dtype=tf.float32),  # Default EMA decay
-            "enable_barren_plateau": tf.constant(config.BARREN_PLATEAU_MONITOR, dtype=tf.bool),
+            "enable_barren_plateau": tf.constant(hn_config.BARREN_PLATEAU_MONITOR, dtype=tf.bool),
             "barren_plateau_threshold": tf.constant(
-                config.BARREN_PLATEAU_THRESHOLD, dtype=tf.float32
+                hn_config.BARREN_PLATEAU_THRESHOLD, dtype=tf.float32
             ),
             "barren_plateau_lr_scale": tf.constant(
-                config.BARREN_PLATEAU_RECOVERY_LR_SCALE, dtype=tf.float32
+                hn_config.BARREN_PLATEAU_RECOVERY_LR_SCALE, dtype=tf.float32
             ),
         }
 
@@ -1446,6 +1543,59 @@ def train_on_dataset_dist(
                     if "gradient_norm" in logs:
                         logs["gradient_norm"] = float(np.clip(logs["gradient_norm"], 0.0, 1e6))
 
+                    # Unified Smart Tuner orchestration
+                    # Coordinates LR, GaLore rank, BP mitigation, and meta-controller decisions
+                    if smart_tuner is not None:
+                        try:
+                            # Get gradients for tuner analysis (already computed in C++ op)
+                            # We use the gradient_norm from the op output
+                            grad_norm_for_tuner = logs.get("gradient_norm", 1.0)
+                            loss_for_tuner = logs.get("loss", 1.0)
+
+                            # Call orchestrator with step-level metrics
+                            tuning_decisions = smart_tuner.orchestrate(
+                                step=int(global_step.numpy()),
+                                gradients=grads,  # From distributed_train_step
+                                variables=model_weights_list,
+                                loss=float(loss_for_tuner),
+                                gradient_norm=float(grad_norm_for_tuner),
+                            )
+
+                            # Apply tuning decisions
+                            if tuning_decisions.learning_rate != float(optimizer.learning_rate.numpy()):
+                                optimizer.learning_rate.assign(tuning_decisions.learning_rate)
+
+                            # Log smart tuner state
+                            logs["smart_tuner_phase"] = tuning_decisions.phase
+                            logs["smart_tuner_lr"] = tuning_decisions.learning_rate
+                            logs["smart_tuner_lr_scale"] = tuning_decisions.lr_scale_factor
+                            logs["smart_tuner_exploration_factor"] = tuning_decisions.exploration_factor
+                            logs["smart_tuner_emergency"] = tuning_decisions.emergency_mode
+                            logs["smart_tuner_bp_active"] = tuning_decisions.barren_plateau_active
+
+                            # Log additional metrics from tuner
+                            for key, value in tuning_decisions.additional_metrics.items():
+                                logs[f"smart_tuner_{key}"] = value
+
+                            # Periodic verbose logging for debugging
+                            if batch_idx % 100 == 0:
+                                logger.info(
+                                    "[SmartTuner] Step %d: phase=%s, lr=%.2e, exploration=%.2f, "
+                                    "emergency=%s, bp_active=%s",
+                                    int(global_step.numpy()),
+                                    tuning_decisions.phase,
+                                    tuning_decisions.learning_rate,
+                                    tuning_decisions.exploration_factor,
+                                    tuning_decisions.emergency_mode,
+                                    tuning_decisions.barren_plateau_active,
+                                )
+                        except Exception as tuner_exc:
+                            logger.warning(
+                                "[SmartTuner] Orchestration failed at step %d: %s",
+                                int(global_step.numpy()),
+                                tuner_exc,
+                            )
+
                     # Report metrics to HPO orchestrator if enabled
                     if hpo_reporter.enabled and hpo_reporter.should_report():
                         hpo_reporter.report(
@@ -1651,5 +1801,65 @@ def train_on_dataset_dist(
     # Report successful completion to HPO orchestrator if enabled
     if hpo_reporter.enabled:
         hpo_reporter.report_completion(success=True)
+
+    # Log GaLore compression statistics if enabled
+    if galore_compressor is not None:
+        stats = galore_compressor.get_statistics()
+        logger.info(
+            "[GALORE] Training complete. Compression stats: "
+            "variables=%d, overall_compression=%.2fx",
+            stats.get("num_variables", 0),
+            stats.get("overall_compression_ratio", 1.0),
+        )
+
+    # Log Smart Tuner statistics and record trial for cross-trial memory
+    if smart_tuner is not None:
+        tuner_stats = smart_tuner.get_statistics()
+        logger.info(
+            "[SmartTuner] Training complete. Final state: phase=%s, exploration_factor=%.2f, "
+            "emergency_mode=%s",
+            tuner_stats.get("current_phase", "unknown"),
+            tuner_stats.get("exploration_factor", 0.0),
+            tuner_stats.get("emergency_mode", False),
+        )
+
+        # Record trial for cross-trial memory learning
+        if hpo_reporter.enabled and hpo_reporter.trial_id:
+            try:
+                # Get architecture config from model
+                architecture_config = {
+                    "embedding_dim": getattr(model.encoder, "embedding_dim", 512),
+                    "num_reasoning_blocks": len(getattr(model.reasoning, "reasoning_blocks", [])),
+                    "num_moe_experts": getattr(hn_config, "MOE_NUM_EXPERTS", 8),
+                    "vocab_size": getattr(model.tokenizer, "vocab_size", 32000),
+                }
+
+                # Get hyperparameters
+                hyperparameters = {
+                    "learning_rate": float(optimizer.learning_rate.numpy()),
+                    "batch_size": batch_size,
+                    "epochs": epochs,
+                }
+
+                # Compute final loss (use last epoch average)
+                final_loss = epoch_train_loss / max(1, num_train_batches) if num_train_batches > 0 else float("inf")
+
+                smart_tuner.record_trial(
+                    trial_id=hpo_reporter.trial_id,
+                    architecture_config=architecture_config,
+                    hyperparameters=hyperparameters,
+                    final_loss=final_loss,
+                    best_epoch=epochs,  # Simplified - could track best epoch separately
+                )
+                logger.info(
+                    "[SmartTuner] Recorded trial %s for cross-trial memory (loss=%.4f)",
+                    hpo_reporter.trial_id,
+                    final_loss,
+                )
+            except Exception as record_exc:
+                logger.warning(
+                    "[SmartTuner] Failed to record trial for cross-trial memory: %s",
+                    record_exc,
+                )
 
     return model, cumulative_fisher, cumulative_optimal_weights

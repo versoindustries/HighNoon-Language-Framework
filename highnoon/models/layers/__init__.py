@@ -74,6 +74,18 @@ try:
 except ImportError:
     pass
 
+# Phase 48: Hyperdimensional Quantum Embeddings - import conditionally
+HyperdimensionalEmbedding: type | None = None
+DualPathEmbedding: type | None = None
+
+try:
+    from highnoon.models.layers.hyperdimensional_layer import (
+        HyperdimensionalEmbedding,
+        DualPathEmbedding,
+    )
+except ImportError:
+    pass
+
 __all__ = [
     "ContextualGatingCollapse",
     "AdapterLayer",
@@ -93,4 +105,8 @@ __all__ = [
     "create_token_shift_layer",
     # Phase 18: Frontier Memory Innovations
     "LatentKVAttention",
+    # Phase 48: Hyperdimensional Quantum Embeddings
+    "HyperdimensionalEmbedding",
+    "DualPathEmbedding",
 ]
+

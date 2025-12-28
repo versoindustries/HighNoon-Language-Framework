@@ -109,6 +109,9 @@ class SweepConfig:
     quality_eval_samples: int = 50
     sweep_id: str = ""
 
+    # Convergence-based stopping (runs until convergence detected)
+    auto_stop_on_convergence: bool = True
+
     # Additional model config passthrough
     model_config: dict[str, Any] = field(default_factory=dict)
     search_space: dict[str, Any] = field(default_factory=dict)
@@ -144,6 +147,7 @@ class TrialResult:
     epochs_completed: int = 0
     wall_time_seconds: float = 0.0
     memory_peak_mb: float = 0.0
+    throughput_tokens_per_sec: float = 0.0  # Training/generation throughput
     error: str | None = None
     composite_score: float = 0.0
     is_on_pareto_frontier: bool = False
@@ -165,6 +169,7 @@ class TrialResult:
             "wall_time_seconds": self.wall_time_seconds,
             "memory_peak_mb": self.memory_peak_mb,
             "memory_mb": self.memory_peak_mb,  # Alias for frontend compatibility
+            "throughput_tokens_per_sec": self.throughput_tokens_per_sec,
             "error": self.error,
             "composite_score": self.composite_score,
             "is_on_pareto_frontier": self.is_on_pareto_frontier,
@@ -574,6 +579,7 @@ class SweepExecutor:
         # Trial tracking
         self.pending_trials: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self.running_trials: dict[str, asyncio.Task[TrialResult]] = {}
+        self.running_trial_configs: dict[str, dict[str, Any]] = {}  # Track configs for API
         self.completed_trials: list[TrialResult] = []
         self.best_trial: TrialResult | None = None
         self._trial_counter = 0
@@ -669,8 +675,10 @@ class SweepExecutor:
             # Start pending trials up to max_parallel
             while len(self.running_trials) < self.max_parallel and not self.pending_trials.empty():
                 trial_config = await self.pending_trials.get()
+                trial_id = trial_config["trial_id"]
                 task = asyncio.create_task(self._run_trial(trial_config))
-                self.running_trials[trial_config["trial_id"]] = task
+                self.running_trials[trial_id] = task
+                self.running_trial_configs[trial_id] = trial_config  # Track config for API
 
             # Wait for any trial to complete
             if self.running_trials:
@@ -936,8 +944,9 @@ class SweepExecutor:
             result: Completed trial result
         """
         async with self._lock:
-            # Remove from running
+            # Remove from running (both task and config)
             self.running_trials.pop(result.trial_id, None)
+            self.running_trial_configs.pop(result.trial_id, None)
 
             # Add to completed
             self.completed_trials.append(result)

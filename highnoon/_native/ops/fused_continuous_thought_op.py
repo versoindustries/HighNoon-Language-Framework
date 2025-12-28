@@ -24,9 +24,12 @@ reasoning in latent space without generating intermediate tokens.
 
 from __future__ import annotations
 
+import logging
 import tensorflow as tf
 
 from highnoon._native import get_op
+
+logger = logging.getLogger(__name__)
 
 # Load the C++ op library
 _lib = get_op("fused_continuous_thought")
@@ -34,6 +37,7 @@ _fused_continuous_thought_op = getattr(_lib, "FusedContinuousThought", None) if 
 _fused_continuous_thought_grad_op = (
     getattr(_lib, "FusedContinuousThoughtGrad", None) if _lib else None
 )
+
 
 
 def fused_continuous_thought_available() -> bool:
@@ -171,43 +175,27 @@ def fused_continuous_thought(
         )
 
         def grad(grad_output, grad_thought_state):
-            """Compute gradients."""
-            if _fused_continuous_thought_grad_op is not None:
-                grads = _fused_continuous_thought_grad_op(
-                    grad_output=grad_output,
-                    grad_thought_state=grad_thought_state,
-                    x=x_in,
-                    input_norm_gamma=ing,
-                    aggregator_weight=agg_w,
-                    projector_dense1_weight=pd1_w,
-                    projector_dense2_weight=pd2_w,
-                    broadcast_weight=bc_w,
-                    gate_weight=g_w,
-                    num_thought_steps=num_thought_steps,
-                    use_gating=use_gating,
+            """Compute gradients using C++ grad op."""
+            if _fused_continuous_thought_grad_op is None:
+                raise RuntimeError(
+                    "FusedContinuousThoughtGrad C++ op not available. Build with: "
+                    "cd highnoon/_native && ./build_ops.sh fused_continuous_thought"
                 )
-                return grads
-            else:
-                # Fallback: return zero gradients
-                return (
-                    tf.zeros_like(x_in),
-                    tf.zeros_like(ing),
-                    tf.zeros_like(inb),
-                    tf.zeros_like(agg_w),
-                    tf.zeros_like(agg_b),
-                    tf.zeros_like(png),
-                    tf.zeros_like(pnb),
-                    tf.zeros_like(pd1_w),
-                    tf.zeros_like(pd1_b),
-                    tf.zeros_like(pd2_w),
-                    tf.zeros_like(pd2_b),
-                    tf.zeros_like(bc_w),
-                    tf.zeros_like(bc_b),
-                    tf.zeros_like(g_w),
-                    tf.zeros_like(g_b),
-                    tf.zeros_like(ong),
-                    tf.zeros_like(onb),
-                )
+
+            grads = _fused_continuous_thought_grad_op(
+                grad_output=grad_output,
+                grad_thought_state=grad_thought_state,
+                x=x_in,
+                input_norm_gamma=ing,
+                aggregator_weight=agg_w,
+                projector_dense1_weight=pd1_w,
+                projector_dense2_weight=pd2_w,
+                broadcast_weight=bc_w,
+                gate_weight=g_w,
+                num_thought_steps=num_thought_steps,
+                use_gating=use_gating,
+            )
+            return grads
 
         return (output, thought_state), grad
 

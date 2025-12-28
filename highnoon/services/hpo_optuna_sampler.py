@@ -46,6 +46,16 @@ DEFAULT_SEARCH_SPACE = {
     "superposition_dim": {"type": "categorical", "choices": [1, 2]},
     # Optimizer selection
     "optimizer": {"type": "categorical", "choices": ["sophiag", "adamw", "adam"]},
+    # ==========================================================================
+    # QUANTUM TOKENIZATION PIPELINE - Vocab Tuning (Phase 48+)
+    # ==========================================================================
+    # These parameters control how the IntelligentVocabController learns from
+    # the curriculum data. The optimal settings depend on your corpus.
+    # Lower min_freq = more n-grams learned = larger vocab = more expressiveness
+    # Higher min_freq = fewer n-grams = smaller vocab = faster training
+    "vocab_min_ngram_freq": {"type": "categorical", "choices": [5, 10, 20, 50, 100]},
+    "vocab_max_ngram_size": {"type": "categorical", "choices": [3, 4, 5, 6]},
+    "vocab_sample_size": {"type": "categorical", "choices": [5000, 10000, 20000, 50000]},
 }
 
 # Check if optuna is available

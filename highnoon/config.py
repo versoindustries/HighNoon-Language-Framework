@@ -123,6 +123,22 @@ META_CONTROLLER_FREQUENCY = 10  # Batches between meta-controller updates
 META_CONTROLLER_SYSID_INTERVAL = 850  # Legacy: Full N4SID interval (kept for compatibility)
 
 # =============================================================================
+# UNIFIED SMART TUNER (Enterprise Training Parameter Controller)
+# =============================================================================
+# The Unified Smart Tuner replaces independent operation of QALRC,
+# BarrenPlateauMonitor, GaLore, and Meta-Controller with a single orchestrated
+# system. It provides cross-component awareness, global exploration/exploitation
+# mode, and optional cross-trial memory for learning from previous HPO sweeps.
+# See Smart_Tuner_Upgrade.md for full specification.
+
+USE_UNIFIED_SMART_TUNER: bool = True  # Master switch for unified smart tuner
+SMART_TUNER_MODE: str = "balanced"  # Coordination mode: "aggressive", "balanced", "conservative"
+SMART_TUNER_WARMUP_STEPS: int = 1000  # Steps in warmup phase
+SMART_TUNER_EXPLORATION_STEPS: int = 10000  # Steps in exploration phase
+SMART_TUNER_MEMORY_ENABLED: bool = True  # Enable cross-trial memory learning
+SMART_TUNER_EMERGENCY_GRAD_THRESHOLD: float = 1e6  # Gradient norm triggering emergency mode
+
+# =============================================================================
 # QUANTUM-ENHANCED CONTROL SYSTEM (Phase 2.1)
 # =============================================================================
 # These parameters control the quantum-enhanced control components that replace
@@ -358,6 +374,106 @@ USE_NEURAL_ZNE: bool = True  # Enable neural ZNE
 NEURAL_ZNE_HIDDEN_DIM: int = 128  # Hidden dimension for ZNE MLP
 NEURAL_ZNE_TRAIN_SAMPLES: int = 1000  # Training samples for ZNE model
 
+# Phase 129: ML-Enhanced Quantum Error Mitigation (Neural QEM)
+# Extends Neural ZNE with learned error models for quantum circuit outputs
+USE_NEURAL_QEM: bool = True  # Enable ML-enhanced quantum error mitigation
+NEURAL_QEM_NOISE_LEVELS: tuple[float, ...] = (1.0, 1.5, 2.0)  # Noise levels for extrapolation
+NEURAL_QEM_HIDDEN_DIM: int = 128  # Error model hidden dimension
+NEURAL_QEM_LEARNING_RATE: float = 1e-4  # Error model learning rate
+
+# =============================================================================
+# QUANTUM ENHANCEMENT INTEGRATIONS (Phase 130+)
+# =============================================================================
+# These flags enable synergistic connections between quantum components.
+
+# Phase 130.1: Auto Neural QEM Wrapping
+# Automatically apply Neural QEM to all quantum layer outputs
+USE_AUTO_NEURAL_QEM: bool = True  # Auto-apply Neural QEM to VQC, QASA, Q-SSM outputs
+
+# Phase 130.2: GaLore-VQC Gradient Awareness
+# Use VQC gradient statistics to inform GaLore rank allocation
+GALORE_VQC_AWARE: bool = True  # Use VQC gradient variance for rank allocation
+GALORE_VQC_VARIANCE_BOOST: float = 1.5  # Rank multiplier for high-variance VQC layers
+
+# Phase 130.3: Floquet-VQC Modulation
+# Floquet phase modulates VQC entanglement strengths
+USE_FLOQUET_VQC_MODULATION: bool = True  # Floquet phase modulates VQC circuits
+
+# Phase 130.4: COCONUT-VQC Amplitude Selection
+# Use VQC-derived amplitudes for COCONUT path weighting
+COCONUT_USE_VQC_AMPLITUDES: bool = True  # Use VQC for path weighting instead of softmax
+
+# Phase 130.5: Hopfield-QuantumBus Integration
+# Publish Hopfield energy scores to quantum bus for downstream blocks
+HOPFIELD_PUBLISH_TO_BUS: bool = True  # Publish energy scores to quantum bus
+
+# Phase 130.6: QASA-MPS Entanglement Gating
+# Gate QASA quantum contribution by MPS entanglement entropy
+QASA_MPS_GATING: bool = True  # Gate QASA by MPS entanglement entropy
+QASA_MPS_ENTROPY_THRESHOLD: float = 0.5  # Min entropy for full quantum contribution
+
+# =============================================================================
+# QUANTUM SYNERGY INTEGRATIONS (Phase 131+)
+# =============================================================================
+# These flags enable additional synergistic connections between quantum components.
+
+# S1: QMamba ↔ Q-SSM Gating Unification
+# Share VQC gates between QMamba superposition and Q-SSM gating decisions
+USE_UNIFIED_QSSM_GATING: bool = True  # Enable unified Q-SSM/QMamba gating
+UNIFIED_QSSM_SHARE_VQC: bool = True   # Share VQC parameters between components
+
+# S2: QMamba Amplitudes → COCONUT Path Weighting
+# Feed QMamba learned amplitudes into COCONUT BFS path selection
+COCONUT_USE_QMAMBA_AMPLITUDES: bool = True  # Use QMamba amplitudes as path prior
+
+# S3: TimeCrystal Evolution Time → VQC Circuit Depth
+# Dynamically adjust VQC circuit depth based on predicted evolution time
+USE_ADAPTIVE_VQC_DEPTH: bool = True  # Enable evolution-time-dependent VQC depth
+VQC_MIN_LAYERS: int = 1              # Minimum VQC layers
+VQC_MAX_LAYERS: int = 4              # Maximum VQC layers
+
+# S4: Floquet Phase → QMoE Expert Selection
+# Condition QMoE expert selection on Floquet phase for phase-specialist experts
+QMOE_USE_FLOQUET_PHASE: bool = True  # Floquet phase modulates expert routing
+
+# S5: Hopfield Energy → QHPM Crystallization Threshold
+# Use Hopfield retrieval energy to dynamically adjust crystallization threshold
+QHPM_USE_HOPFIELD_THRESHOLD: bool = True  # Dynamic crystallization threshold
+
+# S6: MPS Bond Entropy → Hopfield β (Inverse Temperature)
+# Dynamically adjust Hopfield β based on MPS entanglement entropy
+HOPFIELD_ADAPTIVE_BETA: bool = True   # Context-aware memory retrieval sharpness
+HOPFIELD_BASE_BETA: float = 1.0       # Base inverse temperature
+
+# S7: QASA Attention Weights → QMamba Selective Gating
+# Feed QASA attention patterns as prior for QMamba selectivity
+QMAMBA_USE_QASA_PRIOR: bool = True  # Attention-informed recurrence
+
+# S8: Q-SSM Gate Statistics → Neural ZNE Calibration
+# Use Q-SSM gate variance/entropy as features for Neural ZNE error prediction
+NEURAL_ZNE_USE_QSSM_STATS: bool = True  # Q-SSM statistics for error mitigation
+
+# S9: Quantum Coherence Bus → All VQC Layers
+# Broadcast QCB coherence to VQC layers to modulate entanglement strength
+VQC_USE_COHERENCE_BUS: bool = True  # Global coherence modulates VQC circuits
+
+# S10: Unified Bus Entanglement → TimeCrystal Floquet Period
+# Modulate Floquet drive period based on bus entanglement strength
+DTC_ADAPTIVE_PERIOD: bool = True  # Entanglement-stabilized time crystal
+
+# S11: AlphaQubit Decoder → All Quantum Layer Outputs
+# Unified post-processing with AlphaQubit-style error decoding
+USE_UNIFIED_ALPHAQUBIT: bool = True  # Systematic error correction
+ALPHAQUBIT_ENABLED_LAYERS: tuple[str, ...] = (
+    "VQCLayer", "QMambaBlock", "QASAAttention", "QMoERouter"
+)
+
+# S12: SympFlow Optimizer → QNG Geodesic Integration
+# Combine symplectic momentum with quantum-natural geodesic corrections
+SYMPFLOW_USE_QNG_GEODESIC: bool = True  # Superior optimization landscape navigation
+SYMPFLOW_GEODESIC_WEIGHT: float = 0.1   # Weight for geodesic corrections
+
+
 # =============================================================================
 # QUANTUM CONSTANT-MEMORY TRAINING (Phases 1-7 + 25)
 # =============================================================================
@@ -433,6 +549,13 @@ DTC_DISORDER_W: float = 0.5  # MBL disorder strength
 DTC_PI_PULSE_ERROR: float = 0.01  # π-pulse imperfection ε
 DTC_USE_PRETHERMAL: bool = True  # Enable prethermal DTC regime
 DTC_NUM_CYCLES: int = 1  # Floquet cycles per evolution step
+
+# Phase 128: Floquet Time Crystal Evolution Optimization
+# Enhances TimeCrystalBlock with Floquet-engineered periodic driving for stability
+USE_FLOQUET_EVOLUTION: bool = True  # Enable Floquet-engineered Hamiltonian evolution
+FLOQUET_DRIVE_AMPLITUDE: float = 0.1  # Periodic drive amplitude for H(t) = H_0 + V(t)
+FLOQUET_USE_MBL: bool = True  # Enable Many-Body Localization for error mitigation
+
 
 # Phase 39: Coconut Continuous Latent Reasoning
 # BFS-style thought exploration with quantum reservoir
@@ -547,6 +670,20 @@ USE_QUANTUM_COHERENCE_BUS: bool = True  # Enable QCB for block coordination
 QCB_NUM_NODES: int = 8  # Coherence mesh nodes
 QCB_FIDELITY_THRESHOLD: float = 0.9  # Minimum entanglement fidelity
 
+# =============================================================================
+# PHASE 127: UNIFIED QUANTUM ENTANGLEMENT BUS
+# =============================================================================
+# Unifies existing quantum buses (State Bus, Coherence Bus, Teleport Bus) into
+# a single coherent entanglement-mediated cross-block communication system.
+# Complexity: O(n · d) for entanglement propagation, O(χ² · d) memory with MPS.
+
+USE_UNIFIED_QUANTUM_BUS: bool = True  # Enable unified quantum bus
+UNIFIED_BUS_ADAPTIVE: bool = True  # Enable adaptive entanglement strength learning
+UNIFIED_BUS_MPS_BOND_DIM: int = 32  # MPS bond dimension for entanglement representation
+UNIFIED_BUS_COHERENCE_THRESHOLD: float = 0.85  # Minimum coherence for propagation
+UNIFIED_BUS_ENTANGLEMENT_INIT: float = 0.5  # Initial entanglement strength
+UNIFIED_BUS_PROPAGATION_RATE: float = 0.1  # Entanglement update rate during forward pass
+
 # Pillar 2: Input/Output Enhancement
 # Phase 48: Hyperdimensional Quantum Embeddings
 USE_HYPERDIMENSIONAL_EMBEDDING: bool = True  # Enable HQE holographic bundling
@@ -567,6 +704,50 @@ BORN_RULE_TEMPERATURE: float = 1.0  # Born rule temperature
 # Phase 52: Quantum Fidelity Regularization
 USE_QUANTUM_FIDELITY_LOSS: bool = True  # Enable fidelity loss term
 FIDELITY_LOSS_WEIGHT: float = 0.01  # Fidelity regularization weight
+
+# =============================================================================
+# PHASE 132: QUANTUM UNIFIED LOSS SYSTEM (QULS)
+# =============================================================================
+# Unified loss framework combining primary task loss with quantum-enhanced
+# regularization terms. Replaces standard cross-entropy with multi-component
+# loss leveraging VQC, QCB, MPS, and Hamiltonian layer metrics.
+# Maintains O(n) complexity with VQC-aware adaptive weighting.
+# References:
+#   - Cerezo et al. (2021): Variational Quantum Algorithms
+#   - Lie algebraic theory of barren plateaus (Nature Comm. 2024)
+#   - Symplectic learning for HNNs (J. Comp. Physics 2023)
+
+# Master switch for QULS (if False, uses standard cross-entropy)
+USE_QUANTUM_UNIFIED_LOSS: bool = True
+
+# Primary Loss Configuration
+QULS_PRIMARY_LOSS: str = "sparse_categorical_crossentropy"  # Primary task loss
+QULS_LABEL_SMOOTHING: float = 0.1  # Label smoothing factor (0.0-0.2 typical)
+
+# Quantum Fidelity Loss: Trace fidelity F(p,q) = (Σ√pᵢ√qᵢ)², loss = 1 - F
+QULS_FIDELITY_WEIGHT: float = 0.01  # Initial fidelity weight
+QULS_FIDELITY_TEMPERATURE: float = 1.0  # Born probability temperature
+
+# Born Rule Loss: |ψ|² = p enforcement for VQC outputs
+QULS_BORN_RULE_WEIGHT: float = 0.005  # Born rule penalty weight
+
+# Coherence Preservation: Penalty for coherence drop across blocks
+QULS_COHERENCE_ENABLED: bool = True  # Enable coherence preservation
+QULS_COHERENCE_WEIGHT: float = 0.01  # Coherence loss weight
+
+# Symplectic Conservation: Hamiltonian energy drift penalty
+QULS_SYMPLECTIC_ENABLED: bool = True  # Enable energy conservation
+QULS_SYMPLECTIC_WEIGHT: float = 0.01  # Symplectic loss weight
+
+# Entanglement Regularization: MPS bond entropy regularization
+QULS_ENTANGLEMENT_ENABLED: bool = True  # Enable entanglement regularization
+# Uses existing ENTANGLEMENT_REGULARIZATION and MIN_BOND_ENTROPY
+
+# Adaptive Weighting: VQC-aware dynamic weight adjustment
+QULS_ADAPTIVE_WEIGHTS: bool = True  # Enable adaptive weights
+QULS_WEIGHT_EMA_DECAY: float = 0.99  # EMA decay for weight updates
+QULS_VQC_VARIANCE_BOOST: float = 2.0  # Weight boost for high VQC variance
+QULS_BARREN_PLATEAU_REDUCTION: float = 0.1  # Weight reduction during barren plateau
 
 # Pillar 3: Topological Reasoning
 # Phase 53: QASA Attention
@@ -641,6 +822,17 @@ QCOT_REASONING_STEPS: int = 3  # QCOT reasoning depth
 
 # Phase 80: Waveform Attention
 USE_WAVEFORM_ATTENTION: bool = True  # Enable phase-coherent attention
+
+# =============================================================================
+# PHASE 131: QUANTUM ADAPTIVE LEARNING RATE CONTROLLER (QALRC)
+# =============================================================================
+# Self-tuning learning rate controller using quantum-inspired mechanisms.
+# Replaces static LR schedules with adaptive, entropy-driven LR evolution.
+
+USE_QUANTUM_LR_CONTROLLER: bool = True  # Enable QALRC for HPO trials
+QALRC_ANNEALING_POWER: float = 2.0  # Annealing schedule exponent (higher = faster focus)
+QALRC_TUNNELING_PROBABILITY: float = 0.05  # Base quantum tunneling probability
+QALRC_ENTROPY_SMOOTHING: float = 0.9  # EMA coefficient for gradient entropy
 
 
 # QWT Tokenizer Parameters
@@ -751,6 +943,19 @@ SUPERWORD_MAX_NGRAM: int = 5  # Maximum n-gram size
 
 # Byte-Stream Frontend Configuration
 BYTE_STREAM_STRIDE_FACTOR: int = 4  # Reduces byte-level seq length by 4x
+
+# =============================================================================
+# PHASE 48+: INTELLIGENT VOCAB CONTROLLER (Quantum Tokenization Pipeline)
+# =============================================================================
+# Controls the IntelligentVocabController which automatically determines
+# effective vocabulary size from the tokenizer's learned codebook.
+# Replaces manual vocab_size slider with automatic determination.
+
+USE_INTELLIGENT_VOCAB_CONTROLLER: bool = True  # Enable automatic vocab sizing
+VOCAB_CONTROLLER_AUTO_TRAIN: bool = True  # Auto-train codebook from curriculum data
+VOCAB_CONTROLLER_SAMPLE_SIZE: int = 10000  # Corpus sample size for training
+VOCAB_CONTROLLER_MIN_NGRAM_FREQ: int = 10  # Minimum n-gram frequency
+
 
 
 # =============================================================================
@@ -1176,6 +1381,20 @@ USE_GRPO_TRAINING: bool = True  # Group Relative Policy Optimization (training-o
 GRPO_NUM_SAMPLES: int = 4  # Samples per GRPO optimization step
 USE_CONTINUOUS_THOUGHT: bool = True  # COCONUT continuous thought (latent reasoning)
 CONTINUOUS_THOUGHT_STEPS: int = 4  # Number of thought iteration steps
+
+# Phase 87: Enhanced CoCoNut Multi-Path Exploration
+# Multi-path BFS exploration with Grover-inspired amplitude scoring
+# Edition limits enforced at runtime: Lite max 8 paths, Pro/Enterprise unlimited
+COCONUT_NUM_PATHS: int = 2  # Number of parallel thought paths (default 2)
+COCONUT_PRUNE_THRESHOLD: float = 0.1  # Amplitude threshold for path pruning
+COCONUT_COLLAPSE_THRESHOLD: float = 0.8  # Confidence for BFS→DFS collapse
+COCONUT_CRYSTALLIZE_THRESHOLD: float = 0.9  # Threshold to freeze reasoning path
+COCONUT_MAX_CRYSTALS: int = 64  # Max crystallized reasoning primitives (LRU eviction)
+# HPO-tunable ranges:
+#   - COCONUT_NUM_PATHS: Lite [1, 8], Pro [1, 32]
+#   - COCONUT_COLLAPSE_THRESHOLD: [0.5, 0.95]
+#   - COCONUT_CRYSTALLIZE_THRESHOLD: [0.7, 0.99]
+
 USE_SELF_CONSISTENCY: bool = True  # Self-consistency verification (confidence scoring)
 CONSISTENCY_THRESHOLD: float = 0.8  # Verification agreement threshold
 
@@ -1552,3 +1771,77 @@ def get_preset_config(name: str) -> Config:
         raise ValueError(f"Unknown preset '{name}'. Available presets: {list(presets.keys())}")
 
     return presets[name]
+
+
+# =============================================================================
+# TOKENIZER FACTORY
+# =============================================================================
+
+# Cached tokenizer instance (singleton pattern)
+_TOKENIZER_INSTANCE = None
+
+
+def get_tokenizer(
+    vocab_size: int | None = None,
+    max_length: int | None = None,
+    force_new: bool = False,
+):
+    """Get or create the global tokenizer instance.
+
+    Factory function that returns a configured QWTTextTokenizer. Uses a
+    singleton pattern by default to ensure consistent tokenization across
+    the framework. The tokenizer can be customized via HPO or manual config.
+
+    Args:
+        vocab_size: Vocabulary size. Defaults to VOCAB_SIZE from config.
+        max_length: Maximum sequence length. Defaults to MAX_CONTEXT_LEN.
+        force_new: If True, create a new instance instead of using cached.
+
+    Returns:
+        Configured QWTTextTokenizer instance.
+
+    Example:
+        >>> tokenizer = get_tokenizer()
+        >>> tokens = tokenizer("Hello, world!", return_tensors="tf")
+        >>> tokenizer.vocab_size
+        60000
+    """
+    global _TOKENIZER_INSTANCE
+
+    # Use defaults from config if not specified
+    vocab_size = vocab_size or VOCAB_SIZE
+    max_length = max_length or MAX_CONTEXT_LEN
+
+    # Return cached instance if available and not forcing new
+    if _TOKENIZER_INSTANCE is not None and not force_new:
+        # Check if cached tokenizer matches requested config
+        if (
+            _TOKENIZER_INSTANCE.vocab_size == vocab_size
+            and _TOKENIZER_INSTANCE.model_max_length == max_length
+        ):
+            return _TOKENIZER_INSTANCE
+
+    # Import here to avoid circular dependency
+    from highnoon.tokenization import QWTTextTokenizer
+
+    _TOKENIZER_INSTANCE = QWTTextTokenizer(
+        vocab_size=vocab_size,
+        model_max_length=max_length,
+        enable_thinking_tokens=True,
+    )
+
+    log.info(
+        f"Created tokenizer: vocab_size={vocab_size}, max_length={max_length}"
+    )
+
+    return _TOKENIZER_INSTANCE
+
+
+def reset_tokenizer():
+    """Reset the cached tokenizer instance.
+
+    Use this when changing tokenizer configuration (e.g., during HPO trials
+    with different vocab sizes).
+    """
+    global _TOKENIZER_INSTANCE
+    _TOKENIZER_INSTANCE = None

@@ -186,72 +186,59 @@ def fused_wlam(
             # These are external layer variables that TensorFlow detected
             var_grads = [tf.zeros_like(v) for v in variables] if variables else []
 
-            if _fused_wlam_grad_op is not None:
-                # Compute cached values for backward pass
-                batch_size = tf.shape(x_in)[0]
-                seq_len = tf.shape(x_in)[1]
-                half_seq = seq_len // 2
-                embed_d = tf.shape(x_in)[2]
+            if _fused_wlam_grad_op is None:
+                raise RuntimeError(
+                    "FusedWLAMGrad C++ op not available. Build with: "
+                    "cd highnoon/_native && ./build_ops.sh"
+                )
 
-                # Cache low/high freq and residual
-                # For simplified backward, we use zeros as placeholders
-                low_freq_cache = tf.zeros([batch_size, half_seq, embed_d], dtype=tf.float32)
-                high_freq_cache = tf.zeros([batch_size, half_seq, embed_d], dtype=tf.float32)
-                residual_cache = x_in + output  # Approximate residual
+            # Compute cached values for backward pass
+            batch_size = tf.shape(x_in)[0]
+            seq_len = tf.shape(x_in)[1]
+            half_seq = seq_len // 2
+            embed_d = tf.shape(x_in)[2]
 
-                grads = _fused_wlam_grad_op(
-                    grad_output=grad_output,
-                    x=x_in,
-                    h_filter=h_f,
-                    g_filter=g_f,
-                    h_synth=h_s,
-                    g_synth=g_s,
-                    norm_gamma=gamma,
-                    predict_w=p_w,
-                    update_w=u_w,
-                    low_freq_cache=low_freq_cache,
-                    high_freq_cache=high_freq_cache,
-                    residual_cache=residual_cache,
-                    kernel_size=kernel_size,
-                    num_levels=num_levels,
-                    use_lifting=use_lifting,
-                )
-                # grads: grad_x, grad_h, grad_g, grad_hs, grad_gs,
-                #        grad_gamma, grad_beta, grad_predict, grad_update
-                input_grads = (
-                    grads[0],  # grad_x
-                    grads[1],  # grad_h_filter
-                    grads[2],  # grad_g_filter
-                    grads[3],  # grad_h_synth
-                    grads[4],  # grad_g_synth
-                    grads[5],  # grad_gamma
-                    grads[6],  # grad_beta
-                    grads[7],  # grad_predict_w
-                    grads[8],  # grad_update_w
-                    tf.zeros_like(scat_f),  # grad_scatter_filter
-                    tf.zeros_like(caq),  # grad_cross_attn_q
-                    tf.zeros_like(cak),  # grad_cross_attn_k
-                    tf.zeros_like(cav),  # grad_cross_attn_v
-                    tf.zeros_like(cao),  # grad_cross_attn_o
-                )
-            else:
-                # Fallback: identity gradient for x, zeros for others
-                input_grads = (
-                    grad_output,  # grad_x (identity passthrough)
-                    tf.zeros_like(h_f),
-                    tf.zeros_like(g_f),
-                    tf.zeros_like(h_s),
-                    tf.zeros_like(g_s),
-                    tf.zeros_like(gamma),
-                    tf.zeros_like(beta),
-                    tf.zeros_like(p_w),
-                    tf.zeros_like(u_w),
-                    tf.zeros_like(scat_f),
-                    tf.zeros_like(caq),
-                    tf.zeros_like(cak),
-                    tf.zeros_like(cav),
-                    tf.zeros_like(cao),
-                )
+            # Cache low/high freq and residual
+            # For simplified backward, we use zeros as placeholders
+            low_freq_cache = tf.zeros([batch_size, half_seq, embed_d], dtype=tf.float32)
+            high_freq_cache = tf.zeros([batch_size, half_seq, embed_d], dtype=tf.float32)
+            residual_cache = x_in + output  # Approximate residual
+
+            grads = _fused_wlam_grad_op(
+                grad_output=grad_output,
+                x=x_in,
+                h_filter=h_f,
+                g_filter=g_f,
+                h_synth=h_s,
+                g_synth=g_s,
+                norm_gamma=gamma,
+                predict_w=p_w,
+                update_w=u_w,
+                low_freq_cache=low_freq_cache,
+                high_freq_cache=high_freq_cache,
+                residual_cache=residual_cache,
+                kernel_size=kernel_size,
+                num_levels=num_levels,
+                use_lifting=use_lifting,
+            )
+            # grads: grad_x, grad_h, grad_g, grad_hs, grad_gs,
+            #        grad_gamma, grad_beta, grad_predict, grad_update
+            input_grads = (
+                grads[0],  # grad_x
+                grads[1],  # grad_h_filter
+                grads[2],  # grad_g_filter
+                grads[3],  # grad_h_synth
+                grads[4],  # grad_g_synth
+                grads[5],  # grad_gamma
+                grads[6],  # grad_beta
+                grads[7],  # grad_predict_w
+                grads[8],  # grad_update_w
+                tf.zeros_like(scat_f),  # grad_scatter_filter
+                tf.zeros_like(caq),  # grad_cross_attn_q
+                tf.zeros_like(cak),  # grad_cross_attn_k
+                tf.zeros_like(cav),  # grad_cross_attn_v
+                tf.zeros_like(cao),  # grad_cross_attn_o
+            )
 
             # Return input gradients and variable gradients
             return input_grads, var_grads

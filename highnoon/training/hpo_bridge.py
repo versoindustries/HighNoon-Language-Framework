@@ -78,6 +78,10 @@ class HPOReporter:
             hpo_root = Path(os.getenv("HPO_ROOT", "artifacts/hpo_trials"))
             self._trial_dir = hpo_root / self._trial_id
 
+        # Step tracking for should_report (instance-level)
+        self._report_step_counter = 0
+        self._report_interval = 10  # Report every N steps
+
         if self._trial_dir:
             self._trial_dir.mkdir(parents=True, exist_ok=True)
             self._metrics_file = self._trial_dir / "metrics.jsonl"
@@ -95,6 +99,34 @@ class HPOReporter:
     def enabled(self) -> bool:
         """Whether the reporter is enabled."""
         return self._enabled
+
+    def should_report(self) -> bool:
+        """Check if metrics should be reported this step.
+
+        Returns True every `_report_interval` steps to avoid flooding
+        the HPO orchestrator with too frequent updates.
+
+        Returns:
+            True if metrics should be reported this step.
+        """
+        self._report_step_counter += 1
+        return self._report_step_counter % self._report_interval == 0
+
+    def report_completion(
+        self,
+        success: bool = True,
+        error_message: str | None = None,
+    ) -> None:
+        """Report trial completion (wrapper for complete() method).
+
+        This method provides backward compatibility with training loops
+        that use the report_completion() signature.
+
+        Args:
+            success: Whether the trial completed successfully.
+            error_message: Error message if failed.
+        """
+        self.complete(success=success, error=error_message)
 
     def _sanitize_float(self, value: float | None, name: str = "metric") -> float | None:
         """Sanitize float values, converting NaN/Inf to None and logging warnings.
@@ -224,6 +256,21 @@ class HPOReporter:
         memory_mb = self._sanitize_float(memory_mb, "memory_mb")
         peak_memory_mb = self._sanitize_float(peak_memory_mb, "peak_memory_mb")
 
+        # Diagnostic: warn if loss is suspiciously large (suggests aggregation issue)
+        # For cross-entropy with typical vocab sizes, mean loss should be < 20
+        if loss is not None and loss > 100:
+            logger.warning(
+                f"[HPO Reporter] Suspiciously large loss={loss:.2f} at step {step}. "
+                "Expected cross-entropy should be < 20 for most vocabularies. "
+                "This may indicate loss is being summed instead of averaged."
+            )
+
+        # Compute real-time perplexity estimate from loss
+        # PPL = exp(loss) for cross-entropy loss
+        perplexity = None
+        if loss is not None and loss < 100:  # Only compute for reasonable loss values
+            perplexity = math.exp(min(loss, 20))  # Cap to avoid overflow
+
         # Sanitize any additional kwargs that might contain floats
         sanitized_kwargs = {}
         for key, value in kwargs.items():
@@ -239,6 +286,8 @@ class HPOReporter:
         # Only include loss if it's valid (not NaN/Inf)
         if loss is not None:
             metrics["loss"] = loss
+        if perplexity is not None:
+            metrics["perplexity"] = perplexity
         if gradient_norm is not None:
             metrics["gradient_norm"] = gradient_norm
         if learning_rate is not None:
@@ -259,11 +308,13 @@ class HPOReporter:
 
         # Send to WebUI API for real-time display
         loss_str = f"{loss:.6f}" if loss is not None else "NaN"
+        ppl_str = f", ppl={perplexity:.2f}" if perplexity is not None else ""
         log_entry = {
-            "level": "WARNING" if loss is None else "INFO",
-            "message": f"Step {step}: loss={loss_str}",
+            "level": "WARNING" if loss is None or (loss is not None and loss > 100) else "INFO",
+            "message": f"loss={loss_str}{ppl_str}",
             "step": step,
             "loss": loss,
+            "perplexity": perplexity,
             "gradient_norm": gradient_norm,
             "learning_rate": learning_rate,
             "epoch": epoch,
@@ -275,7 +326,7 @@ class HPOReporter:
         # Log progress locally
         if step % 50 == 0:
             mem_str = f", mem={memory_mb:.0f}MB" if memory_mb else ""
-            logger.info(f"[HPO Reporter] Step {step}: loss={loss_str}{mem_str}")
+            logger.info(f"[HPO Reporter] Step {step}: loss={loss_str}{ppl_str}{mem_str}")
 
     def log(
         self,
@@ -322,6 +373,7 @@ class HPOReporter:
         composite_score: float | None = None,
         memory_peak_mb: float | None = None,
         epochs_completed: int | None = None,
+        throughput_tokens_per_sec: float | None = None,
     ) -> None:
         """Report trial completion.
 
@@ -337,6 +389,7 @@ class HPOReporter:
             composite_score: Multi-objective composite score for ranking
             memory_peak_mb: Peak memory usage during training (for multi-objective optimization)
             epochs_completed: Number of epochs completed before stopping
+            throughput_tokens_per_sec: Generation throughput in tokens/second
         """
         if not self._enabled:
             return
@@ -351,6 +404,9 @@ class HPOReporter:
         )
         composite_score = self._sanitize_float(composite_score, "composite_score")
         memory_peak_mb = self._sanitize_float(memory_peak_mb, "memory_peak_mb")
+        throughput_tokens_per_sec = self._sanitize_float(
+            throughput_tokens_per_sec, "throughput_tokens_per_sec"
+        )
 
         # Write status file if we have a trial directory
         if self._trial_dir:
@@ -368,6 +424,7 @@ class HPOReporter:
                 # Memory and progress tracking
                 "memory_peak_mb": memory_peak_mb,
                 "epochs_completed": epochs_completed,
+                "throughput_tokens_per_sec": throughput_tokens_per_sec,
             }
 
             status_file = self._trial_dir / "status.json"

@@ -31,6 +31,8 @@ Note: RG-LRU and SSD blocks removed in favor of Mamba as primary SSM.
 # Kalman Filter for state estimation (integrated into reasoning stack)
 from highnoon.models.spatial.kalman import KalmanBlock
 from highnoon.models.spatial.mamba import (
+    QMambaBlock,
+    QSSMGatedBlock,
     ReasoningMamba2Block,
     SpatialBlock,
     create_band_diagonal_mask,
@@ -50,6 +52,8 @@ from highnoon.models.spatial.memory_bank import (
 __all__ = [
     "SpatialBlock",
     "ReasoningMamba2Block",
+    "QMambaBlock",
+    "QSSMGatedBlock",
     "create_band_diagonal_mask",
     # Kalman Filter
     "KalmanBlock",
@@ -63,3 +67,4 @@ __all__ = [
     # Phase 18: Adaptive Memory
     "AdaptiveMemory",
 ]
+

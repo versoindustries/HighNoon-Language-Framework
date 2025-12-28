@@ -11,8 +11,9 @@ import asyncio
 import json
 import logging
 import math
+import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -228,11 +229,15 @@ class StartHPORequest(BaseModel):
     """Request body for starting an HPO sweep.
 
     All model configuration values are validated against Lite edition limits:
-    - vocab_size: max 256000 (256K)
     - context_window: max 5000000 (5M)
     - embedding_dim: max 4096
     - num_reasoning_blocks: max 24
     - num_moe_experts: max 12
+
+    NOTE: vocab_size is now DEPRECATED and ignored. The effective vocabulary
+    size is determined automatically by the IntelligentVocabController based
+    on the tokenizer's learned codebook. Use effective_vocab_size (read-only)
+    to see the actual vocabulary size that will be used for training.
 
     Training uses epoch-based budgets with automatic early stopping:
     - HPO trials: 5 epochs per trial by default
@@ -241,9 +246,10 @@ class StartHPORequest(BaseModel):
 
     # HPO sweep settings
     stage: HPOStage = HPOStage.COARSE
-    max_trials: int = Field(default=10, ge=1, le=999)  # Allow up to 999 for Convergence mode
+    max_trials: int | None = Field(default=None, ge=1, le=999)  # None = auto (convergence mode)
+    auto_stop_on_convergence: bool = Field(default=True)  # Run until convergence detected
     epochs_per_trial: int = Field(default=5, ge=1, le=20)  # Replaces steps_per_trial
-    search_strategy: str = "bayesian"  # random, bayesian, hyperband, successive_halving, pbt
+    search_strategy: str = "quantum"  # QAHPO is the default and only strategy
     curriculum_id: str | None = None
 
     # Advanced HPO options
@@ -257,13 +263,31 @@ class StartHPORequest(BaseModel):
     batch_sizes: list[int] = Field(default=[16, 32, 64])
     optimizers: list[str] = Field(default=["sophiag"])
 
-    # Model configuration (expanded vocab support up to 256K)
-    vocab_size: int = Field(default=32000, ge=1000, le=256000)
+    # Model configuration
+    # NOTE: vocab_size is DEPRECATED - kept for backward compatibility only
+    # The actual vocabulary is determined by IntelligentVocabController
+    vocab_size: int | None = Field(
+        default=None,
+        ge=1000,
+        le=256000,
+        deprecated=True,
+        description="DEPRECATED: vocab_size is now automatically determined by the tokenizer",
+    )
     context_window: int = Field(default=4096, ge=128, le=5000000)
     embedding_dim: int | None = Field(default=512)  # Make optional with default
     num_reasoning_blocks: int | None = Field(default=8)  # Make optional with default
     num_moe_experts: int | None = Field(default=8)  # Make optional with default
     position_embedding: str = Field(default="rope")
+
+    # Quantum Tokenization Pipeline (Phase 48) - replaces vocab_size slider
+    use_hyperdimensional_embedding: bool = Field(
+        default=True,
+        description="Use HyperdimensionalEmbedding (12x memory savings vs standard embedding)",
+    )
+    use_quantum_tokenizer: bool = Field(
+        default=True,
+        description="Use IntelligentVocabController for automatic vocab sizing",
+    )
 
     # Parameter budget constraint - HPO will skip architectures exceeding this limit
     # Range: 100M (small efficient models) to 20B (Lite edition max)
@@ -773,6 +797,7 @@ class HPOSweepInfo(BaseModel):
     state: str  # pending, running, completed, cancelled
     max_trials: int
     completed_trials: int = 0
+    pruned_trials: int = 0  # Number of trials pruned by early stopping
     best_trial_id: str | int | None = None
     best_loss: float | None = None
     best_composite_score: float | None = None  # Multi-objective best score
@@ -781,8 +806,12 @@ class HPOSweepInfo(BaseModel):
     best_memory_mb: float | None = None  # Best trial's peak memory usage
     best_hyperparams: dict[str, Any] | None = None
     started_at: str | None = None
+    estimated_completion: str | None = None  # Estimated completion time ISO string
     trials: list[HPOTrialInfo] = Field(default_factory=list)
     model_config_data: HPOModelConfig | None = Field(default=None, alias="model_config")
+    # Search space configuration for frontend display
+    search_space: dict[str, Any] | None = None
+    config: dict[str, Any] | None = None  # Additional sweep config
 
     class Config:
         populate_by_name = True
@@ -1087,74 +1116,149 @@ def create_app(debug: bool = False) -> FastAPI:
     curriculum_stages: list[dict[str, Any]] = []
 
     # ========================================================================
-    # Predefined Curriculum Presets (with HuggingFace dataset mappings)
     # ========================================================================
-    # These are presets that map curriculum IDs to HuggingFace datasets.
+    # Predefined Curriculum Presets (Loaded from JSON file)
+    # ========================================================================
+    # Presets are loaded from artifacts/curriculum_presets.json.
     # When users select a preset curriculum in the UI, this resolves
-    # the curriculum_id to an actual dataset for training.
+    # the curriculum_id to actual datasets for training.
+    # Users can also save custom curricula which are stored separately.
 
-    CURRICULUM_PRESETS: dict[str, dict[str, Any]] = {
-        # Chat / Conversational
-        "chat-conversational": {
-            "name": "Chat / Conversational",
-            "hf_datasets": [
-                "databricks/databricks-dolly-15k",  # Primary conversational dataset
-                "OpenAssistant/oasst1",
-                "stingning/ultrachat",
-            ],
-            "description": "Multi-turn dialogue and conversational AI training",
-        },
-        # Code / Programming
-        "code-programming": {
-            "name": "Code / Programming",
-            "hf_datasets": [
-                "bigcode/the-stack-dedup",
-                "bigcode/starcoderdata",
-                "codeparrot/github-code",
-            ],
-            "description": "Code generation and programming assistance",
-        },
-        # Reasoning / Math
-        "reasoning-math": {
-            "name": "Reasoning / Math",
-            "hf_datasets": [
-                "lighteval/MATH",
-                "gsm8k",
-                "meta-math/MetaMathQA",
-            ],
-            "description": "Mathematical reasoning and problem solving",
-        },
-        # General Language / Web
-        "general-language": {
-            "name": "General Language",
-            "hf_datasets": [
-                "openwebtext",
-                "wikipedia",
-                "c4",
-            ],
-            "description": "General language understanding from web text",
-        },
-        # Instruction Following
-        "instruction-following": {
-            "name": "Instruction Following",
-            "hf_datasets": [
-                "HuggingFaceH4/ultrafeedback_binarized",
-                "Anthropic/hh-rlhf",
-                "teknium/OpenHermes-2.5",
-            ],
-            "description": "Instruction-following and alignment tuning",
-        },
-        # Verso Baseline (comprehensive)
-        "verso-baseline": {
-            "name": "Verso Baseline",
-            "hf_datasets": [
-                "databricks/databricks-dolly-15k",
-                "openwebtext",
-                "bigcode/starcoderdata",
-            ],
-            "description": "Comprehensive baseline curriculum for HighNoon training",
-        },
-    }
+    CURRICULUM_PRESETS_FILE = PROJECT_ROOT / "artifacts" / "curriculum_presets.json"
+
+    def load_curriculum_presets() -> dict[str, dict[str, Any]]:
+        """Load curriculum presets from JSON file.
+        
+        Returns dictionary mapping preset IDs to preset configurations.
+        Falls back to minimal defaults if file not found.
+        """
+        if CURRICULUM_PRESETS_FILE.exists():
+            try:
+                with open(CURRICULUM_PRESETS_FILE, encoding="utf-8") as f:
+                    data = json.load(f)
+                    presets = data.get("presets", {})
+                    print(f"[Curriculum] Loaded {len(presets)} presets from {CURRICULUM_PRESETS_FILE}")
+                    return presets
+            except Exception as e:
+                print(f"[Curriculum] Failed to load presets: {e}")
+        
+        # Fallback defaults if JSON not found
+        return {
+            "verso-baseline": {
+                "name": "Verso Baseline",
+                "hf_datasets": [
+                    "databricks/databricks-dolly-15k",
+                    "openwebtext",
+                    "bigcode/starcoderdata",
+                ],
+                "description": "Comprehensive baseline curriculum for HighNoon training",
+            },
+        }
+
+    def save_curriculum_presets(presets: dict[str, dict[str, Any]]) -> None:
+        """Save curriculum presets to JSON file.
+        
+        This allows dynamic updates to presets when users create new curricula
+        and want to save them as reusable presets.
+        """
+        CURRICULUM_PRESETS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            # Load existing file to preserve metadata
+            existing_data = {}
+            if CURRICULUM_PRESETS_FILE.exists():
+                with open(CURRICULUM_PRESETS_FILE, encoding="utf-8") as f:
+                    existing_data = json.load(f)
+            
+            # Update presets while preserving version info
+            existing_data["presets"] = presets
+            existing_data["last_updated"] = datetime.now().isoformat()[:10]
+            
+            with open(CURRICULUM_PRESETS_FILE, "w", encoding="utf-8") as f:
+                json.dump(existing_data, f, indent=2)
+            print(f"[Curriculum] Saved {len(presets)} presets to {CURRICULUM_PRESETS_FILE}")
+        except Exception as e:
+            print(f"[Curriculum] Failed to save presets: {e}")
+
+    # Load presets on startup
+    CURRICULUM_PRESETS: dict[str, dict[str, Any]] = load_curriculum_presets()
+
+    # ========================================================================
+    # API Routes - Curriculum Presets
+    # ========================================================================
+
+    @app.get("/api/curricula/presets")
+    async def list_curriculum_presets():
+        """List all available curriculum presets from JSON.
+        
+        Returns list of presets with their datasets for HPO page selection.
+        """
+        # Reload from file to get latest
+        presets = load_curriculum_presets()
+        
+        result = []
+        for preset_id, preset_data in presets.items():
+            datasets = preset_data.get("hf_datasets", [])
+            stages = preset_data.get("stages", [])
+            
+            # Count total datasets including from stages
+            total_datasets = set(datasets)
+            for stage in stages:
+                for ds in stage.get("datasets", []):
+                    total_datasets.add(ds)
+            
+            result.append({
+                "id": preset_id,
+                "name": preset_data.get("name", preset_id),
+                "description": preset_data.get("description", ""),
+                "dataset_count": len(total_datasets),
+                "stage_count": len(stages),
+                "hf_datasets": datasets,
+            })
+        
+        return {
+            "presets": result,
+            "total_count": len(result),
+        }
+
+    @app.get("/api/curricula/presets/{preset_id}")
+    async def get_curriculum_preset(preset_id: str):
+        """Get full details of a specific curriculum preset."""
+        presets = load_curriculum_presets()
+        
+        if preset_id not in presets:
+            raise HTTPException(status_code=404, detail=f"Preset '{preset_id}' not found")
+        
+        preset = presets[preset_id]
+        return {
+            "id": preset_id,
+            **preset,
+        }
+
+    @app.post("/api/curricula/presets/{preset_id}")
+    async def save_curriculum_as_preset(preset_id: str, request: dict):
+        """Save a curriculum as a reusable preset.
+        
+        If preset_id already exists, it will be updated.
+        Otherwise, a new preset is created.
+        """
+        presets = load_curriculum_presets()
+        
+        # Create or update preset
+        presets[preset_id] = {
+            "name": request.get("name", preset_id),
+            "description": request.get("description", ""),
+            "hf_datasets": request.get("hf_datasets", []),
+            "stages": request.get("stages", []),
+        }
+        
+        # Save back to file
+        save_curriculum_presets(presets)
+        
+        # Update in-memory presets
+        global CURRICULUM_PRESETS
+        CURRICULUM_PRESETS = presets
+        
+        return {"status": "saved", "preset_id": preset_id}
 
     # ========================================================================
     # API Routes - HuggingFace Hub Integration
@@ -1479,25 +1583,62 @@ def create_app(debug: bool = False) -> FastAPI:
 
         These presets can be selected in the HPO page for quick curriculum selection
         without needing to manually configure stages.
+        
+        Loads from artifacts/curriculum_presets.json which contains 172+ datasets
+        across 9 curriculum presets for frontier-class LLM training.
         """
+        # Reload from file to get latest (supports dynamic updates)
+        current_presets = load_curriculum_presets()
+        
         presets = []
-        for preset_id, preset_data in CURRICULUM_PRESETS.items():
+        for preset_id, preset_data in current_presets.items():
+            # Check if preset has explicit stages (like verso-baseline)
+            json_stages = preset_data.get("stages", [])
+            
+            if json_stages:
+                # Use the explicit staged curriculum from JSON
+                stages = [
+                    {
+                        "name": stage.get("name", f"stage_{i}"),
+                        "display_name": stage.get("name", f"Stage {i + 1}"),
+                        "order": stage.get("order", i + 1),
+                        "epochs": stage.get("epochs", 1),
+                        "description": stage.get("description", ""),
+                        "datasets": [
+                            {"dataset_id": ds, "weight": 1.0}
+                            for ds in stage.get("datasets", [])
+                        ],
+                    }
+                    for i, stage in enumerate(json_stages)
+                ]
+            else:
+                # Fallback: Create single default stage from hf_datasets
+                stages = [
+                    {
+                        "name": "default",
+                        "display_name": preset_data["name"],
+                        "datasets": [
+                            {"dataset_id": ds, "weight": 1.0}
+                            for ds in preset_data.get("hf_datasets", [])
+                        ],
+                    }
+                ]
+            
+            # Count total unique datasets across all stages
+            all_datasets = set(preset_data.get("hf_datasets", []))
+            for stage in json_stages:
+                for ds in stage.get("datasets", []):
+                    all_datasets.add(ds)
+            
             presets.append(
                 {
                     "id": preset_id,
                     "name": preset_data["name"],
                     "description": preset_data.get("description", ""),
                     "hf_datasets": preset_data.get("hf_datasets", []),
-                    "stages": [
-                        {
-                            "name": "default",
-                            "display_name": preset_data["name"],
-                            "datasets": [
-                                {"dataset_id": ds, "weight": 1.0}
-                                for ds in preset_data.get("hf_datasets", [])
-                            ],
-                        }
-                    ],
+                    "dataset_count": len(all_datasets),
+                    "stage_count": len(stages),
+                    "stages": stages,
                 }
             )
         return {"presets": presets}
@@ -2196,16 +2337,24 @@ def create_app(debug: bool = False) -> FastAPI:
         """
         sweep_id = str(uuid.uuid4())[:8]
 
+        # Determine max_trials: if auto_stop_on_convergence is enabled and no explicit max,
+        # use a large value (999) - scheduler will stop on convergence
+        if payload.auto_stop_on_convergence and payload.max_trials is None:
+            effective_max_trials = 999  # Effectively unlimited - stops on convergence
+        else:
+            effective_max_trials = payload.max_trials or 50  # Default to 50 if not specified
+
         sweep = {
             "sweep_id": sweep_id,
             "stage": payload.stage.value,
             "state": "running",
-            "max_trials": payload.max_trials,
+            "max_trials": effective_max_trials,
+            "auto_stop_on_convergence": payload.auto_stop_on_convergence,
             "completed_trials": 0,
             "best_trial_id": None,
             "best_loss": None,
             "best_hyperparams": None,
-            "started_at": datetime.utcnow().isoformat(),
+            "started_at": datetime.now().isoformat(),  # Use local time for frontend compatibility
             "trials": [],
             "config": {
                 "epochs_per_trial": payload.epochs_per_trial,
@@ -2318,11 +2467,12 @@ def create_app(debug: bool = False) -> FastAPI:
             json.dump(model_config, f, indent=2)
 
         # Add initial log entry
+        mode_label = "until convergence" if payload.auto_stop_on_convergence else f"{effective_max_trials} trials"
         hpo_logs[sweep_id] = [
             {
                 "timestamp": datetime.now().isoformat(),
                 "level": "INFO",
-                "message": f"Starting HPO sweep {sweep_id} with {payload.max_trials} trials",
+                "message": f"Starting HPO sweep {sweep_id} ({mode_label})",
                 "step": None,
                 "loss": None,
             }
@@ -2330,16 +2480,17 @@ def create_app(debug: bool = False) -> FastAPI:
 
         # Create SweepConfig for executor
         sweep_config = SweepConfig(
-            max_trials=payload.max_trials,
+            max_trials=effective_max_trials,
             max_parallel=1,  # Sequential execution for now
             epochs_per_trial=payload.epochs_per_trial or 3,
             steps_per_epoch=50,
-            search_strategy=payload.search_strategy or "random",
+            search_strategy=payload.search_strategy or "quantum",
             use_optuna=payload.use_optuna,
             hyperband_eta=payload.hyperband_eta or 3,
             param_budget=payload.param_budget or 1_000_000_000,
             sweep_id=sweep_id,
             model_config=model_config,
+            auto_stop_on_convergence=payload.auto_stop_on_convergence,
         )
 
         # Create scheduler based on strategy
@@ -2389,6 +2540,30 @@ def create_app(debug: bool = False) -> FastAPI:
                     sweep["best_confidence"] = result.best_trial.mean_confidence
                     sweep["best_memory_mb"] = result.best_trial.memory_peak_mb
 
+                # Save complete training config for Training page using HPOTrainingConfig bridge
+                try:
+                    from highnoon.services.hpo_training_bridge import HPOTrainingConfig
+                    
+                    training_config = HPOTrainingConfig.from_hpo_sweep(
+                        {
+                            "sweep_id": sweep_id,
+                            "best_hyperparams": result.best_hyperparams or {},
+                            "model_config": sweep.get("model_config", {}),
+                            "config": sweep.get("config", {}),
+                            "best_loss": result.best_loss,
+                            "best_composite_score": result.best_trial.composite_score if result.best_trial else None,
+                        }
+                    )
+                    
+                    # Save training config for Training page
+                    training_config_path = config_dir / f"sweep_{sweep_id}_training_config.json"
+                    training_config.save(training_config_path)
+                    sweep["training_config_path"] = str(training_config_path)
+                    
+                    print(f"[HPO] Saved training config to {training_config_path}")
+                except Exception as config_err:
+                    print(f"[HPO] Warning: Could not save training config: {config_err}")
+
                 hpo_logs[sweep_id].append(
                     {
                         "timestamp": datetime.now().isoformat(),
@@ -2432,8 +2607,14 @@ def create_app(debug: bool = False) -> FastAPI:
 
         # Get live progress from active executor if running
         executor = active_sweeps.get(sweep_id)
+        pruned_trials = 0
         if executor:
             completed = len(executor.completed_trials)
+            # Count pruned trials (those with error or inf loss)
+            pruned_trials = sum(
+                1 for t in executor.completed_trials
+                if t.error or t.loss == float("inf")
+            )
             best_loss = executor.best_trial.loss if executor.best_trial else None
             best_trial_id = executor.best_trial.trial_id if executor.best_trial else None
             best_composite_score = (
@@ -2444,6 +2625,7 @@ def create_app(debug: bool = False) -> FastAPI:
             best_memory_mb = executor.best_trial.memory_peak_mb if executor.best_trial else None
         else:
             completed = sweep["completed_trials"]
+            pruned_trials = sweep.get("pruned_trials", 0)
             best_loss = sweep.get("best_loss")
             best_trial_id = sweep.get("best_trial_id")
             best_composite_score = sweep.get("best_composite_score")
@@ -2452,18 +2634,50 @@ def create_app(debug: bool = False) -> FastAPI:
             best_memory_mb = sweep.get("best_memory_mb")
 
         # Build model_config from sweep data
+        # NOTE: Use `or` fallbacks instead of `.get(key, default)` because
+        # vocab_size is deprecated and may be explicitly set to None
+        # (.get returns None when key exists with None value)
         sweep_model_config = sweep.get("model_config")
         model_config = None
         if sweep_model_config:
             model_config = HPOModelConfig(
-                vocab_size=sweep_model_config.get("vocab_size", 32000),
-                context_window=sweep_model_config.get("context_window", 4096),
-                embedding_dim=sweep_model_config.get("embedding_dim", 768),
-                num_reasoning_blocks=sweep_model_config.get("num_reasoning_blocks", 6),
-                num_moe_experts=sweep_model_config.get("num_moe_experts", 4),
-                position_embedding=sweep_model_config.get("position_embedding", "rope"),
-                param_budget=sweep_model_config.get("param_budget", 1_000_000_000),
+                vocab_size=sweep_model_config.get("vocab_size") or 32000,
+                context_window=sweep_model_config.get("context_window") or 4096,
+                embedding_dim=sweep_model_config.get("embedding_dim") or 768,
+                num_reasoning_blocks=sweep_model_config.get("num_reasoning_blocks") or 6,
+                num_moe_experts=sweep_model_config.get("num_moe_experts") or 4,
+                position_embedding=sweep_model_config.get("position_embedding") or "rope",
+                param_budget=sweep_model_config.get("param_budget") or 1_000_000_000,
             )
+
+        # Build search_space from sweep config for frontend display
+        sweep_config = sweep.get("config", {})
+        search_space = {
+            "learningRate": {
+                "min": str(sweep_config.get("lr_min", "1e-5")),
+                "max": str(sweep_config.get("lr_max", "1e-3")),
+                "logScale": True,
+                "distribution": "log_uniform",
+            },
+            "batch": {
+                "options": sweep_config.get("batch_sizes", [8, 16]),
+            },
+            "optimizer": {
+                "options": sweep_config.get("optimizers", ["sophiag"]),
+                "selected": sweep_config.get("optimizers", ["sophiag"]),
+            },
+            "searchStrategy": sweep_config.get("search_strategy", "quantum"),
+        }
+
+        # Estimate completion time based on average trial duration
+        estimated_completion = None
+        if executor and completed > 0:
+            elapsed = time.time() - executor._start_time
+            avg_trial_time = elapsed / completed
+            remaining = sweep["max_trials"] - completed
+            est_remaining_seconds = avg_trial_time * remaining
+            est_completion_time = datetime.now() + timedelta(seconds=est_remaining_seconds)
+            estimated_completion = est_completion_time.isoformat()
 
         return HPOSweepInfo(
             sweep_id=sweep["sweep_id"],
@@ -2471,6 +2685,7 @@ def create_app(debug: bool = False) -> FastAPI:
             state=sweep["state"],
             max_trials=sweep["max_trials"],
             completed_trials=completed,
+            pruned_trials=pruned_trials,
             best_trial_id=best_trial_id,
             best_loss=best_loss,
             best_composite_score=best_composite_score,
@@ -2479,13 +2694,20 @@ def create_app(debug: bool = False) -> FastAPI:
             best_memory_mb=best_memory_mb,
             best_hyperparams=sweep.get("best_hyperparams"),
             started_at=sweep.get("started_at"),
+            estimated_completion=estimated_completion,
             trials=[],  # Exclude trials for status endpoint
             model_config=model_config,
+            search_space=search_space,
+            config={
+                "curriculum_id": sweep_config.get("curriculum_id"),
+                "search_strategy": sweep_config.get("search_strategy"),
+                "epochs_per_trial": sweep_config.get("epochs_per_trial"),
+            },
         )
 
     @app.get("/api/hpo/sweep/{sweep_id}/trials")
     async def get_hpo_trials(sweep_id: str):
-        """Get all trials for an HPO sweep."""
+        """Get all trials for an HPO sweep including running trials."""
         sweep = hpo_sweeps.get(sweep_id)
         if not sweep:
             raise HTTPException(status_code=404, detail="HPO sweep not found")
@@ -2493,11 +2715,103 @@ def create_app(debug: bool = False) -> FastAPI:
         # Get live trials from executor if running
         executor = active_sweeps.get(sweep_id)
         if executor:
-            trials = [t.to_dict() for t in executor.completed_trials]
+            trials = []
+            # Add completed trials
+            for t in executor.completed_trials:
+                trial_dict = t.to_dict()
+                trial_dict["status"] = "completed"
+                trials.append(trial_dict)
+
+            # Add running trials with actual config data
+            for trial_id, config in executor.running_trial_configs.items():
+                trials.append({
+                    "trial_id": trial_id,
+                    "status": "running",
+                    "loss": None,
+                    "learning_rate": config.get("learning_rate", 0.0),
+                    "batch_size": config.get("batch_size"),
+                    "optimizer": config.get("optimizer"),
+                    "hyperparams": config,
+                })
         else:
             trials = sweep.get("trials", [])
 
         return {"trials": trials}
+
+    @app.get("/api/training/load_from_sweep/{sweep_id}")
+    async def load_training_config_from_sweep(sweep_id: str):
+        """Load training configuration from completed HPO sweep.
+        
+        Returns the full training configuration saved after HPO sweep completion,
+        including model architecture, tuned hyperparameters, and all feature flags.
+        This enables seamless transition from HPO page to Training page.
+        
+        Args:
+            sweep_id: The HPO sweep ID to load configuration from.
+            
+        Returns:
+            Training configuration dictionary with:
+            - sweep_id: Original sweep ID
+            - model_config: Model architecture parameters
+            - training_config: TrainingEngine-compatible configuration
+            - optimizer_config: Optimizer settings
+            - best_loss: Best loss achieved during HPO
+        """
+        sweep = hpo_sweeps.get(sweep_id)
+        if not sweep:
+            raise HTTPException(status_code=404, detail="HPO sweep not found")
+        
+        # Check if sweep has completed
+        if sweep.get("state") != "completed":
+            raise HTTPException(
+                status_code=400, 
+                detail=f"HPO sweep is not completed (state: {sweep.get('state')})"
+            )
+        
+        # Try to load saved training config
+        training_config_path = sweep.get("training_config_path")
+        if training_config_path:
+            try:
+                from highnoon.services.hpo_training_bridge import HPOTrainingConfig
+                
+                config = HPOTrainingConfig.load(training_config_path)
+                return {
+                    "status": "success",
+                    "sweep_id": sweep_id,
+                    "training_config": config.to_dict(),
+                    "model_build_config": config.to_model_build_config(),
+                    "optimizer_config": config.to_optimizer_config(),
+                    "enterprise_training_config": config.to_enterprise_training_config().__dict__,
+                }
+            except Exception as e:
+                print(f"[Training] Warning: Could not load saved config: {e}")
+        
+        # Fallback: build from sweep data
+        best_hp = sweep.get("best_hyperparams", {})
+        model_config = sweep.get("model_config", {})
+        sweep_config = sweep.get("config", {})
+        
+        return {
+            "status": "success",
+            "sweep_id": sweep_id,
+            "training_config": {
+                "learning_rate": best_hp.get("learning_rate", 1e-4),
+                "batch_size": best_hp.get("batch_size", 32),
+                "optimizer": best_hp.get("optimizer", sweep_config.get("optimizers", ["sophiag"])[0]),
+                "weight_decay": best_hp.get("weight_decay", 0.01),
+                "epochs": sweep_config.get("epochs", 10),
+                "loss_function": best_hp.get("loss_function", "sparse_categorical_crossentropy"),
+                "feature_flags": {k: v for k, v in best_hp.items() if k.startswith("use_")},
+            },
+            "model_build_config": model_config,
+            "optimizer_config": {
+                "learning_rate": best_hp.get("learning_rate", 1e-4),
+                "optimizer": best_hp.get("optimizer", "sophiag"),
+                "weight_decay": best_hp.get("weight_decay", 0.01),
+            },
+            "best_loss": sweep.get("best_loss"),
+            "best_composite_score": sweep.get("best_composite_score"),
+        }
 
     @app.get("/api/hpo/sweep/{sweep_id}/skipped")
     async def get_hpo_skipped_trials(sweep_id: str):
@@ -2854,6 +3168,225 @@ def create_app(debug: bool = False) -> FastAPI:
         if sweep_id in hpo_logs:
             hpo_logs[sweep_id] = []
         return {"status": "cleared"}
+
+    # ========================================================================
+    # API Routes - Unified Smart Tuner
+    # ========================================================================
+
+    # Global smart tuner state (per-sweep)
+    smart_tuner_states: dict[str, dict[str, Any]] = {}
+    TUNER_MEMORY_PATH = PROJECT_ROOT / "artifacts" / "tuner_memory"
+
+    class SmartTunerConfigRequest(BaseModel):
+        """Request body for updating smart tuner configuration."""
+
+        enabled: bool = True
+        memory_enabled: bool = True
+        coordination_mode: str = "balanced"  # "aggressive", "balanced", "conservative"
+        exploration_decay: float = 0.99
+        lr_initial: float = 3e-4
+        lr_min: float = 1e-7
+        lr_max: float = 1e-2
+        galore_rank: int = 32
+        galore_adaptive_rank: bool = True
+        barren_plateau_threshold: float = 1e-6
+        barren_plateau_aggressive: bool = True
+        max_grad_norm: float = 1.0
+        warmup_steps: int = 1000
+        exploration_steps: int = 10000
+        emergency_grad_threshold: float = 1e6
+
+    class SmartTunerStatusResponse(BaseModel):
+        """Response model for smart tuner status."""
+
+        enabled: bool
+        current_phase: str
+        exploration_factor: float
+        emergency_mode: bool
+        global_step: int
+        coordination_mode: str
+        lr_controller_stats: dict = {}
+        bp_monitor_stats: dict = {}
+        galore_stats: dict = {}
+
+    @app.post("/api/smart-tuner/config")
+    async def update_smart_tuner_config(config: SmartTunerConfigRequest):
+        """Update unified smart tuner configuration.
+
+        This configuration applies to new HPO trials and training runs.
+        Active runs will not be affected until restarted.
+        """
+        config_dict = config.model_dump()
+
+        # Store configuration
+        config_file = PROJECT_ROOT / "artifacts" / "smart_tuner_config.json"
+        config_file.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            with open(config_file, "w") as f:
+                json.dump(config_dict, f, indent=2)
+            logger.info("[SmartTuner] Configuration updated: %s", config_dict)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to save config: {e}")
+
+        return {"status": "updated", "config": config_dict}
+
+    @app.get("/api/smart-tuner/config")
+    async def get_smart_tuner_config():
+        """Get current unified smart tuner configuration."""
+        config_file = PROJECT_ROOT / "artifacts" / "smart_tuner_config.json"
+
+        if config_file.exists():
+            try:
+                with open(config_file, "r") as f:
+                    config = json.load(f)
+                return {"config": config}
+            except Exception as e:
+                logger.warning("[SmartTuner] Failed to load config: %s", e)
+
+        # Return defaults
+        return {
+            "config": {
+                "enabled": True,
+                "memory_enabled": True,
+                "coordination_mode": "balanced",
+                "exploration_decay": 0.99,
+                "lr_initial": 3e-4,
+                "lr_min": 1e-7,
+                "lr_max": 1e-2,
+                "galore_rank": 32,
+                "galore_adaptive_rank": True,
+                "barren_plateau_threshold": 1e-6,
+                "barren_plateau_aggressive": True,
+                "max_grad_norm": 1.0,
+                "warmup_steps": 1000,
+                "exploration_steps": 10000,
+                "emergency_grad_threshold": 1e6,
+            }
+        }
+
+    @app.get("/api/smart-tuner/status")
+    async def get_smart_tuner_status(sweep_id: str | None = None):
+        """Get current tuner state (phase, exploration factor, etc.).
+
+        If sweep_id is provided, returns status for that specific sweep.
+        Otherwise returns global/latest status.
+        """
+        if sweep_id and sweep_id in smart_tuner_states:
+            state = smart_tuner_states[sweep_id]
+            return SmartTunerStatusResponse(
+                enabled=state.get("enabled", True),
+                current_phase=state.get("current_phase", "idle"),
+                exploration_factor=state.get("exploration_factor", 1.0),
+                emergency_mode=state.get("emergency_mode", False),
+                global_step=state.get("global_step", 0),
+                coordination_mode=state.get("coordination_mode", "balanced"),
+                lr_controller_stats=state.get("lr_controller_stats", {}),
+                bp_monitor_stats=state.get("bp_monitor_stats", {}),
+                galore_stats=state.get("galore_stats", {}),
+            )
+
+        # Return idle status if no active tuner
+        return SmartTunerStatusResponse(
+            enabled=True,
+            current_phase="idle",
+            exploration_factor=1.0,
+            emergency_mode=False,
+            global_step=0,
+            coordination_mode="balanced",
+        )
+
+    @app.post("/api/smart-tuner/status")
+    async def update_smart_tuner_status(sweep_id: str, status: dict):
+        """Update smart tuner status for a sweep (called by training loop)."""
+        smart_tuner_states[sweep_id] = {
+            "enabled": status.get("enabled", True),
+            "current_phase": status.get("current_phase", "unknown"),
+            "exploration_factor": status.get("exploration_factor", 1.0),
+            "emergency_mode": status.get("emergency_mode", False),
+            "global_step": status.get("global_step", 0),
+            "coordination_mode": status.get("coordination_mode", "balanced"),
+            "lr_controller_stats": status.get("lr_controller_stats", {}),
+            "bp_monitor_stats": status.get("bp_monitor_stats", {}),
+            "galore_stats": status.get("galore_stats", {}),
+            "last_updated": datetime.now().isoformat(),
+        }
+        return {"status": "updated"}
+
+    @app.get("/api/smart-tuner/memory/stats")
+    async def get_tuner_memory_stats():
+        """Get cross-trial memory statistics."""
+        try:
+            from highnoon.training.tuner_memory import TunerMemory
+
+            memory = TunerMemory(TUNER_MEMORY_PATH)
+            stats = memory.get_statistics()
+            return {"stats": stats}
+        except ImportError:
+            return {"stats": {"error": "TunerMemory module not available"}}
+        except Exception as e:
+            return {"stats": {"error": str(e)}}
+
+    @app.post("/api/smart-tuner/memory/clear")
+    async def clear_tuner_memory():
+        """Clear cross-trial memory (for fresh starts)."""
+        try:
+            from highnoon.training.tuner_memory import TunerMemory
+
+            memory = TunerMemory(TUNER_MEMORY_PATH)
+            memory.clear()
+            return {"status": "cleared", "message": "Cross-trial memory cleared"}
+        except ImportError:
+            raise HTTPException(
+                status_code=500, detail="TunerMemory module not available"
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/api/smart-tuner/memory/compact")
+    async def compact_tuner_memory(keep_top_n: int = 100):
+        """Compact cross-trial memory by keeping only top N trials."""
+        try:
+            from highnoon.training.tuner_memory import TunerMemory
+
+            memory = TunerMemory(TUNER_MEMORY_PATH)
+            removed = memory.compact(keep_top_n=keep_top_n)
+            return {
+                "status": "compacted",
+                "removed": removed,
+                "kept": keep_top_n,
+            }
+        except ImportError:
+            raise HTTPException(
+                status_code=500, detail="TunerMemory module not available"
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/api/smart-tuner/suggest")
+    async def suggest_tuner_config(
+        embedding_dim: int = 512,
+        num_reasoning_blocks: int = 8,
+        num_moe_experts: int = 8,
+        vocab_size: int = 32000,
+    ):
+        """Get suggested initial configuration based on architecture and past trials."""
+        try:
+            from highnoon.training.tuner_memory import TunerMemory
+
+            memory = TunerMemory(TUNER_MEMORY_PATH)
+            architecture_config = {
+                "embedding_dim": embedding_dim,
+                "num_reasoning_blocks": num_reasoning_blocks,
+                "num_moe_experts": num_moe_experts,
+                "vocab_size": vocab_size,
+            }
+            suggested = memory.suggest_initial_config(architecture_config)
+            return {"suggested": suggested, "architecture": architecture_config}
+        except ImportError:
+            return {"suggested": {}, "architecture": {}, "message": "Memory not available"}
+        except Exception as e:
+            return {"suggested": {}, "error": str(e)}
 
     # ========================================================================
     # API Routes - Distributed Training

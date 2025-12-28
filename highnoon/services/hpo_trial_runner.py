@@ -34,20 +34,73 @@ from highnoon.training.hpo_bridge import HPOReporter
 # Quantum control callback (optional - may not be available if native ops missing)
 META_CONTROLLER_AVAILABLE = False
 HamiltonianMetaControllerCallback = None
+EvolutionTimeControlBridge = None
 try:
     from highnoon.training.callbacks import HamiltonianMetaControllerCallback
+    from highnoon.training.control_bridge import EvolutionTimeControlBridge
 
     META_CONTROLLER_AVAILABLE = True
 except (ImportError, ModuleNotFoundError):
     pass
+
+# Import config module for global feature flags
+# Note: Using `hn_config` to avoid conflict with local `config` dict parameter
+import highnoon.config as hn_config
 
 # Quantum control and QSG imports
 from highnoon.config import (
     META_CONTROLLER_FREQUENCY,
     USE_HYBRID_PID,
     USE_QSG_GENERATION,
+    USE_QUANTUM_LR_CONTROLLER,
     USE_RLS_SYSID,
+    # Quantum training features
+    USE_NEURAL_ZNE,
+    USE_NEURAL_QEM,
+    USE_TENSOR_GALORE,
+    GALORE_RANK,
+    # Model architecture limits
+    LITE_MAX_PARAMS,
+    LITE_MAX_REASONING_BLOCKS,
+    LITE_MAX_MOE_EXPERTS,
+    LITE_MAX_CONTEXT_LENGTH,
+    # Quantum tokenization pipeline (Phase 48+)
+    USE_HYPERDIMENSIONAL_EMBEDDING,
+    USE_QUANTUM_LM_HEAD,
+    USE_INTELLIGENT_VOCAB_CONTROLLER,
+    VOCAB_CONTROLLER_AUTO_TRAIN,
 )
+from highnoon.training.quantum_lr_controller import QuantumAdaptiveLRController
+
+# QULS - Quantum Unified Loss System (Phase 132)
+QULS_AVAILABLE = False
+QuantumUnifiedLoss = None
+QULSConfig = None
+create_quls_from_hpo_config = None
+try:
+    from highnoon.training.quantum_loss import (
+        QuantumUnifiedLoss,
+        QULSConfig,
+        create_quls_from_hpo_config,
+    )
+    QULS_AVAILABLE = True
+except (ImportError, ModuleNotFoundError):
+    pass
+
+# TrainingEngine - Enterprise training with GaLore, QNG, Barren Plateau Monitor
+TRAINING_ENGINE_AVAILABLE = False
+TrainingEngine = None
+EnterpriseTrainingConfig = None
+TrainingResult = None
+try:
+    from highnoon.training.engine import (
+        TrainingEngine,
+        EnterpriseTrainingConfig,
+        TrainingResult,
+    )
+    TRAINING_ENGINE_AVAILABLE = True
+except (ImportError, ModuleNotFoundError):
+    pass
 
 
 # QSG evaluation (lazy import to avoid circular dependencies)
@@ -710,12 +763,36 @@ def build_hsmn_model(
     # Input: token IDs (integers)
     input_layer = tf.keras.layers.Input(shape=(None,), dtype=tf.int32, name="token_ids")
 
-    # Token embedding layer - converts token IDs to dense vectors
-    x = tf.keras.layers.Embedding(
-        input_dim=vocab_size,
-        output_dim=hidden_dim,
-        name="token_embedding",
-    )(input_layer)
+    # Use HyperdimensionalEmbedding for quantum-enhanced embedding (matching debug script)
+    if use_hqe:
+        try:
+            from highnoon.models.layers.hyperdimensional_layer import HyperdimensionalEmbedding
+            
+            # hd_dim must be divisible by hidden_dim - compute dynamically
+            hd_dim = hidden_dim * 8  # Ensures divisibility (e.g., 768*8=6144, 512*8=4096)
+            x = HyperdimensionalEmbedding(
+                vocab_size=vocab_size,
+                model_dim=hidden_dim,
+                hd_dim=hd_dim,
+                use_ctqw=True,
+                ctqw_steps=3,
+                name="hde_embedding",
+            )(input_layer)
+            logger.info(f"[HPO] Using HyperdimensionalEmbedding: vocab={vocab_size}, hd_dim={hd_dim}")
+        except (ImportError, Exception) as e:
+            logger.warning(f"[HPO] HyperdimensionalEmbedding failed ({e}), falling back to standard")
+            x = tf.keras.layers.Embedding(
+                input_dim=vocab_size,
+                output_dim=hidden_dim,
+                name="token_embedding",
+            )(input_layer)
+    else:
+        # Fallback: standard embedding layer
+        x = tf.keras.layers.Embedding(
+            input_dim=vocab_size,
+            output_dim=hidden_dim,
+            name="token_embedding",
+        )(input_layer)
 
     # Build the full HSMN reasoning module with hybrid block pattern
     # Note: Quantum parameters are read from global config by ReasoningModule
@@ -733,7 +810,25 @@ def build_hsmn_model(
     x = reasoning_module(x)
 
     # Output projection to vocabulary logits
-    output_layer = tf.keras.layers.Dense(vocab_size, name="lm_head")(x)
+    # Use QuantumLMHead for VQC-based output if available (matching debug script)
+    use_quantum_lm_head = config.get("use_quantum_lm_head", True)
+    if use_quantum_lm_head:
+        try:
+            from highnoon.models.reasoning.block_factory import QuantumLMHead
+            
+            output_layer = QuantumLMHead(
+                vocab_size=vocab_size,
+                hidden_dim=hidden_dim,
+                vqc_layers=2,
+                vqc_qubits=8,
+                name="quantum_lm_head",
+            )(x)
+            logger.info(f"[HPO] Using QuantumLMHead: vocab={vocab_size}, vqc_qubits=8")
+        except (ImportError, Exception) as e:
+            logger.warning(f"[HPO] QuantumLMHead failed ({e}), falling back to Dense")
+            output_layer = tf.keras.layers.Dense(vocab_size, name="lm_head")(x)
+    else:
+        output_layer = tf.keras.layers.Dense(vocab_size, name="lm_head")(x)
 
     model = tf.keras.Model(inputs=input_layer, outputs=output_layer, name="HSMN_LM")
 
@@ -897,6 +992,27 @@ def create_optimizer(
                 learning_rate=lr_schedule,
                 weight_decay=weight_decay,
             )
+    elif optimizer_name == "sympflowqng":
+        # S12: SympFlow + QNG Geodesic optimizer (Phase 131 Synergy)
+        # Combines symplectic momentum with quantum natural geodesic corrections
+        try:
+            from highnoon.training.optimizers import SympFlowQNGOptimizer
+
+            optimizer = SympFlowQNGOptimizer(
+                learning_rate=learning_rate,
+                mass=config.get("sympflowqng_mass", 1.0),
+                friction=config.get("sympflowqng_friction", 0.01),
+                geodesic_weight=config.get("sympflowqng_geodesic_weight", 0.1),
+            )
+            logger.info(
+                f"[HPO] Using SympFlowQNG (Synergy S12: Symplectic + QNG Geodesic) optimizer"
+            )
+        except ImportError:
+            logger.warning("[HPO] SympFlowQNGOptimizer not available, falling back to AdamW")
+            optimizer = tf.keras.optimizers.AdamW(
+                learning_rate=lr_schedule,
+                weight_decay=weight_decay,
+            )
     else:  # adam
         optimizer = tf.keras.optimizers.Adam(
             learning_rate=lr_schedule,
@@ -907,6 +1023,77 @@ def create_optimizer(
     )
 
     return optimizer
+
+
+def create_engine_config(config: dict[str, Any]) -> "EnterpriseTrainingConfig":
+    """Create EnterpriseTrainingConfig from trial config dictionary.
+    
+    This enables using TrainingEngine with all enterprise features (GaLore,
+    QNG, Barren Plateau Monitor, Meta-Controller) in HPO trials, matching
+    the debug script's training approach.
+    
+    Args:
+        config: Trial configuration dictionary with hyperparameters and feature flags.
+        
+    Returns:
+        EnterpriseTrainingConfig with all flags populated from trial config.
+    """
+    if not TRAINING_ENGINE_AVAILABLE or EnterpriseTrainingConfig is None:
+        raise ImportError("TrainingEngine not available")
+    
+    return EnterpriseTrainingConfig(
+        # Core training
+        max_grad_norm=config.get("max_grad_norm", 1.0),
+        max_nan_consecutive=config.get("max_nan_consecutive", 5),
+        log_frequency=config.get("log_frequency", 10),
+        loss_function=config.get("loss_function", "sparse_categorical_crossentropy"),
+        label_smoothing=config.get("label_smoothing", 0.0),
+        
+        # Meta-Controller
+        use_meta_controller=config.get("use_meta_controller", hn_config.USE_META_CONTROLLER),
+        meta_controller_frequency=config.get("meta_controller_frequency", hn_config.META_CONTROLLER_FREQUENCY),
+        
+        # GaLore (critical for memory efficiency)
+        use_galore=config.get("use_tensor_galore", hn_config.USE_TENSOR_GALORE),
+        galore_rank=config.get("galore_rank", hn_config.GALORE_RANK),
+        galore_update_proj_gap=config.get("galore_update_proj_gap", hn_config.GALORE_UPDATE_PROJ_GAP),
+        galore_scale=config.get("galore_scale", hn_config.GALORE_SCALE),
+        galore_vqc_aware=config.get("galore_vqc_aware", hn_config.GALORE_VQC_AWARE),
+        
+        # QALRC
+        use_qalrc=config.get("use_quantum_lr_controller", getattr(hn_config, "USE_QUANTUM_LR_CONTROLLER", True)),
+        qalrc_annealing_power=config.get("qalrc_annealing_power", 2.0),
+        qalrc_tunneling_probability=config.get("qalrc_tunneling_probability", 0.05),
+        qalrc_entropy_smoothing=config.get("qalrc_entropy_smoothing", 0.9),
+        
+        # Barren Plateau Monitor (critical for VQC layer stability)
+        use_barren_plateau_detection=config.get("barren_plateau_monitor", hn_config.BARREN_PLATEAU_MONITOR),
+        barren_plateau_threshold=config.get("barren_plateau_threshold", hn_config.BARREN_PLATEAU_THRESHOLD),
+        barren_plateau_lr_scale=config.get("barren_plateau_recovery_lr_scale", hn_config.BARREN_PLATEAU_RECOVERY_LR_SCALE),
+        
+        # QNG (Quantum Natural Gradient)
+        use_qng=config.get("use_quantum_natural_gradient", hn_config.USE_QUANTUM_NATURAL_GRADIENT),
+        qng_damping=config.get("qng_damping", hn_config.QNG_DAMPING),
+        qng_apply_to_quantum_only=config.get("qng_apply_to_quantum_only", hn_config.QNG_APPLY_TO_QUANTUM_ONLY),
+        
+        # Entropy Regularization
+        use_entropy_regularization=config.get("use_entropy_regularization", hn_config.USE_ENTROPY_REGULARIZATION),
+        entropy_reg_weight=config.get("entropy_reg_weight", hn_config.ENTROPY_REG_WEIGHT),
+        
+        # QHPM Crystallization
+        use_qhpm_crystallization=config.get("use_qhpm_crystallization", hn_config.ENABLE_QHPM_CRYSTALLIZATION),
+        crystallization_threshold=config.get("qhpm_crystallization_threshold", hn_config.QHPM_CRYSTALLIZATION_THRESHOLD),
+        max_crystallized_directions=config.get("qhpm_max_directions", hn_config.QHPM_MAX_CRYSTALLIZED_DIRECTIONS),
+        
+        # SympFlow
+        use_sympflow=config.get("use_sympflow_optimizer", hn_config.USE_SYMPFLOW_OPTIMIZER),
+        sympflow_mass=config.get("sympflow_mass", hn_config.SYMPFLOW_MASS),
+        sympflow_friction=config.get("sympflow_friction", hn_config.SYMPFLOW_FRICTION),
+        
+        # Neural ZNE/QEM
+        use_neural_zne=config.get("use_neural_zne", hn_config.USE_NEURAL_ZNE),
+        use_neural_qem=config.get("use_neural_qem", hn_config.USE_NEURAL_QEM),
+    )
 
 
 def train_trial(
@@ -998,15 +1185,43 @@ def train_trial(
         # Configurable prefetch buffer for memory management (None = auto-tune)
         prefetch_buffer_size = trial_config.get("prefetch_buffer_size", None)
 
+        # Quantum Tokenization Pipeline (Phase 48+)
+        # When USE_INTELLIGENT_VOCAB_CONTROLLER is enabled, the tokenizer auto-trains
+        # on the curriculum data to learn frequent n-grams and expand vocabulary.
+        use_adaptive_tokenizer = trial_config.get(
+            "use_adaptive_tokenizer",
+            USE_INTELLIGENT_VOCAB_CONTROLLER  # Use config flag as default
+        )
+        auto_train_enabled = trial_config.get(
+            "vocab_controller_auto_train",
+            VOCAB_CONTROLLER_AUTO_TRAIN  # Use config flag as default
+        )
+        # Get vocab tuning hyperparameters from HPO search space
+        # These control how the tokenizer learns from the curriculum
+        adaptive_min_freq = trial_config.get("vocab_min_ngram_freq", 10)
+        vocab_max_ngram_size = trial_config.get("vocab_max_ngram_size", 5)
+        vocab_sample_size = trial_config.get("vocab_sample_size", 10000)
+
+        logger.info(
+            f"[HPO] Quantum Tokenization Pipeline: "
+            f"auto_vocab={use_adaptive_tokenizer}, auto_train={auto_train_enabled}, "
+            f"min_freq={adaptive_min_freq}, max_ngram={vocab_max_ngram_size}"
+        )
+
         train_dataset, tokenizer, merger = load_training_dataset(
             batch_size=batch_size,
             sequence_length=sequence_length,
             vocab_size=vocab_size,
             hf_dataset_name=hf_dataset_name,
             prefetch_buffer_size=prefetch_buffer_size,
+            use_adaptive_tokenizer=use_adaptive_tokenizer,
+            adaptive_min_freq=adaptive_min_freq,
+            max_samples=vocab_sample_size,  # Control corpus sample size for tokenizer learning
         )
-        vocab_size = tokenizer.vocab_size  # Use actual tokenizer vocab size
-        logger.info(f"[HPO] Dataset loaded with tokenizer: vocab_size={vocab_size}")
+        # Use actual tokenizer vocab size (AdaptiveQWTTokenizer returns learned size)
+        # This is the EFFECTIVE vocab size after learning from curriculum
+        vocab_size = tokenizer.vocab_size
+        logger.info(f"[HPO] Tokenizer trained on curriculum: effective_vocab_size={vocab_size}")
         if merger is not None:
             logger.info(f"[HPO] SuperwordMerger active: {merger.superword_count} superwords")
             # CRITICAL: Extend vocab_size to include superword tokens
@@ -1023,236 +1238,71 @@ def train_trial(
     # Create optimizer (pass model for SophiaG)
     optimizer = create_optimizer(trial_config, model=model)
 
-    # Compile model with sparse categorical cross-entropy for language modeling
-    model.compile(
+    # ========================================================================
+    # Use TrainingEngine for enterprise-grade training with all enhancements
+    # This replaces the manual training loop to enable: GaLore, QNG, Barren
+    # Plateau Monitor, Meta-Controller, QHPM Crystallization, Neural ZNE
+    # ========================================================================
+    
+    if not TRAINING_ENGINE_AVAILABLE:
+        error_msg = "TrainingEngine not available - cannot run HPO trial"
+        logger.error(f"[HPO] {error_msg}")
+        hpo_reporter.complete(success=False, error=error_msg)
+        return float("inf")
+    
+    # Create TrainingEngine config from trial config
+    engine_config = create_engine_config(trial_config)
+    
+    # Log which enhancements are enabled
+    logger.info("[HPO] TrainingEngine configuration:")
+    logger.info(f"  GaLore: {engine_config.use_galore} (rank={engine_config.galore_rank})")
+    logger.info(f"  QNG: {engine_config.use_qng} (damping={engine_config.qng_damping})")
+    logger.info(f"  Barren Plateau: {engine_config.use_barren_plateau_detection}")
+    logger.info(f"  Meta-Controller: {engine_config.use_meta_controller}")
+    logger.info(f"  QHPM Crystallization: {engine_config.use_qhpm_crystallization}")
+    
+    # Create TrainingEngine
+    engine = TrainingEngine(
+        model=model,
         optimizer=optimizer,
-        loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
-        metrics=["sparse_categorical_accuracy"],
+        config=engine_config,
     )
-
-    # Training loop - epoch based
-    best_loss = float("inf")
-    patience_counter = 0
-    patience = trial_config.get("early_stopping_patience", 3)  # Epochs of patience
-    min_delta = trial_config.get("early_stopping_min_delta", 0.001)
-    global_step = 0
-
-    # Gradient clipping to prevent explosion (configurable, default 1.0)
-    max_grad_norm = trial_config.get("max_grad_norm", 1.0)
-    logger.info(f"[HPO] Gradient clipping enabled: max_norm={max_grad_norm}")
-
-    # NaN tracking for early termination
-    nan_count = 0
-    max_nan_consecutive = trial_config.get("max_nan_consecutive", 5)
-
-    for epoch in range(epochs):
-        epoch_losses = []
-        dataset_iter = iter(train_dataset)
-
-        for step in range(steps_per_epoch):
-            try:
-                # Get batch
-                inputs, labels = next(dataset_iter)
-
-                # Training step with cross-entropy loss
-                with tf.GradientTape() as tape:
-                    predictions = model(inputs, training=True)
-                    # Sparse categorical cross-entropy loss
-                    loss = tf.keras.losses.sparse_categorical_crossentropy(
-                        labels, predictions, from_logits=True
-                    )
-                    loss = tf.reduce_mean(loss)
-
-                # =====================================================
-                # NaN Detection: Check loss for NaN/Inf BEFORE gradients
-                # =====================================================
-                current_loss = float(loss.numpy())
-                if math.isnan(current_loss) or math.isinf(current_loss):
-                    nan_count += 1
-                    logger.warning(
-                        f"[HPO] NaN/Inf loss detected at step {global_step} "
-                        f"(epoch {epoch}, batch {step}). Count: {nan_count}/{max_nan_consecutive}"
-                    )
-
-                    # Early termination if too many consecutive NaN
-                    if nan_count >= max_nan_consecutive:
-                        error_msg = (
-                            f"Training diverged: {nan_count} consecutive NaN/Inf losses. "
-                            "Possible causes: learning rate too high, numerical instability "
-                            "in model ops, or corrupt input data."
-                        )
-                        logger.error(f"[HPO] {error_msg}")
-                        tf.keras.backend.clear_session()
-                        memory_manager.cleanup()
-                        hpo_reporter.complete(success=False, error=error_msg)
-                        return float("inf")
-
-                    # Skip this batch and try to recover
-                    global_step += 1
-                    continue
-
-                # Reset NaN counter on valid loss
-                nan_count = 0
-
-                # Compute gradients
-                gradients = tape.gradient(loss, model.trainable_variables)
-
-                # =====================================================
-                # Gradient Validation: Check for None and NaN gradients
-                # =====================================================
-                # Filter out None gradients (non-trainable layers)
-                valid_grads_and_vars = [
-                    (g, v) for g, v in zip(gradients, model.trainable_variables) if g is not None
-                ]
-
-                if not valid_grads_and_vars:
-                    logger.warning(f"[HPO] No valid gradients at step {global_step}")
-                    global_step += 1
-                    continue
-
-                gradients_only = [g for g, _ in valid_grads_and_vars]
-                vars_only = [v for _, v in valid_grads_and_vars]
-
-                # Check for NaN in gradients
-                has_nan_grad = any(tf.reduce_any(tf.math.is_nan(g)) for g in gradients_only)
-                if has_nan_grad:
-                    nan_count += 1
-                    logger.warning(
-                        f"[HPO] NaN gradient detected at step {global_step}. "
-                        f"Count: {nan_count}/{max_nan_consecutive}"
-                    )
-                    if nan_count >= max_nan_consecutive:
-                        error_msg = (
-                            f"Gradient explosion: {nan_count} consecutive NaN gradients. "
-                            "Try reducing learning rate or enabling gradient clipping."
-                        )
-                        logger.error(f"[HPO] {error_msg}")
-                        tf.keras.backend.clear_session()
-                        memory_manager.cleanup()
-                        hpo_reporter.complete(success=False, error=error_msg)
-                        return float("inf")
-                    global_step += 1
-                    continue
-
-                # =====================================================
-                # Gradient Clipping: Prevent explosion
-                # =====================================================
-                gradient_norm = tf.linalg.global_norm(gradients_only)
-                clipped_gradients, _ = tf.clip_by_global_norm(
-                    gradients_only, max_grad_norm, use_norm=gradient_norm
-                )
-
-                # Apply clipped gradients
-                optimizer.apply_gradients(zip(clipped_gradients, vars_only))
-
-                epoch_losses.append(current_loss)
-
-                # Check for critical memory situation (swap spike or sustained high memory)
-                should_stop, stop_reason = memory_manager.check_memory_critical()
-                if should_stop:
-                    logger.error(f"[HPO] Memory critical at step {global_step}: {stop_reason}")
-                    tf.keras.backend.clear_session()  # Clean up TF state
-                    memory_manager.cleanup()  # gc.collect()
-                    hpo_reporter.complete(success=False, error=f"Memory critical: {stop_reason}")
-                    return float("inf")
-
-                # Report metrics periodically (with memory tracking)
-                if hpo_reporter.enabled and global_step % 10 == 0:
-                    mem_stats = memory_manager.get_stats()
-                    hpo_reporter.report(
-                        step=global_step,
-                        loss=current_loss,
-                        gradient_norm=float(gradient_norm.numpy()),
-                        learning_rate=(
-                            float(optimizer.learning_rate.numpy())
-                            if hasattr(optimizer, "learning_rate")
-                            else None
-                        ),
-                        memory_mb=mem_stats["current_mb"],
-                        peak_memory_mb=mem_stats["peak_mb"],
-                        system_memory_pct=mem_stats.get("system_percent", 0),
-                        swap_used_mb=mem_stats.get("swap_used_mb", 0),
-                    )
-
-                # Trigger quantum control callback (RLS, Hybrid PID, EKF, TNKF)
-                if meta_callback is not None and global_step % meta_callback.frequency == 0:
-                    logs = {
-                        "loss": current_loss,
-                        "gradient_norm": float(gradient_norm.numpy()),
-                        "learning_rate": (
-                            float(optimizer.learning_rate.numpy())
-                            if hasattr(optimizer, "learning_rate")
-                            else 0.0
-                        ),
-                    }
-                    try:
-                        block_names, evolution_times = meta_callback.on_batch_end(global_step, logs)
-                        if len(block_names) > 0:
-                            logger.debug(f"[HPO] Meta-controller updated {len(block_names)} blocks")
-                    except Exception as e:
-                        logger.warning(f"[HPO] Meta-controller error: {e}")
-
-                global_step += 1
-
-            except tf.errors.ResourceExhaustedError as e:
-                logger.error(f"[HPO] OOM error at epoch {epoch}, step {step}: {e}")
-                tf.keras.backend.clear_session()  # Clean up TF state
-                memory_manager.cleanup()  # gc.collect()
-                hpo_reporter.complete(success=False, error=str(e))
-                return float("inf")
-
-            except StopIteration:
-                # Dataset exhausted, move to next epoch
-                break
-
-            except Exception as e:
-                logger.error(f"[HPO] Error at epoch {epoch}, step {step}: {e}")
-                tf.keras.backend.clear_session()  # Clean up TF state
-                memory_manager.cleanup()  # gc.collect()
-                hpo_reporter.complete(success=False, error=str(e))
-                return float("inf")
-
-        # Epoch complete - compute average loss
-        epoch_loss = sum(epoch_losses) / len(epoch_losses) if epoch_losses else float("inf")
-
-        # Memory cleanup after each epoch
-        memory_manager.cleanup()  # gc.collect()
-
-        logger.info(
-            f"[HPO] Epoch {epoch + 1}/{epochs} complete, "
-            f"avg_loss={epoch_loss:.6f}, best={best_loss:.6f}"
+    
+    # Run training with TrainingEngine
+    total_training_steps = epochs * steps_per_epoch
+    logger.info(f"[HPO] Starting training: {epochs} epochs x {steps_per_epoch} steps = {total_training_steps} total steps")
+    
+    try:
+        result: TrainingResult = engine.run(
+            epochs=epochs,
+            dataset=train_dataset,
+            callbacks=[],  # TrainingEngine handles internal callbacks
         )
-
-        # QSG generation quality evaluation at epoch end
-        if use_qsg_evaluation and epoch == epochs - 1:  # Final epoch only
-            qsg_metrics = evaluate_qsg_generation(model, tokenizer)
-            if qsg_metrics:
-                logger.info(
-                    f"[HPO] QSG metrics: {qsg_metrics.get('tokens_per_second', 0):.1f} tok/s"
-                )
-                # Report QSG metrics
-                if hpo_reporter.enabled:
-                    hpo_reporter.report(
-                        step=global_step,
-                        loss=epoch_loss,
-                        qsg_tokens_per_second=qsg_metrics.get("tokens_per_second", 0),
-                        qsg_generation_time_ms=qsg_metrics.get("avg_generation_time_ms", 0),
-                    )
-
-        # Check for improvement (epoch-level early stopping)
-        if epoch_loss < best_loss - min_delta:
-            best_loss = epoch_loss
-            patience_counter = 0
-        else:
-            patience_counter += 1
-
-        # Early stopping based on epoch-level convergence
-        if patience_counter >= patience:
-            logger.info(
-                f"[HPO] Early stopping at epoch {epoch + 1}, "
-                f"no improvement for {patience} epochs, best_loss={best_loss:.6f}"
-            )
-            break
+        
+        best_loss = result.final_loss if result.final_loss is not None else float("inf")
+        epochs_completed = result.epochs_completed
+        
+        if not result.success:
+            logger.warning(f"[HPO] Training completed with issues: {result.error}")
+            
+    except Exception as e:
+        logger.error(f"[HPO] Training failed: {e}")
+        memory_manager.cleanup()
+        hpo_reporter.complete(success=False, error=str(e))
+        return float("inf")
+    
+    # QSG evaluation after training
+    use_qsg_evaluation = trial_config.get("use_qsg_evaluation", USE_QSG_GENERATION)
+    throughput_tokens_per_sec = 0.0
+    if use_qsg_evaluation:
+        qsg_metrics = evaluate_qsg_generation(model, tokenizer)
+        if qsg_metrics:
+            throughput_tokens_per_sec = qsg_metrics.get("tokens_per_second", 0)
+            logger.info(f"[HPO] QSG metrics: {throughput_tokens_per_sec:.1f} tok/s")
+        
+    # Early stopping logging (TrainingEngine may have stopped early)
+    # The TrainingEngine handles early stopping internally.
+    # The `epochs_completed` from `result` will reflect if it stopped early.
 
     # Compute efficiency score for ranking
     param_count = estimate_model_params(trial_config)
@@ -1307,7 +1357,7 @@ def train_trial(
     final_mem_stats = memory_manager.get_stats()
     peak_memory_mb = final_mem_stats.get("peak_mb", 0.0)
 
-    # Report completion with all metrics including memory
+    # Report completion with all metrics including memory and throughput
     hpo_reporter.complete(
         success=True,
         final_loss=best_loss,
@@ -1319,6 +1369,7 @@ def train_trial(
         composite_score=composite_score,
         memory_peak_mb=peak_memory_mb,
         epochs_completed=epoch + 1,  # epoch is 0-indexed
+        throughput_tokens_per_sec=throughput_tokens_per_sec,
     )
 
     # Log comprehensive completion summary with memory

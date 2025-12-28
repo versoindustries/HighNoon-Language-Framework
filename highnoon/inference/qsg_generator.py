@@ -58,6 +58,8 @@ class QSGConfig:
         temperature: Sampling temperature for final token selection.
         top_k: Top-k filtering for final sampling.
         top_p: Nucleus sampling threshold.
+        use_coconut_reasoning: Phase 87 - Enable multi-path thought reasoning.
+        coconut_num_paths: Number of parallel thought paths (Lite max 8).
     """
 
     bond_dim: int = 32
@@ -68,6 +70,9 @@ class QSGConfig:
     temperature: float = 1.0
     top_k: int = 50
     top_p: float = 0.9
+    # Phase 87: CoCoNut multi-path reasoning integration
+    use_coconut_reasoning: bool = False  # Enable for enhanced reasoning
+    coconut_num_paths: int = 2  # Parallel thought paths (Lite max 8)
 
 
 class QSGGenerator:
@@ -115,10 +120,12 @@ class QSGGenerator:
         # Lazy import native ops
         self._native_ops = None
         self._vocab_embeddings = None
+        self._coconut_block = None  # Phase 87: Lazy-loaded CoCoNut block
 
         logger.debug(
             f"QSGGenerator initialized: bond_dim={self.config.bond_dim}, "
-            f"coherence_range={self.config.coherence_range}"
+            f"coherence_range={self.config.coherence_range}, "
+            f"coconut={self.config.use_coconut_reasoning}"
         )
 
     def _get_native_ops(self):
@@ -163,6 +170,60 @@ class QSGGenerator:
 
         return self._vocab_embeddings
 
+    def _get_coconut_block(self):
+        """Lazy load Phase 87 CoCoNut continuous thought block.
+        
+        Returns:
+            ContinuousThoughtBlock instance or None if disabled/unavailable.
+        """
+        if self._coconut_block is None and self.config.use_coconut_reasoning:
+            try:
+                from highnoon.models.reasoning.continuous_thought import (
+                    ContinuousThoughtBlock,
+                )
+                
+                # Get embedding dim from model
+                if hasattr(self.model, "embedding_dim"):
+                    embedding_dim = self.model.embedding_dim
+                elif hasattr(self.model, "config") and hasattr(self.model.config, "embedding_dim"):
+                    embedding_dim = self.model.config.embedding_dim
+                else:
+                    # Default fallback
+                    embedding_dim = 768
+                
+                self._coconut_block = ContinuousThoughtBlock(
+                    embedding_dim=embedding_dim,
+                    num_thought_steps=4,
+                    num_paths=self.config.coconut_num_paths,
+                )
+                logger.info(
+                    f"Phase 87: CoCoNut reasoning enabled with "
+                    f"{self.config.coconut_num_paths} paths"
+                )
+            except Exception as e:
+                logger.warning(f"Could not initialize CoCoNut block: {e}")
+                self._coconut_block = None
+        
+        return self._coconut_block
+
+    def _apply_coconut_reasoning(self, hidden_states: tf.Tensor) -> tf.Tensor:
+        """Apply Phase 87 CoCoNut multi-path reasoning to context.
+        
+        Enhances hidden states through multi-path BFS thought exploration
+        with Grover-inspired amplitude scoring.
+        
+        Args:
+            hidden_states: Context hidden states [batch, seq_len, dim].
+            
+        Returns:
+            Enhanced hidden states with continuous thought reasoning.
+        """
+        coconut_block = self._get_coconut_block()
+        if coconut_block is None:
+            return hidden_states
+        
+        return coconut_block(hidden_states, training=False)
+
     def generate(
         self,
         input_ids: tf.Tensor,
@@ -203,6 +264,11 @@ class QSGGenerator:
         # Phase 1: Get context representation from model
         # Process prefix through full model to get rich context
         context = self._encode_context(input_ids)
+
+        # Phase 1.5: Apply COCONUT continuous thought reasoning (Phase 87)
+        # Enhances context via multi-path BFS thought exploration
+        if self.config.use_coconut_reasoning:
+            context = self._apply_coconut_reasoning(context)
 
         # Phase 2: Initialize output position representations
         # Create position embeddings for output tokens

@@ -83,21 +83,9 @@ def fused_adaptive_memory(
         RuntimeError: If C++ op is not available and fallback disabled.
     """
     if _fused_adaptive_memory_op is None:
-        # Python fallback
-        return _adaptive_memory_fallback(
-            x,
-            memory,
-            predictor_w1,
-            predictor_b1,
-            predictor_w2,
-            predictor_b2,
-            compress_query,
-            compress_key,
-            write_proj,
-            gate_proj,
-            learning_rate,
-            surprise_threshold,
-            enable_ttl,
+        raise RuntimeError(
+            "FusedAdaptiveMemory C++ op not available. Build with: "
+            "cd highnoon/_native && ./build_ops.sh fused_adaptive_memory"
         )
 
     # Ensure float32
@@ -131,28 +119,30 @@ def fused_adaptive_memory(
         )
 
         def grad(grad_output, grad_memory_new, grad_surprise):
-            if _fused_adaptive_memory_grad_op is not None:
-                grad_x, grad_mem = _fused_adaptive_memory_grad_op(
-                    grad_output=grad_output,
-                    grad_memory_new=grad_memory_new,
-                    x=x_in,
-                    memory=mem,
+            if _fused_adaptive_memory_grad_op is None:
+                raise RuntimeError(
+                    "FusedAdaptiveMemoryGrad C++ op not available. Build with: "
+                    "cd highnoon/_native && ./build_ops.sh fused_adaptive_memory"
                 )
-                # Return gradients for all inputs
-                return (
-                    grad_x,
-                    grad_mem,
-                    tf.zeros_like(w1),  # predictor weights not in training graph
-                    tf.zeros_like(b1),
-                    tf.zeros_like(w2),
-                    tf.zeros_like(b2),
-                    tf.zeros_like(cq),
-                    tf.zeros_like(ck),
-                    tf.zeros_like(wp),
-                    tf.zeros_like(gp),
-                )
-            else:
-                return tuple(tf.zeros_like(t) for t in [x_in, mem, w1, b1, w2, b2, cq, ck, wp, gp])
+            grad_x, grad_mem = _fused_adaptive_memory_grad_op(
+                grad_output=grad_output,
+                grad_memory_new=grad_memory_new,
+                x=x_in,
+                memory=mem,
+            )
+            # Return gradients for all inputs
+            return (
+                grad_x,
+                grad_mem,
+                tf.zeros_like(w1),  # predictor weights not in training graph
+                tf.zeros_like(b1),
+                tf.zeros_like(w2),
+                tf.zeros_like(b2),
+                tf.zeros_like(cq),
+                tf.zeros_like(ck),
+                tf.zeros_like(wp),
+                tf.zeros_like(gp),
+            )
 
         return (output, memory_new, surprise), grad
 
@@ -168,67 +158,6 @@ def fused_adaptive_memory(
         write_proj,
         gate_proj,
     )
-
-
-def _adaptive_memory_fallback(
-    x: tf.Tensor,
-    memory: tf.Tensor,
-    predictor_w1: tf.Tensor,
-    predictor_b1: tf.Tensor,
-    predictor_w2: tf.Tensor,
-    predictor_b2: tf.Tensor,
-    compress_query: tf.Tensor,
-    compress_key: tf.Tensor,
-    write_proj: tf.Tensor,
-    gate_proj: tf.Tensor,
-    learning_rate: float,
-    surprise_threshold: float,
-    enable_ttl: bool,
-) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
-    """Pure TensorFlow fallback for adaptive memory.
-
-    Note: This does NOT support test-time learning (weight updates during
-    inference are not possible in pure TensorFlow without eager mode hacks).
-    The C++ op is required for full TTL support.
-    """
-    tf.shape(x)[0]
-
-    # Memory summary: mean over slots
-    memory_summary = tf.reduce_mean(memory, axis=1)  # [B, slot_dim]
-
-    # Predict from memory: W2 @ GELU(W1 @ memory_summary + b1) + b2
-    hidden = tf.nn.gelu(tf.matmul(memory_summary, predictor_w1) + predictor_b1)
-    prediction = tf.matmul(hidden, predictor_w2) + predictor_b2
-
-    # X summary: mean over sequence
-    x_summary = tf.reduce_mean(x, axis=1)  # [B, input_dim]
-
-    # Compute surprise
-    diff_sq = tf.square(x_summary - prediction)
-    input_dim = tf.cast(tf.shape(x_summary)[-1], tf.float32)
-    surprise = tf.reduce_mean(diff_sq, axis=-1) / input_dim
-    surprise = tf.clip_by_value(surprise, 0.0, 1.0)
-
-    # Simple output augmentation: add memory context
-    slot_dim = tf.shape(memory_summary)[-1]
-    x_dim = tf.shape(x)[-1]
-    min_dim = tf.minimum(slot_dim, x_dim)
-
-    # Broadcast memory summary over sequence
-    memory_broadcast = tf.expand_dims(memory_summary[:, :min_dim], 1)
-    tf.shape(x)
-
-    # Pad if needed
-    if slot_dim < x_dim:
-        pad_size = x_dim - slot_dim
-        memory_broadcast = tf.pad(memory_broadcast, [[0, 0], [0, 0], [0, pad_size]])
-
-    output = x + 0.1 * memory_broadcast
-
-    # Memory passthrough (no update in fallback)
-    memory_new = memory
-
-    return output, memory_new, surprise
 
 
 __all__ = [

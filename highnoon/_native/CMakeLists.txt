@@ -299,6 +299,10 @@ set(HIGHNOON_OPS_SOURCES
     ops/qmamba_op.cc                  # Phase 37: QMamba quantum-enhanced SSM
     ops/discrete_time_crystal_op.cc   # Phase 38: DTC state protection
     ops/coconut_reservoir_op.cc       # Phase 39: Coconut continuous latent reasoning
+    # Phase 87: Enhanced CoCoNut (BFS exploration, crystallization, adaptive DFS)
+    ops/fused_coconut_bfs_op.cc        # Multi-path BFS thought exploration
+    ops/fused_coconut_dfs_collapse_op.cc  # Adaptive BFS→DFS collapse
+    ops/fused_coconut_crystallize_op.cc   # Thought crystallization store
     ops/lmwt_attention_op.cc          # Phase 41: Learnable wavelet transformer
     ops/qmoe_routing_op.cc            # Phase 42: Quantum MoE routing
     ops/neural_kalman_op.cc           # Phase 43: Neural Kalman with learned gain
@@ -338,6 +342,10 @@ set(HIGHNOON_OPS_SOURCES
     # Pillar 7: Advanced Quantum Intelligence
     ops/spini_integrator_op.cc        # Phase 78: SPINI integrator
     ops/quantum_advanced_ops.cc       # Phases 73-84: Consolidated advanced ops
+    # Phase 86: Modern Hopfield Network Memory
+    ops/hopfield_memory_op.cc         # Phase 86: MHN-based associative memory
+    # Phase 91: Quantum GaLore Gradient Compression
+    ops/quantum_galore_op.cc          # Phase 91: Entropy-based dynamic rank projection
 )
 
 # Controller sources (requires spdlog: apt install libspdlog-dev)

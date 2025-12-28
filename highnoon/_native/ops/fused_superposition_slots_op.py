@@ -93,19 +93,22 @@ def superposition_collapse_read(
     Returns:
         Collapsed slots [batch, num_slots, bus_dim].
     """
-    if _collapse_read_op is not None:
-        return _collapse_read_with_gradient(
-            query,
-            buffer,
-            collapse_weight,
-            collapse_bias,
-            num_slots,
-            superposition_dim,
-            bus_dim,
-            temperature,
+    if _collapse_read_op is None:
+        raise RuntimeError(
+            "Superposition collapse C++ op not available. Build with: "
+            "cd highnoon/_native && ./build_secure.sh"
         )
-    else:
-        return _collapse_read_fallback(query, buffer, collapse_weight, collapse_bias, temperature)
+
+    return _collapse_read_with_gradient(
+        query,
+        buffer,
+        collapse_weight,
+        collapse_bias,
+        num_slots,
+        superposition_dim,
+        bus_dim,
+        temperature,
+    )
 
 
 def _collapse_read_with_gradient(
@@ -134,61 +137,27 @@ def _collapse_read_with_gradient(
         )
 
         def grad(grad_output):
-            if _collapse_read_grad_op is not None:
-                grads = _collapse_read_grad_op(
-                    grad_collapsed=grad_output,
-                    query=q,
-                    buffer=buf,
-                    collapse_weight=w,
-                    collapse_bias=b,
-                    num_slots=num_slots,
-                    superposition_dim=superposition_dim,
-                    bus_dim=bus_dim,
-                    temperature=temperature,
+            if _collapse_read_grad_op is None:
+                raise RuntimeError(
+                    "Superposition collapse grad C++ op not available. Build with: "
+                    "cd highnoon/_native && ./build_secure.sh"
                 )
-                return grads
-            # Fallback: zeros
-            return (
-                tf.zeros_like(q),
-                tf.zeros_like(buf),
-                tf.zeros_like(w),
-                tf.zeros_like(b),
+            grads = _collapse_read_grad_op(
+                grad_collapsed=grad_output,
+                query=q,
+                buffer=buf,
+                collapse_weight=w,
+                collapse_bias=b,
+                num_slots=num_slots,
+                superposition_dim=superposition_dim,
+                bus_dim=bus_dim,
+                temperature=temperature,
             )
+            return grads
 
         return result, grad
 
     return _inner(query, buffer, collapse_weight, collapse_bias)
-
-
-def _collapse_read_fallback(
-    query: tf.Tensor,
-    buffer: tf.Tensor,
-    collapse_weight: tf.Tensor,
-    collapse_bias: tf.Tensor,
-    temperature: float,
-) -> tf.Tensor:
-    """Python fallback for collapse read."""
-    tf.shape(buffer)[0]
-    tf.shape(buffer)[1]
-    tf.shape(buffer)[2]
-    bus_dim = tf.shape(buffer)[3]
-
-    # Project query: [B, Q] @ [Q, D] + [D] -> [B, D]
-    proj_query = tf.matmul(query, collapse_weight) + collapse_bias
-
-    # Compute attention scores for each slot
-    # buffer: [B, S, D, V], proj_query: [B, V]
-    # scores: [B, S, D]
-    scores = tf.einsum("bv,bsdv->bsd", proj_query, buffer)
-    scores = scores / tf.sqrt(tf.cast(bus_dim, tf.float32))
-
-    # Softmax with temperature
-    weights = tf.nn.softmax(scores / temperature, axis=-1)
-
-    # Weighted sum: [B, S, D] x [B, S, D, V] -> [B, S, V]
-    collapsed = tf.einsum("bsd,bsdv->bsv", weights, buffer)
-
-    return collapsed
 
 
 def superposition_write(
@@ -214,30 +183,17 @@ def superposition_write(
     Returns:
         Updated buffer [batch, num_slots, superposition_dim, bus_dim].
     """
-    if _write_op is not None:
-        return _write_op(
-            content=content,
-            gate=gate,
-            buffer=buffer,
-            num_slots=num_slots,
-            superposition_dim=superposition_dim,
-            bus_dim=bus_dim,
+    if _write_op is None:
+        raise RuntimeError(
+            "Superposition write C++ op not available. Build with: "
+            "cd highnoon/_native && ./build_secure.sh"
         )
-    else:
-        return _write_fallback(content, gate, buffer)
 
-
-def _write_fallback(
-    content: tf.Tensor,
-    gate: tf.Tensor,
-    buffer: tf.Tensor,
-) -> tf.Tensor:
-    """Python fallback for superposition write."""
-    # content: [B, V] -> [B, 1, 1, V]
-    content_expanded = content[:, None, None, :]
-
-    # gate: [B, S] -> [B, S, 1, 1]
-    gate_expanded = gate[:, :, None, None]
-
-    # Blended update
-    return buffer * (1.0 - gate_expanded) + content_expanded * gate_expanded
+    return _write_op(
+        content=content,
+        gate=gate,
+        buffer=buffer,
+        num_slots=num_slots,
+        superposition_dim=superposition_dim,
+        bus_dim=bus_dim,
+    )

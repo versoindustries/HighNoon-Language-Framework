@@ -230,16 +230,11 @@ def fused_moe_dispatch_v2(
     @tf.custom_gradient
     def _fused_moe_dispatch_v2_internal(tokens_in, logits_in, capacity_in, bias_in):
         if fused_moe_dispatch_v2_op is None:
-            # Fallback to V1
-            logger.warning("V2 dispatch not available, falling back to V1")
-            v1_res, v1_grad = fused_moe_dispatch(tokens_in, logits_in, capacity_in)
-            d_tok, d_gate, d_meta, ex_bound, ex_idx = v1_res
-            ex_loads = tf.cast(ex_bound[1:] - ex_bound[:-1], tf.float32)
-
-            def grad_fn_v1(*grads):
-                return v1_grad(*grads[:5])
-
-            return (d_tok, d_gate, d_meta, ex_bound, ex_idx, ex_loads), grad_fn_v1
+            raise NotImplementedError(
+                "The C++ FusedMoEDispatchV2 operator could not be loaded. "
+                "Please check the build process and ensure the '.so' file is present and valid. "
+                "NO FALLBACK IS PROVIDED - V2 dispatch is required."
+            )
 
         # Call C++ Op with captured attributes
         (d_tok, d_gate, d_meta, ex_bound, ex_idx, ex_loads) = fused_moe_dispatch_v2_op(

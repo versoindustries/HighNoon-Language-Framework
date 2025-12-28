@@ -35,6 +35,7 @@ from highnoon.config import (
     LITE_MAX_REASONING_BLOCKS,
     MAMBA2_CONV_DIM,
     MAMBA2_STATE_DIM,
+    MAX_CONTEXT_LEN,
     NUM_EXPERTS,
     REASONING_BLOCK_PATTERN,
     REASONING_HEADS,
@@ -43,8 +44,26 @@ from highnoon.config import (
     VOCAB_SIZE,
     WLAM_NUM_HEADS,
     WLAM_WAVELET_KERNEL_SIZE,
+    get_tokenizer,
 )
 from highnoon.models.reasoning import ReasoningModule
+
+
+class _EncoderProxy:
+    """Proxy object providing encoder-like interface for training loop compatibility.
+
+    The training loop expects model.encoder.embedding_dim to exist. This proxy
+    provides that interface by wrapping the token embedding layer.
+    """
+
+    def __init__(self, token_embedding: tf.keras.layers.Embedding, embedding_dim: int):
+        self._token_embedding = token_embedding
+        self.embedding_dim = embedding_dim
+
+    @property
+    def embeddings(self) -> tf.Variable:
+        """Get the embedding weights."""
+        return self._token_embedding.embeddings
 
 logger = logging.getLogger(__name__)
 
@@ -168,11 +187,69 @@ class HSMN(tf.keras.Model):
         else:
             self.lm_head = None  # Use transposed embedding weights
 
+        # Create encoder proxy for training loop compatibility
+        # Training loop accesses model.encoder.embedding_dim
+        self._encoder_proxy = _EncoderProxy(self.token_embedding, embedding_dim)
+
+        # Initialize tokenizer (lazy-loaded on first access)
+        self._tokenizer = None
+
         logger.info(
             f"Initialized HSMN: vocab={vocab_size}, dim={embedding_dim}, "
             f"blocks={num_reasoning_blocks}, pattern={block_pattern}, "
             f"tie_embeddings={tie_word_embeddings}"
         )
+
+    @property
+    def tokenizer(self):
+        """Get the tokenizer for this model.
+
+        Lazy-loaded to avoid circular imports and allow HPO to configure
+        vocab_size before tokenizer creation.
+
+        Returns:
+            QWTTextTokenizer instance configured for this model's vocab_size.
+        """
+        if self._tokenizer is None:
+            self._tokenizer = get_tokenizer(
+                vocab_size=self.vocab_size,
+                max_length=self.max_seq_length,
+            )
+        return self._tokenizer
+
+    @tokenizer.setter
+    def tokenizer(self, value):
+        """Set a custom tokenizer.
+
+        Args:
+            value: Tokenizer instance to use. Must have vocab_size and
+                pad_token_id attributes.
+        """
+        self._tokenizer = value
+
+    @property
+    def encoder(self) -> _EncoderProxy:
+        """Get the encoder proxy for training loop compatibility.
+
+        The training loop expects model.encoder.embedding_dim to exist.
+        This property provides that interface.
+
+        Returns:
+            _EncoderProxy wrapping the token embedding layer.
+        """
+        return self._encoder_proxy
+
+    @property
+    def reasoning(self) -> ReasoningModule:
+        """Alias for reasoning_module for training loop compatibility.
+
+        The training loop accesses model.reasoning.block_types, etc.
+        This property provides that interface.
+
+        Returns:
+            The ReasoningModule instance.
+        """
+        return self.reasoning_module
 
     def call(
         self,

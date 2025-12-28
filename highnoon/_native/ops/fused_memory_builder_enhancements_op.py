@@ -71,59 +71,13 @@ def ctqw_aggregate(
     """
     x = tf.cast(x, tf.float32)
 
-    if _ctqw_aggregate_op is not None:
-        return _ctqw_aggregate_op(x=x, time=time, use_cayley=use_cayley, sigma=sigma)
+    if _ctqw_aggregate_op is None:
+        raise RuntimeError(
+            "FusedCTQWAggregate C++ op not available. Build with: "
+            "cd highnoon/_native && ./build_secure.sh"
+        )
 
-    # TensorFlow fallback
-    return _ctqw_aggregate_tf(x, time, use_cayley, sigma)
-
-
-def _ctqw_aggregate_tf(
-    x: tf.Tensor,
-    time: float,
-    use_cayley: bool,
-    sigma: float,
-) -> tf.Tensor:
-    """TensorFlow fallback for CTQW aggregation."""
-    batch = tf.shape(x)[0]
-    num_nodes = tf.shape(x)[1]
-    embed_dim = tf.shape(x)[2]
-
-    if sigma < 0:
-        sigma = tf.sqrt(tf.cast(embed_dim, tf.float32))
-
-    # Compute pairwise squared distances
-    # x_i - x_j squared norm
-    x_sq = tf.reduce_sum(x**2, axis=-1, keepdims=True)  # [B, N, 1]
-    dist2 = x_sq + tf.transpose(x_sq, [0, 2, 1]) - 2 * tf.matmul(x, x, transpose_b=True)
-    dist2 = tf.maximum(dist2, 0.0)  # Numerical stability
-
-    # RBF kernel for adjacency
-    adjacency = tf.exp(-dist2 / (sigma**2 + 1e-8))
-    adjacency = adjacency * (1.0 - tf.eye(num_nodes, dtype=tf.float32))
-
-    # Laplacian: L = D - A
-    degree = tf.reduce_sum(adjacency, axis=-1, keepdims=True)
-    laplacian = tf.linalg.diag(tf.squeeze(degree, -1)) - adjacency
-
-    # Cayley approximation: (I - itL/2)(I + itL/2)^-1
-    eye = tf.eye(num_nodes, batch_shape=[batch], dtype=tf.float32)
-    alpha = time * 0.5
-
-    I_plus = eye + alpha * laplacian
-    I_minus = eye - alpha * laplacian
-
-    # Solve via matrix inverse
-    I_plus_inv = tf.linalg.inv(I_plus + 1e-6 * eye)
-    evolution = tf.matmul(I_minus, I_plus_inv)
-
-    # Probability amplitudes (squared)
-    weights = evolution**2
-
-    # Normalize rows
-    weights = weights / (tf.reduce_sum(weights, axis=-1, keepdims=True) + 1e-8)
-
-    return weights
+    return _ctqw_aggregate_op(x=x, time=time, use_cayley=use_cayley, sigma=sigma)
 
 
 # =============================================================================
@@ -164,38 +118,39 @@ def multi_rate_ema(
     memory = tf.cast(memory, tf.float32)
     aggregated = tf.cast(aggregated, tf.float32)
 
-    if _multi_rate_ema_op is not None:
+    if _multi_rate_ema_op is None:
+        raise RuntimeError(
+            "FusedMultiRateEMA C++ op not available. Build with: "
+            "cd highnoon/_native && ./build_secure.sh"
+        )
 
-        @tf.custom_gradient
-        def _inner(mem, agg):
-            output = _multi_rate_ema_op(
-                memory=mem,
-                aggregated=agg,
+    @tf.custom_gradient
+    def _inner(mem, agg):
+        output = _multi_rate_ema_op(
+            memory=mem,
+            aggregated=agg,
+            level=level,
+            base_rate=base_rate,
+            level_decay=level_decay,
+        )
+
+        def grad(grad_output):
+            if _multi_rate_ema_grad_op is None:
+                raise RuntimeError(
+                    "FusedMultiRateEMAGrad C++ op not available. Build with: "
+                    "cd highnoon/_native && ./build_secure.sh"
+                )
+            g_mem, g_agg = _multi_rate_ema_grad_op(
+                grad_output=grad_output,
                 level=level,
                 base_rate=base_rate,
                 level_decay=level_decay,
             )
+            return g_mem, g_agg
 
-            def grad(grad_output):
-                if _multi_rate_ema_grad_op is not None:
-                    g_mem, g_agg = _multi_rate_ema_grad_op(
-                        grad_output=grad_output,
-                        level=level,
-                        base_rate=base_rate,
-                        level_decay=level_decay,
-                    )
-                    return g_mem, g_agg
-                else:
-                    alpha = base_rate * (level_decay**level)
-                    return alpha * grad_output, (1.0 - alpha) * grad_output
+        return output, grad
 
-            return output, grad
-
-        return _inner(memory, aggregated)
-
-    # TensorFlow fallback
-    alpha = base_rate * (level_decay**level)
-    return alpha * memory + (1.0 - alpha) * aggregated
+    return _inner(memory, aggregated)
 
 
 # =============================================================================
@@ -235,43 +190,15 @@ def cross_level_attention(
     key = tf.cast(key, tf.float32)
     value = tf.cast(value, tf.float32)
 
-    if _cross_level_attention_op is not None:
-        return _cross_level_attention_op(
-            query=query, key=key, value=value, num_heads=num_heads, residual_scale=residual_scale
+    if _cross_level_attention_op is None:
+        raise RuntimeError(
+            "FusedCrossLevelAttention C++ op not available. Build with: "
+            "cd highnoon/_native && ./build_secure.sh"
         )
 
-    # TensorFlow fallback with linear attention
-    return _cross_level_attention_tf(query, key, value, num_heads, residual_scale)
-
-
-def _cross_level_attention_tf(
-    query: tf.Tensor,
-    key: tf.Tensor,
-    value: tf.Tensor,
-    num_heads: int,
-    residual_scale: float,
-) -> tf.Tensor:
-    """TensorFlow fallback for cross-level attention."""
-
-    # ELU+1 kernel
-    def elu_plus_1(x):
-        return tf.nn.elu(x) + 1.0
-
-    q_elu = elu_plus_1(query)  # [B, Nq, D]
-    k_elu = elu_plus_1(key)  # [B, Nk, D]
-
-    # KV summary: S[d1, d2] = sum_j k[j, d1] * v[j, d2]
-    kv_sum = tf.einsum("bkd,bke->bde", k_elu, value)  # [B, D, D]
-    k_sum = tf.reduce_sum(k_elu, axis=1, keepdims=True)  # [B, 1, D]
-
-    # Output = (Q @ S) / (Q @ K_sum)
-    numerator = tf.einsum("bqd,bde->bqe", q_elu, kv_sum)  # [B, Nq, D]
-    denominator = tf.reduce_sum(q_elu * k_sum, axis=-1, keepdims=True)  # [B, Nq, 1]
-
-    attended = numerator / (denominator + 1e-6)
-
-    # Residual connection
-    return query + residual_scale * attended
+    return _cross_level_attention_op(
+        query=query, key=key, value=value, num_heads=num_heads, residual_scale=residual_scale
+    )
 
 
 # =============================================================================
@@ -308,47 +235,18 @@ def adaptive_chunk(
     """
     x = tf.cast(x, tf.float32)
 
-    if _adaptive_chunk_op is not None:
-        return _adaptive_chunk_op(
-            x=x,
-            min_chunk_size=min_chunk_size,
-            max_chunk_size=max_chunk_size,
-            boundary_threshold=boundary_threshold,
+    if _adaptive_chunk_op is None:
+        raise RuntimeError(
+            "FusedAdaptiveChunk C++ op not available. Build with: "
+            "cd highnoon/_native && ./build_secure.sh"
         )
 
-    # TensorFlow fallback
-    return _adaptive_chunk_tf(x, min_chunk_size, max_chunk_size, boundary_threshold)
-
-
-def _adaptive_chunk_tf(
-    x: tf.Tensor,
-    min_chunk_size: int,
-    max_chunk_size: int,
-    boundary_threshold: float,
-) -> tuple[tf.Tensor, tf.Tensor]:
-    """TensorFlow fallback for adaptive chunking."""
-    batch = tf.shape(x)[0]
-    seq_len = tf.shape(x)[1]
-
-    # Compute cosine similarity between adjacent tokens
-    x_norm = tf.nn.l2_normalize(x, axis=-1)
-    x_curr = x_norm[:, :-1]  # [B, S-1, D]
-    x_next = x_norm[:, 1:]  # [B, S-1, D]
-    tf.reduce_sum(x_curr * x_next, axis=-1)  # [B, S-1]
-
-    # Simple chunking: evenly divide (for TF fallback simplicity)
-    # Real implementation uses min-max constraints and boundary detection
-    avg_chunk = (min_chunk_size + max_chunk_size) // 2
-    num_chunks = tf.maximum(1, seq_len // avg_chunk)
-
-    # Create chunk IDs
-    indices = tf.range(seq_len)
-    chunk_ids = tf.minimum(indices // avg_chunk, num_chunks - 1)
-    chunk_ids = tf.broadcast_to(chunk_ids, [batch, seq_len])
-
-    num_chunks_out = tf.fill([batch], tf.cast(num_chunks, tf.int32))
-
-    return tf.cast(chunk_ids, tf.int32), num_chunks_out
+    return _adaptive_chunk_op(
+        x=x,
+        min_chunk_size=min_chunk_size,
+        max_chunk_size=max_chunk_size,
+        boundary_threshold=boundary_threshold,
+    )
 
 
 def chunk_pool(
@@ -370,30 +268,13 @@ def chunk_pool(
     chunk_ids = tf.cast(chunk_ids, tf.int32)
     num_chunks = tf.cast(num_chunks, tf.int32)
 
-    if _chunk_pool_op is not None:
-        return _chunk_pool_op(x=x, chunk_ids=chunk_ids, num_chunks=num_chunks)
+    if _chunk_pool_op is None:
+        raise RuntimeError(
+            "FusedChunkPool C++ op not available. Build with: "
+            "cd highnoon/_native && ./build_secure.sh"
+        )
 
-    # TensorFlow fallback
-    batch = tf.shape(x)[0]
-    tf.shape(x)[2]
-    max_chunks = tf.reduce_max(num_chunks)
-
-    # Use segment_mean per batch
-    outputs = []
-    for b in tf.range(batch):
-        x_b = x[b]  # [S, D]
-        ids_b = chunk_ids[b]  # [S]
-        n_chunks = num_chunks[b]
-
-        # Segment mean
-        pooled_b = tf.math.unsorted_segment_mean(x_b, ids_b, n_chunks)
-
-        # Pad to max_chunks
-        padding = [[0, max_chunks - n_chunks], [0, 0]]
-        pooled_b = tf.pad(pooled_b, padding)
-        outputs.append(pooled_b)
-
-    return tf.stack(outputs, axis=0)
+    return _chunk_pool_op(x=x, chunk_ids=chunk_ids, num_chunks=num_chunks)
 
 
 # =============================================================================
@@ -423,65 +304,16 @@ def quantum_noise(
         >>> noise = quantum_noise([16, 64], entanglement_strength=0.1)
         >>> generated = generator(noise)
     """
-    if _quantum_noise_op is not None:
-        shape_tensor = tf.constant(list(shape), dtype=tf.int32)
-        return _quantum_noise_op(
-            shape=shape_tensor, entanglement_strength=entanglement_strength, seed=seed
+    if _quantum_noise_op is None:
+        raise RuntimeError(
+            "FusedQuantumNoise C++ op not available. Build with: "
+            "cd highnoon/_native && ./build_secure.sh"
         )
 
-    # TensorFlow fallback
-    return _quantum_noise_tf(shape, entanglement_strength, seed)
-
-
-def _quantum_noise_tf(
-    shape: tuple[int, ...],
-    entanglement_strength: float,
-    seed: int,
-) -> tf.Tensor:
-    """TensorFlow fallback for quantum noise."""
-    tf.random.set_seed(seed)
-
-    # Base Gaussian noise
-    noise = tf.random.normal(shape, dtype=tf.float32)
-
-    if len(shape) < 2:
-        return noise
-
-    batch = shape[0]
-    dim = shape[1] if len(shape) > 1 else 1
-
-    # Apply rotation to pairs of dimensions
-    for d in range(0, dim - 1, 2):
-        theta = tf.random.uniform([batch, 1]) * entanglement_strength * 2 * 3.14159
-        cos_t = tf.cos(theta)
-        sin_t = tf.sin(theta)
-
-        x = noise[:, d : d + 1]
-        y = noise[:, d + 1 : d + 2]
-
-        # Rotation
-        x_new = cos_t * x - sin_t * y
-        y_new = sin_t * x + cos_t * y
-
-        # Update (using concat for simplicity)
-        if d == 0:
-            rotated = tf.concat([x_new, y_new], axis=1)
-        else:
-            rotated = tf.concat([rotated, x_new, y_new], axis=1)
-
-    # Handle odd dimension
-    if dim % 2 == 1:
-        rotated = tf.concat([rotated, noise[:, -1:]], axis=1)
-
-    # Apply entanglement between adjacent samples
-    if entanglement_strength > 0:
-        for i in range(1, batch):
-            rotated_i = rotated[i : i + 1]
-            prev = rotated[i - 1 : i]
-            blended = (1 - entanglement_strength) * rotated_i + entanglement_strength * prev
-            rotated = tf.concat([rotated[:i], blended, rotated[i + 1 :]], axis=0)
-
-    return rotated
+    shape_tensor = tf.constant(list(shape), dtype=tf.int32)
+    return _quantum_noise_op(
+        shape=shape_tensor, entanglement_strength=entanglement_strength, seed=seed
+    )
 
 
 def quantum_entanglement_loss(

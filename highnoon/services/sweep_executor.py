@@ -162,32 +162,55 @@ class TrialResult:
     composite_score: float = 0.0
     is_on_pareto_frontier: bool = False
 
+    def _sanitize_float(self, value: float | None) -> float | None:
+        """Sanitize float for JSON serialization.
+
+        JSON spec doesn't allow NaN or Inf values, so we convert them to None.
+
+        Args:
+            value: Float value to sanitize.
+
+        Returns:
+            Sanitized value safe for JSON serialization.
+        """
+        if value is None:
+            return None
+        if math.isnan(value) or math.isinf(value):
+            return None
+        return value
+
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization.
 
         Field names match frontend HPOTrialInfo type in types.ts.
+        NaN and Inf float values are converted to None for JSON compliance.
         """
+        sanitized_loss = self._sanitize_float(self.loss)
         return {
             "trial_id": self.trial_id,
-            "loss": self.loss if not math.isinf(self.loss) else None,
-            "perplexity": self.perplexity,
-            "mean_confidence": self.mean_confidence,
-            "expected_calibration_error": self.ece,  # Frontend expects this name
+            "loss": sanitized_loss,
+            "perplexity": self._sanitize_float(self.perplexity),
+            "mean_confidence": self._sanitize_float(self.mean_confidence),
+            "expected_calibration_error": self._sanitize_float(
+                self.ece
+            ),  # Frontend expects this name
             "param_count": self.param_count,
             "hyperparams": self.hyperparams,
             "epochs_completed": self.epochs_completed,
-            "wall_time_seconds": self.wall_time_seconds,
-            "memory_peak_mb": self.memory_peak_mb,
-            "memory_mb": self.memory_peak_mb,  # Alias for frontend compatibility
-            "throughput_tokens_per_sec": self.throughput_tokens_per_sec,
+            "wall_time_seconds": self._sanitize_float(self.wall_time_seconds),
+            "memory_peak_mb": self._sanitize_float(self.memory_peak_mb),
+            "memory_mb": self._sanitize_float(
+                self.memory_peak_mb
+            ),  # Alias for frontend compatibility
+            "throughput_tokens_per_sec": self._sanitize_float(self.throughput_tokens_per_sec),
             "error": self.error,
-            "composite_score": self.composite_score,
+            "composite_score": self._sanitize_float(self.composite_score),
             "is_on_pareto_frontier": self.is_on_pareto_frontier,
             # Frontend table expects these fields
             "status": "failed" if self.error else "completed",
-            "learning_rate": self.hyperparams.get("learning_rate", 0),
-            "duration_seconds": self.wall_time_seconds,
-            "best_loss": self.loss if not math.isinf(self.loss) else None,
+            "learning_rate": self._sanitize_float(self.hyperparams.get("learning_rate", 0)),
+            "duration_seconds": self._sanitize_float(self.wall_time_seconds),
+            "best_loss": sanitized_loss,
             "step": self.epochs_completed,
             "batch_size": self.hyperparams.get("batch_size", 0),
             "optimizer": self.hyperparams.get("optimizer", "unknown"),
@@ -307,6 +330,21 @@ class RetryStrategy:
             if retry_count > 2 and "num_moe_experts" in modified:
                 modified["num_moe_experts"] = max(2, modified["num_moe_experts"] // 2)
 
+        elif failure_type == "budget_exceeded":
+            # Model exceeds parameter budget - aggressively reduce architecture
+            logger.warning(
+                f"[HPO] Budget exceeded on retry {retry_count}, reducing architecture size"
+            )
+            # Always halve reasoning blocks and experts
+            if "num_reasoning_blocks" in modified:
+                modified["num_reasoning_blocks"] = max(4, modified["num_reasoning_blocks"] // 2)
+            if "num_moe_experts" in modified:
+                modified["num_moe_experts"] = max(4, modified["num_moe_experts"] // 2)
+            # On subsequent retries, also reduce hidden dimension
+            if retry_count > 1 and "hidden_dim" in modified:
+                modified["hidden_dim"] = max(256, int(modified["hidden_dim"] * 0.75))
+                modified["embedding_dim"] = modified["hidden_dim"]
+
         logger.info(
             f"[HPO] Modified config for retry {retry_count}: "
             f"failure_type={failure_type}, changes applied"
@@ -326,6 +364,9 @@ class RetryStrategy:
         """
         if error_message:
             error_lower = error_message.lower()
+            # Check for budget exceeded FIRST (before other checks)
+            if "budget_exceeded" in error_lower or "exceeds parameter budget" in error_lower:
+                return "budget_exceeded"
             if "resource exhausted" in error_lower or "oom" in error_lower:
                 return "oom"
             if "swap" in error_lower:
@@ -804,18 +845,56 @@ class SweepExecutor:
                 self._log("INFO", f"Starting trial {trial_id} (attempt {retries + 1})")
                 result = await self._execute_trial_subprocess(trial_id, current_config)
 
-                # Check for budget exceeded - special case: skip without retry or counting
-                if math.isnan(result.loss) and result.error and "budget" in result.error.lower():
+                # DEBUG: Log result details for tracing
+                self._log(
+                    "INFO",
+                    f"[DEBUG] Trial {trial_id} result: loss={result.loss}, "
+                    f"error={result.error[:100] if result.error else None}",
+                )
+
+                # Check for budget exceeded - retry with smaller architecture
+                if result.error and "budget" in result.error.lower():
                     self._log(
-                        "WARNING",
-                        f"Trial {trial_id} skipped: exceeds parameter budget (not counted)",
+                        "INFO",
+                        f"[DEBUG] Trial {trial_id} detected as budget_exceeded, "
+                        f"retries={retries}/{max_retries}",
                     )
-                    # Mark as budget skip with a flag the processor can detect
-                    result.error = "BUDGET_EXCEEDED: " + (result.error or "")
-                    return result
+                    if retries < max_retries:
+                        # Retry with reduced architecture
+                        failure_type = "budget_exceeded"
+                        old_blocks = current_config.get("num_reasoning_blocks")
+                        old_experts = current_config.get("num_moe_experts")
+                        old_dim = current_config.get("hidden_dim")
+
+                        current_config = self.retry_strategy.modify_config_for_retry(
+                            current_config, failure_type, retries + 1
+                        )
+                        retries += 1
+
+                        self._log(
+                            "WARNING",
+                            f"Trial {trial_id} exceeded budget, retrying with smaller config: "
+                            f"blocks={old_blocks}→{current_config.get('num_reasoning_blocks')}, "
+                            f"experts={old_experts}→{current_config.get('num_moe_experts')}, "
+                            f"dim={old_dim}→{current_config.get('hidden_dim')}",
+                        )
+                        continue
+                    else:
+                        # Exhausted retries - mark as budget exceeded
+                        self._log(
+                            "WARNING",
+                            f"Trial {trial_id} exceeded budget after {max_retries} attempts",
+                        )
+                        result.error = "BUDGET_EXCEEDED: " + (result.error or "")
+                        return result
 
                 if result.loss == float("inf") or math.isnan(result.loss):
                     failure_type = self.retry_strategy.classify_failure(result.error, result.loss)
+                    self._log(
+                        "INFO",
+                        f"[DEBUG] Trial {trial_id} classified as: {failure_type} "
+                        f"(loss={result.loss}, error={result.error[:50] if result.error else None})",
+                    )
                     if retries < max_retries:
                         current_config = self.retry_strategy.modify_config_for_retry(
                             current_config, failure_type, retries + 1
@@ -936,8 +1015,18 @@ class SweepExecutor:
                     ece = status.get("expected_calibration_error") or status.get("ece")
                     param_count = status.get("param_count", 0)
                     epochs_completed = status.get("epochs_completed", 0)
+                    # CRITICAL: Read error from status.json (includes BUDGET_EXCEEDED)
+                    error = status.get("error")
+
+                    # DEBUG: Log parsed status for visibility
+                    logger.info(
+                        f"[HPO DEBUG] Parsed status.json for {trial_id}: "
+                        f"loss={loss}, error={error[:80] if error else None}, "
+                        f"param_count={param_count}"
+                    )
             except Exception as e:
                 error = f"Failed to read status: {e}"
+                logger.error(f"[HPO DEBUG] Failed to parse status.json: {e}")
 
         # Read memory from status.json first (authoritative), fallback to metrics.jsonl
         memory_peak_mb = 0.0

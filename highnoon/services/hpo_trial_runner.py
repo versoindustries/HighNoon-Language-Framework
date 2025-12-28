@@ -1212,9 +1212,9 @@ def train_trial(
         "meta_controller_frequency", META_CONTROLLER_FREQUENCY
     )
 
-    meta_callback = None
+    _meta_callback = None  # Unused: TrainingEngine handles callbacks internally
     if use_quantum_control and META_CONTROLLER_AVAILABLE:
-        meta_callback = HamiltonianMetaControllerCallback(
+        _meta_callback = HamiltonianMetaControllerCallback(
             frequency=meta_controller_frequency,
             trigger_sysid_reload=True,  # Reload config on first call
         )
@@ -1605,9 +1605,13 @@ def main():
         logger.info(f"[HPO] Trial completed successfully with loss={best_loss:.6f}")
 
         # Write status file for SweepExecutor to read
+        # CRITICAL: Use math.isfinite() to check for both NaN AND Inf
+        # NaN is used as a sentinel for budget-exceeded trials
+        # Inf is used as a sentinel for failed training
+        # Both are invalid JSON and must be converted to None
         status = {
             "trial_id": args.trial_id,
-            "loss": best_loss if not math.isinf(best_loss) else None,
+            "loss": best_loss if math.isfinite(best_loss) else None,
             "epochs_completed": args.epochs,
             "status": "completed",
         }

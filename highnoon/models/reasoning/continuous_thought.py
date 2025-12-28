@@ -381,18 +381,25 @@ class ContinuousThoughtBlock(layers.Layer):
                 prune_threshold=0.1,
             )
 
-            # Phase 130.4: Use VQC amplitudes if provider is set and enabled
+            # Phase 130.4: VQC amplitudes for analysis (do NOT replace forward amplitudes)
+            # The path_amplitudes from C++ fused_coconut_bfs are connected to the gradient
+            # graph. Replacing them breaks the gradient chain and causes segfault during
+            # backward pass. Instead, we store VQC amplitudes separately for analysis.
+            vqc_amps_for_analysis = None
             if self._use_vqc_amplitudes and self._vqc_amplitude_provider is not None:
                 try:
                     vqc_amplitudes = self._vqc_amplitude_provider(self.num_paths)
-                    # Replace softmax path amplitudes with VQC Born rule amplitudes
                     if vqc_amplitudes is not None:
-                        path_amplitudes = vqc_amplitudes
-                        logger.debug("Using VQC amplitudes for path selection")
+                        # Use stop_gradient to ensure VQC amplitudes don't interfere
+                        # with C++ op's gradient computation
+                        vqc_amps_for_analysis = tf.stop_gradient(vqc_amplitudes)
+                        logger.debug("VQC amplitudes computed for analysis")
                 except Exception as e:
                     logger.debug(f"VQC amplitude provider failed: {e}")
 
-            self._last_amplitudes = path_amplitudes
+            # Store both: C++ op amplitudes for gradient, VQC for analysis
+            self._last_amplitudes = path_amplitudes  # Original C++ amplitudes (gradient-connected)
+            self._last_vqc_amplitudes = vqc_amps_for_analysis  # VQC amplitudes (for analysis)
             return output
 
         # Single-path mode: use original fused continuous thought

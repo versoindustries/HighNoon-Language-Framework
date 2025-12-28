@@ -456,6 +456,78 @@ class HPOSearchSpace:
             )
             self.memory_failure_count = 0
 
+    def _compute_progression_factor(self, trial_id: int) -> float:
+        """Compute budget progression factor based on trial index.
+
+        Progressive sizing ensures early trials start with small architectures
+        that fit well within the parameter budget, then gradually explore
+        larger configs as trials progress.
+
+        Args:
+            trial_id: Trial index (0-based)
+
+        Returns:
+            Progression factor (0.1 to 0.9) to multiply param_budget by.
+        """
+        if trial_id < 10:
+            # Trials 0-9: Start at 10-30% of budget (minimum viable configs)
+            return 0.1 + (0.2 * trial_id / 10)
+        elif trial_id < 50:
+            # Trials 10-49: Scale from 30% to 70% of budget
+            return 0.3 + (0.4 * (trial_id - 10) / 40)
+        else:
+            # Trials 50+: Allow up to 90% of budget
+            return min(0.9, 0.7 + (0.2 * (trial_id - 50) / 100))
+
+    def _estimate_max_sizes_for_budget(
+        self,
+        target_budget: int,
+    ) -> tuple[int, int, int]:
+        """Estimate max architecture sizes that fit within target param budget.
+
+        Uses inverse of estimate_model_params() to find compatible architectures.
+        Iterates through dimension/block/expert combinations to find the largest
+        config that fits.
+
+        Args:
+            target_budget: Target parameter count limit
+
+        Returns:
+            Tuple of (max_blocks, max_experts, max_dim) that fit within budget.
+        """
+        vocab_size = self.vocab_size or 32000
+
+        # Start with minimum viable config
+        best_blocks = 4
+        best_experts = 4
+        best_dim = 256
+
+        # Try dimensions from smallest to largest
+        sorted_dims = sorted(self.embedding_dim)
+        sorted_blocks = sorted(self.num_reasoning_blocks)
+        sorted_experts = sorted(self.num_moe_experts)
+
+        for dim in sorted_dims:
+            for blocks in sorted_blocks:
+                for experts in sorted_experts:
+                    test_config = {
+                        "vocab_size": vocab_size,
+                        "embedding_dim": dim,
+                        "hidden_dim": dim,
+                        "num_reasoning_blocks": blocks,
+                        "num_moe_experts": experts,
+                    }
+                    estimated = estimate_model_params(test_config)
+                    if estimated <= target_budget:
+                        # This config fits, update best if dimensions are better
+                        if dim >= best_dim:
+                            best_dim = dim
+                            best_blocks = blocks
+                            best_experts = experts
+                    # Don't break - continue checking other combos at this dim
+
+        return (best_blocks, best_experts, best_dim)
+
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> HPOSearchSpace:
         """Create HPOSearchSpace from config dictionary.
@@ -609,7 +681,32 @@ class HPOSearchSpace:
             max_dim = 4096
             max_batch = 128
 
-        # Filter search space by memory constraints
+        # =====================================================================
+        # PROGRESSIVE BUDGET-AWARE SIZING
+        # When param_budget is set, progressively scale architecture limits:
+        # - Early trials (0-9): 10-30% of budget → explore small configs first
+        # - Middle trials (10-49): 30-70% of budget → expand search
+        # - Late trials (50+): up to 90% of budget → find optimal near limit
+        # =====================================================================
+        if self.param_budget is not None:
+            prog_factor = self._compute_progression_factor(trial_id)
+            target_budget = int(self.param_budget * prog_factor)
+            prog_max_blocks, prog_max_experts, prog_max_dim = self._estimate_max_sizes_for_budget(
+                target_budget
+            )
+
+            # Use stricter of progressive and memory limits
+            max_blocks = min(max_blocks, prog_max_blocks)
+            max_experts = min(max_experts, prog_max_experts)
+            max_dim = min(max_dim, prog_max_dim)
+
+            logger.debug(
+                f"[SmartTuner] Trial {trial_id}: progression={prog_factor:.2f}, "
+                f"target_budget={target_budget / 1e6:.0f}M, max_dim={max_dim}, "
+                f"max_blocks={max_blocks}, max_experts={max_experts}"
+            )
+
+        # Filter search space by memory and budget constraints
         filtered_blocks = [b for b in self.num_reasoning_blocks if b <= max_blocks] or [4]
         filtered_experts = [e for e in self.num_moe_experts if e <= max_experts] or [4]
         filtered_dims = [d for d in self.embedding_dim if d <= max_dim] or [256]

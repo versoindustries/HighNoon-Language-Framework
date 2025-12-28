@@ -26,6 +26,35 @@ from pydantic import BaseModel, Field
 logger = logging.getLogger(__name__)
 
 # ============================================================================
+# Logging Configuration for HPO Debugging
+# ============================================================================
+# Set HIGHNOON_LOG_LEVEL=DEBUG to enable comprehensive HPO tracing
+import os as _os
+
+_log_level_str = _os.environ.get("HIGHNOON_LOG_LEVEL", "INFO").upper()
+_log_level = getattr(logging, _log_level_str, logging.INFO)
+
+# Configure root logger for comprehensive output
+logging.basicConfig(
+    level=_log_level,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
+
+# Enable HPO-specific loggers at debug level when debugging
+if _log_level == logging.DEBUG:
+    for _logger_name in [
+        "highnoon.services.sweep_executor",
+        "highnoon.services.hpo_manager",
+        "highnoon.services.hpo_trial_runner",
+        "highnoon.services.scheduler_factory",
+        "highnoon.services.quantum_hpo_scheduler",
+    ]:
+        logging.getLogger(_logger_name).setLevel(logging.DEBUG)
+    logger.info("[HPO DEBUG] Comprehensive HPO logging ENABLED")
+
+
+# ============================================================================
 # Pydantic Models for API
 # ============================================================================
 
@@ -773,6 +802,32 @@ class HPOTrialInfo(BaseModel):
     expected_calibration_error: float | None = None
     composite_score: float | None = None
 
+    @classmethod
+    def _sanitize_float(cls, value: float | None) -> float | None:
+        """Sanitize float for JSON serialization (NaN/Inf -> None)."""
+        if value is None:
+            return None
+        if math.isnan(value) or math.isinf(value):
+            return None
+        return value
+
+    def model_post_init(self, __context: Any) -> None:
+        """Sanitize all float fields after initialization."""
+        # Pydantic v2 model_post_init hook to sanitize NaN/Inf values
+        object.__setattr__(self, "learning_rate", self._sanitize_float(self.learning_rate) or 0.0)
+        object.__setattr__(self, "loss", self._sanitize_float(self.loss))
+        object.__setattr__(self, "duration_seconds", self._sanitize_float(self.duration_seconds))
+        object.__setattr__(self, "memory_mb", self._sanitize_float(self.memory_mb))
+        object.__setattr__(self, "peak_memory_mb", self._sanitize_float(self.peak_memory_mb))
+        object.__setattr__(self, "perplexity", self._sanitize_float(self.perplexity))
+        object.__setattr__(self, "mean_confidence", self._sanitize_float(self.mean_confidence))
+        object.__setattr__(
+            self,
+            "expected_calibration_error",
+            self._sanitize_float(self.expected_calibration_error),
+        )
+        object.__setattr__(self, "composite_score", self._sanitize_float(self.composite_score))
+
 
 class HPOModelConfig(BaseModel):
     """Model configuration from HPO sweep."""
@@ -815,6 +870,26 @@ class HPOSweepInfo(BaseModel):
 
     class Config:
         populate_by_name = True
+
+    @classmethod
+    def _sanitize_float(cls, value: float | None) -> float | None:
+        """Sanitize float for JSON serialization (NaN/Inf -> None)."""
+        if value is None:
+            return None
+        if math.isnan(value) or math.isinf(value):
+            return None
+        return value
+
+    def model_post_init(self, __context: Any) -> None:
+        """Sanitize all float fields after initialization."""
+        # Pydantic v2 model_post_init hook to sanitize NaN/Inf values
+        object.__setattr__(self, "best_loss", self._sanitize_float(self.best_loss))
+        object.__setattr__(
+            self, "best_composite_score", self._sanitize_float(self.best_composite_score)
+        )
+        object.__setattr__(self, "best_perplexity", self._sanitize_float(self.best_perplexity))
+        object.__setattr__(self, "best_confidence", self._sanitize_float(self.best_confidence))
+        object.__setattr__(self, "best_memory_mb", self._sanitize_float(self.best_memory_mb))
 
 
 # ============================================================================

@@ -167,6 +167,35 @@ class LatentKVAttention(layers.Layer):
             f"expected cache reduction: {self.get_cache_reduction_ratio():.1f}x"
         )
 
+    def build(self, input_shape: tf.TensorShape) -> None:
+        """Build the layer by initializing sublayer weights.
+
+        Args:
+            input_shape: Shape of input tensor [batch, seq_len, embedding_dim].
+        """
+        # Get embedding dimension from input shape
+        if len(input_shape) >= 3:
+            embedding_dim = input_shape[-1]
+        else:
+            embedding_dim = self.embedding_dim
+
+        # Build projection layers
+        self.q_proj.build([None, None, embedding_dim])
+        self.k_proj.build([None, None, embedding_dim])
+        self.v_proj.build([None, None, embedding_dim])
+        self.out_proj.build([None, None, self.embedding_dim])
+
+        # Build compression/expansion layers
+        kv_dim = self.num_kv_heads * self.head_dim
+        self.kv_compress.build([None, None, kv_dim])
+        self.kv_expand.build([None, None, self.latent_dim])
+
+        # Build normalization
+        self.norm.build([None, None, self.embedding_dim])
+
+        # Mark as built
+        super().build(input_shape)
+
     def _apply_feature_map(self, x: tf.Tensor) -> tf.Tensor:
         """Apply feature map for linear attention.
 

@@ -112,12 +112,19 @@ cleanup() {
 }
 trap cleanup SIGINT SIGTERM
 
-# Start FastAPI backend in background
+# Start FastAPI backend in background with debug logging
 echo ""
 echo -e "${CYAN}Starting FastAPI Backend...${NC}"
 echo -e "  API Host: ${GREEN}$HOST${NC}"
 echo -e "  API Port: ${GREEN}$API_PORT${NC}"
-python -m uvicorn highnoon.webui.app:create_app --factory --host "$HOST" --port "$API_PORT" &
+echo -e "  Debug Logging: ${GREEN}ENABLED${NC}"
+
+# Enable comprehensive debug logging for HPO tracing
+export HIGHNOON_LOG_LEVEL="DEBUG"
+export TF_CPP_MIN_LOG_LEVEL="1"  # Suppress only INFO TF logs, keep warnings
+export PYTHONUNBUFFERED="1"      # Ensure real-time log output
+
+python -m uvicorn highnoon.webui.app:create_app --factory --host "$HOST" --port "$API_PORT" --log-level debug &
 API_PID=$!
 sleep 2
 

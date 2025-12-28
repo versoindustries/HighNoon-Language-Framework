@@ -32,8 +32,12 @@ from typing import Any
 
 import tensorflow as tf
 
+# Phase 201.1: HD Activation Checkpointing
+# Phase 48+: Memory optimization flags
 from highnoon.config import (  # Phase 26-36 Quantum Architecture
     COMPRESSED_DIM,
+    HD_ACTIVATION_CTQW,
+    HD_ACTIVATION_DIM,
     MAMBA2_CONV_DIM,
     MAMBA2_EXPAND_FACTOR,
     MAMBA2_HEAD_DIM,
@@ -48,6 +52,8 @@ from highnoon.config import (  # Phase 26-36 Quantum Architecture
     SUPERPOSITION_DIM,
     TOP_K,
     UNITARY_RESIDUAL_INIT_ANGLE,
+    USE_GRADIENT_CHECKPOINTING,
+    USE_HD_ACTIVATION_CHECKPOINT,
     USE_QUANTUM_NORM,
     USE_STATE_BUS,
     USE_UNITARY_RESIDUAL,
@@ -56,6 +62,28 @@ from highnoon.config import (  # Phase 26-36 Quantum Architecture
 )
 from highnoon.models.reasoning.block_factory import create_reasoning_stack
 from highnoon.models.reasoning.state_bus import GlobalStateBus
+
+# Lazy import for HD checkpoint layer
+_hd_checkpoint_layer_cls = None
+_hd_checkpoint_loaded = False
+
+
+def _load_hd_checkpoint_lazy():
+    """Lazy load HD checkpoint layer to avoid slowing down module import."""
+    global _hd_checkpoint_layer_cls, _hd_checkpoint_loaded
+    if _hd_checkpoint_loaded:
+        return _hd_checkpoint_layer_cls is not None
+    try:
+        from highnoon.training.hd_activation_checkpoint import HDCheckpointLayer
+
+        _hd_checkpoint_layer_cls = HDCheckpointLayer
+        _hd_checkpoint_loaded = True
+        return True
+    except Exception as e:
+        logger.warning(f"HD Activation Checkpoint not available: {e}")
+        _hd_checkpoint_loaded = True
+        return False
+
 
 # Quantum ops (lazy import to avoid load at module level)
 _quantum_ops_loaded = False
@@ -367,6 +395,39 @@ class ReasoningModule(tf.keras.layers.Layer):
             )
             logger.info("  - Phase 5.1: Adaptive Block Routing enabled")
 
+        # Phase 48+: Gradient Checkpointing for memory efficiency
+        self.use_gradient_checkpointing = USE_GRADIENT_CHECKPOINTING
+
+        # Phase 201.1: HD Activation Checkpointing (enhanced gradient checkpointing)
+        self.use_hd_activation_checkpoint = (
+            USE_HD_ACTIVATION_CHECKPOINT and self.use_gradient_checkpointing
+        )
+        self._hd_checkpoint_wrappers = None
+        if self.use_hd_activation_checkpoint:
+            if _load_hd_checkpoint_lazy() and _hd_checkpoint_layer_cls is not None:
+                # Create HD checkpoint wrappers for each reasoning block
+                self._hd_checkpoint_wrappers = [
+                    _hd_checkpoint_layer_cls(
+                        sublayers=[block],
+                        hd_dim=HD_ACTIVATION_DIM,
+                        use_ctqw=HD_ACTIVATION_CTQW,
+                        name=f"hd_checkpoint_{i}",
+                    )
+                    for i, block in enumerate(self.reasoning_blocks)
+                ]
+                logger.info(
+                    f"  - Phase 201.1: HD Activation Checkpointing enabled "
+                    f"(hd_dim={HD_ACTIVATION_DIM}, ctqw={HD_ACTIVATION_CTQW})"
+                )
+            else:
+                self.use_hd_activation_checkpoint = False
+                logger.warning("HD Activation Checkpoint disabled (layer not available)")
+
+        if self.use_gradient_checkpointing and not self.use_hd_activation_checkpoint:
+            logger.info(
+                "  - Phase 48+: Standard Gradient Checkpointing enabled (reduces peak memory ~40-50%)"
+            )
+
         logger.info(
             f"ReasoningModule: {len(self.reasoning_blocks)} blocks, dim={embedding_dim}, "
             f"pattern={block_pattern}, types={[type(b).__name__ for b in self.reasoning_blocks]}, "
@@ -462,7 +523,21 @@ class ReasoningModule(tf.keras.layers.Layer):
                 x = x_norm
             else:
                 x = norm(x)
-            block_output = block(x, training=training)
+
+            # Phase 48+/201.1: Gradient Checkpointing - wrap block call to save memory
+            # HD variant uses holographic encoding, standard uses tf.recompute_grad
+            if self.use_hd_activation_checkpoint and training and self._hd_checkpoint_wrappers:
+                # Use HD checkpoint wrapper for this block
+                block_output = self._hd_checkpoint_wrappers[i](x, training=True)
+            elif self.use_gradient_checkpointing and training:
+                # Standard recompute_grad: discards activations and recomputes during backward
+                @tf.recompute_grad
+                def _checkpointed_block_call(block_input, blk=block):
+                    return blk(block_input, training=True)
+
+                block_output = _checkpointed_block_call(x)
+            else:
+                block_output = block(x, training=training)
 
             # Handle blocks that return tuples (stateful blocks)
             if isinstance(block_output, tuple):

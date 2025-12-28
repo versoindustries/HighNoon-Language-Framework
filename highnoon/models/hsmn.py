@@ -32,15 +32,21 @@ import tensorflow as tf
 from highnoon.config import (
     COMPRESSED_DIM,
     EMBEDDING_DIM,
+    HD_ACTIVE_VOCAB_SIZE,
+    HD_EMBEDDING_DIM,
+    HQE_CTQW_STEPS,
     LITE_MAX_REASONING_BLOCKS,
     MAMBA2_CONV_DIM,
     MAMBA2_STATE_DIM,
     MAX_CONTEXT_LEN,
     NUM_EXPERTS,
+    QUANTUM_LM_HEAD_LAYERS,
     REASONING_BLOCK_PATTERN,
     REASONING_HEADS,
     REASONING_LAYERS,
     TOP_K,
+    USE_HYPERDIMENSIONAL_EMBEDDING,
+    USE_QUANTUM_LM_HEAD,
     VOCAB_SIZE,
     WLAM_NUM_HEADS,
     WLAM_WAVELET_KERNEL_SIZE,
@@ -64,6 +70,7 @@ class _EncoderProxy:
     def embeddings(self) -> tf.Variable:
         """Get the embedding weights."""
         return self._token_embedding.embeddings
+
 
 logger = logging.getLogger(__name__)
 
@@ -125,10 +132,27 @@ class HSMN(tf.keras.Model):
         self.num_reasoning_blocks = num_reasoning_blocks
         self.block_pattern = block_pattern
 
-        # Token embedding
-        self.token_embedding = tf.keras.layers.Embedding(
-            vocab_size, embedding_dim, name="token_embedding"
-        )
+        # Token embedding - Phase 48: HyperdimensionalEmbedding support
+        if USE_HYPERDIMENSIONAL_EMBEDDING:
+            from highnoon.models.layers.hyperdimensional_layer import DualPathEmbedding
+
+            self.token_embedding = DualPathEmbedding(
+                vocab_size=vocab_size,
+                model_dim=embedding_dim,
+                active_vocab_size=HD_ACTIVE_VOCAB_SIZE,
+                hd_dim=HD_EMBEDDING_DIM,
+                use_ctqw=True,
+                ctqw_steps=HQE_CTQW_STEPS,
+                name="token_embedding_hde",
+            )
+            logger.info(
+                f"HSMN Token Embedding: Using DualPathEmbedding "
+                f"(active={HD_ACTIVE_VOCAB_SIZE}, hd_dim={HD_EMBEDDING_DIM})"
+            )
+        else:
+            self.token_embedding = tf.keras.layers.Embedding(
+                vocab_size, embedding_dim, name="token_embedding"
+            )
 
         # Positional encoding (learnable)
         self.position_embedding = tf.keras.layers.Embedding(
@@ -163,27 +187,42 @@ class HSMN(tf.keras.Model):
         self.output_norm = tf.keras.layers.LayerNormalization(epsilon=1e-6, name="output_norm")
 
         # LM head - optionally tied to embedding weights
+        # Priority: QuantumLMHead > TTDense > Dense
         self.tie_word_embeddings = tie_word_embeddings
         if not tie_word_embeddings:
-            # Import TT config and layer
-            from highnoon.config import TT_LM_HEAD_RANKS, USE_TT_LM_HEAD
+            if USE_QUANTUM_LM_HEAD:
+                # Phase 33: VQC-based output with Born rule
+                from highnoon.models.reasoning.block_factory import QuantumLMHead
 
-            if USE_TT_LM_HEAD:
-                # Use TTDense for massive parameter reduction (85-98%)
-                from highnoon.models.layers.tt_dense import TTDense
-
-                self.lm_head = TTDense(
-                    output_dim=vocab_size,
-                    tt_ranks=TT_LM_HEAD_RANKS,
-                    use_bias=False,
-                    name="lm_head_tt",
+                self.lm_head = QuantumLMHead(
+                    vocab_size=vocab_size,
+                    hidden_dim=embedding_dim,
+                    vqc_layers=QUANTUM_LM_HEAD_LAYERS,
+                    name="lm_head_quantum",
                 )
                 logger.info(
-                    f"HSMN LM Head: Using TTDense with ranks {TT_LM_HEAD_RANKS} "
-                    f"(~{100 * (1 - sum(TT_LM_HEAD_RANKS) / (embedding_dim * vocab_size)):.1f}% compression)"
+                    f"HSMN LM Head: Using QuantumLMHead " f"(vqc_layers={QUANTUM_LM_HEAD_LAYERS})"
                 )
             else:
-                self.lm_head = tf.keras.layers.Dense(vocab_size, name="lm_head", use_bias=False)
+                # Import TT config and layer
+                from highnoon.config import TT_LM_HEAD_RANKS, USE_TT_LM_HEAD
+
+                if USE_TT_LM_HEAD:
+                    # Use TTDense for massive parameter reduction (85-98%)
+                    from highnoon.models.layers.tt_dense import TTDense
+
+                    self.lm_head = TTDense(
+                        output_dim=vocab_size,
+                        tt_ranks=TT_LM_HEAD_RANKS,
+                        use_bias=False,
+                        name="lm_head_tt",
+                    )
+                    logger.info(
+                        f"HSMN LM Head: Using TTDense with ranks {TT_LM_HEAD_RANKS} "
+                        f"(~{100 * (1 - sum(TT_LM_HEAD_RANKS) / (embedding_dim * vocab_size)):.1f}% compression)"
+                    )
+                else:
+                    self.lm_head = tf.keras.layers.Dense(vocab_size, name="lm_head", use_bias=False)
         else:
             self.lm_head = None  # Use transposed embedding weights
 

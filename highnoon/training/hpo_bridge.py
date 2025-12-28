@@ -243,7 +243,7 @@ class HPOReporter:
             epoch: Optional current epoch
             memory_mb: Current RSS memory usage in MB
             peak_memory_mb: Peak RSS memory during trial in MB
-            **kwargs: Additional metrics to report
+            **kwargs: Additional metrics to report (batch_size, tokens_per_sec, etc.)
         """
         if not self._enabled:
             return
@@ -306,12 +306,24 @@ class HPOReporter:
             with self._metrics_file.open("a") as f:
                 f.write(json.dumps(metrics) + "\n")
 
+        # Build comprehensive log message with all available metrics
+        parts = []
+        if loss is not None:
+            parts.append(f"loss={loss:.6f}")
+        if perplexity is not None:
+            parts.append(f"ppl={perplexity:.2f}")
+        if gradient_norm is not None:
+            parts.append(f"grad={gradient_norm:.4f}")
+        if learning_rate is not None:
+            parts.append(f"lr={learning_rate:.2e}")
+        if memory_mb is not None:
+            parts.append(f"mem={memory_mb:.0f}MB")
+        message = " | ".join(parts) if parts else f"step={step}"
+
         # Send to WebUI API for real-time display
-        loss_str = f"{loss:.6f}" if loss is not None else "NaN"
-        ppl_str = f", ppl={perplexity:.2f}" if perplexity is not None else ""
         log_entry = {
             "level": "WARNING" if loss is None or (loss is not None and loss > 100) else "INFO",
-            "message": f"loss={loss_str}{ppl_str}",
+            "message": message,
             "step": step,
             "loss": loss,
             "perplexity": perplexity,
@@ -319,14 +331,30 @@ class HPOReporter:
             "learning_rate": learning_rate,
             "epoch": epoch,
             "memory_mb": memory_mb,
+            "peak_memory_mb": peak_memory_mb,
             "trial_id": self._trial_id,
+            # Pass through additional metrics for WebUI display
+            **{
+                k: v
+                for k, v in sanitized_kwargs.items()
+                if k
+                in [
+                    "batch_size",
+                    "tokens_per_sec",
+                    "optimizer",
+                    "phase",
+                    "barren_plateau_detected",
+                    "lr_scaled",
+                    "crystallization_active",
+                ]
+            },
         }
         self._send_to_api(log_entry)
 
-        # Log progress locally
+        # Log progress locally with rich formatting
         if step % 50 == 0:
-            mem_str = f", mem={memory_mb:.0f}MB" if memory_mb else ""
-            logger.info(f"[HPO Reporter] Step {step}: loss={loss_str}{ppl_str}{mem_str}")
+            epoch_str = f" [Epoch {epoch}]" if epoch is not None else ""
+            logger.info(f"[HPO Reporter]{epoch_str} Step {step}: {message}")
 
     def log(
         self,
@@ -359,6 +387,71 @@ class HPOReporter:
             logger.warning(f"[HPO] {message}")
         else:
             logger.info(f"[HPO] {message}")
+
+    def log_trial_start(
+        self,
+        config: dict[str, Any],
+        param_count: int | None = None,
+    ) -> None:
+        """Log trial configuration at the start for WebUI visibility.
+
+        This sends a comprehensive summary of the trial configuration
+        to the WebUI training console, making it easy to see what
+        architecture and hyperparameters are being tested.
+
+        Args:
+            config: Trial configuration dictionary
+            param_count: Estimated parameter count
+        """
+        if not self._enabled:
+            return
+
+        # Extract key configuration values
+        hidden_dim = config.get("hidden_dim") or config.get("embedding_dim", "N/A")
+        num_blocks = config.get("num_reasoning_blocks", "N/A")
+        num_experts = config.get("num_moe_experts", "N/A")
+        batch_size = config.get("batch_size", "N/A")
+        learning_rate = config.get("learning_rate", "N/A")
+        optimizer = config.get("optimizer", "N/A")
+        vocab_size = config.get("vocab_size", "N/A")
+        sequence_length = config.get("sequence_length", "N/A")
+
+        # Format learning rate
+        lr_str = f"{learning_rate:.2e}" if isinstance(learning_rate, float) else str(learning_rate)
+
+        # Format parameter count
+        param_str = f"{param_count / 1e6:.1f}M" if param_count else "N/A"
+
+        # Build configuration summary message
+        arch_msg = f"Architecture: dim={hidden_dim}, blocks={num_blocks}, experts={num_experts}"
+        train_msg = f"Training: lr={lr_str}, batch={batch_size}, optimizer={optimizer}"
+        data_msg = f"Data: vocab={vocab_size}, seq_len={sequence_length}"
+        param_msg = f"Parameters: ~{param_str}"
+
+        # Log each section
+        self.log(f"=== Trial {self._trial_id} Started ===", level="INFO")
+        self.log(
+            arch_msg,
+            level="INFO",
+            hidden_dim=hidden_dim,
+            num_blocks=num_blocks,
+            num_experts=num_experts,
+        )
+        self.log(
+            train_msg,
+            level="INFO",
+            learning_rate=learning_rate,
+            batch_size=batch_size,
+            optimizer=optimizer,
+        )
+        self.log(data_msg, level="INFO", vocab_size=vocab_size, sequence_length=sequence_length)
+        self.log(param_msg, level="INFO", param_count=param_count)
+
+        # Also log to local logger
+        logger.info(f"[HPO Trial] {arch_msg}")
+        logger.info(f"[HPO Trial] {train_msg}")
+        logger.info(f"[HPO Trial] {data_msg}")
+        logger.info(f"[HPO Trial] {param_msg}")
 
     def complete(
         self,

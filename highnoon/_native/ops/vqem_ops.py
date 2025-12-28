@@ -29,8 +29,8 @@ import logging
 
 import tensorflow as tf
 
-from highnoon._native.ops.lib_loader import resolve_op_library
 from highnoon import config
+from highnoon._native.ops.lib_loader import resolve_op_library
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,7 @@ def _load_ops():
     global _module, _available
     if _module is not None:
         return _available
-        
+
     try:
         lib_path = resolve_op_library(__file__, "_highnoon_core.so")
         if lib_path is None:
@@ -55,8 +55,7 @@ def _load_ops():
         _available = False
         logger.warning(f"Failed to load VQEM ops: {e}")
         raise RuntimeError(
-            "VQEM native ops not available. "
-            "Run ./build_secure.sh to compile."
+            "VQEM native ops not available. " "Run ./build_secure.sh to compile."
         ) from e
     return _available
 
@@ -103,7 +102,7 @@ def vqem_forward(
     """
     if not config.USE_VQEM:
         return input_state
-    
+
     _load_ops()
     return _module.vqem_forward(input_state, mitigation_params)
 

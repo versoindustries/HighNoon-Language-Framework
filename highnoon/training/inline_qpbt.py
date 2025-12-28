@@ -192,9 +192,7 @@ class InlineQuantumPBT:
             self.config.crossover_rate,
         )
 
-    def _init_population(
-        self, initial_config: dict[str, Any]
-    ) -> list[PopulationMember]:
+    def _init_population(self, initial_config: dict[str, Any]) -> list[PopulationMember]:
         """Initialize population from initial config with perturbations.
 
         Args:
@@ -243,9 +241,7 @@ class InlineQuantumPBT:
 
         return population
 
-    def _infer_bounds(
-        self, config: dict[str, Any]
-    ) -> dict[str, tuple[float, float]]:
+    def _infer_bounds(self, config: dict[str, Any]) -> dict[str, tuple[float, float]]:
         """Infer reasonable bounds for each parameter.
 
         Args:
@@ -320,7 +316,7 @@ class InlineQuantumPBT:
 
     def _normalize_amplitudes(self) -> None:
         """Normalize amplitudes to form valid quantum state."""
-        total = sum(m.amplitude ** 2 for m in self._population)
+        total = sum(m.amplitude**2 for m in self._population)
         if total > 1e-10:
             norm = np.sqrt(total)
             for member in self._population:
@@ -357,9 +353,7 @@ class InlineQuantumPBT:
         """
         # Evolution interval based on annealing schedule
         temperature = self._get_temperature()
-        interval_range = (
-            self.config.evolution_interval_max - self.config.evolution_interval_min
-        )
+        interval_range = self.config.evolution_interval_max - self.config.evolution_interval_min
         evolution_interval = int(
             self.config.evolution_interval_min + interval_range * (1 - temperature)
         )
@@ -370,7 +364,7 @@ class InlineQuantumPBT:
         self._last_evolution_step = step
 
         # Quantum-inspired selection: measure amplitude to select next config
-        probabilities = np.array([m.amplitude ** 2 for m in self._population])
+        probabilities = np.array([m.amplitude**2 for m in self._population])
         probabilities = probabilities / (probabilities.sum() + 1e-10)
 
         # Add temperature-based randomness
@@ -425,7 +419,10 @@ class InlineQuantumPBT:
         # Check for stagnation
         recent = history[-5:]
         std = np.std(recent)
-        return std < self.config.stagnation_threshold and np.random.random() < self.config.tunneling_probability
+        return (
+            std < self.config.stagnation_threshold
+            and np.random.random() < self.config.tunneling_probability
+        )
 
     def _apply_tunneling(self, idx: int) -> None:
         """Apply quantum tunneling: large random perturbation.
@@ -557,15 +554,17 @@ class InlineQuantumPBT:
         """
         summaries = []
         for i, member in enumerate(self._population):
-            summaries.append({
-                "index": i,
-                "amplitude": member.amplitude,
-                "phase": member.phase,
-                "mean_loss": member.get_mean_loss(),
-                "best_loss": member.best_loss,
-                "total_steps": member.total_steps,
-                "is_active": i == self._active_idx,
-            })
+            summaries.append(
+                {
+                    "index": i,
+                    "amplitude": member.amplitude,
+                    "phase": member.phase,
+                    "mean_loss": member.get_mean_loss(),
+                    "best_loss": member.best_loss,
+                    "total_steps": member.total_steps,
+                    "is_active": i == self._active_idx,
+                }
+            )
         return summaries
 
     def get_statistics(self) -> dict[str, Any]:

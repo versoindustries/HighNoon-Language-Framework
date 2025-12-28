@@ -30,8 +30,8 @@ from typing import Tuple
 
 import tensorflow as tf
 
-from highnoon._native.ops.lib_loader import resolve_op_library
 from highnoon import config
+from highnoon._native.ops.lib_loader import resolve_op_library
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +44,7 @@ def _load_ops():
     global _module, _available
     if _module is not None:
         return _available
-        
+
     try:
         lib_path = resolve_op_library(__file__, "_highnoon_core.so")
         if lib_path is None:
@@ -56,8 +56,7 @@ def _load_ops():
         _available = False
         logger.warning(f"Failed to load entropy regularization ops: {e}")
         raise RuntimeError(
-            "Entropy regularization native ops not available. "
-            "Run ./build_secure.sh to compile."
+            "Entropy regularization native ops not available. " "Run ./build_secure.sh to compile."
         ) from e
     return _available
 
@@ -83,7 +82,7 @@ def von_neumann_entropy_loss(
     target_entropy: float | None = None,
     spectral_flatness_target: float = 0.8,
     power_iter_steps: int = 10,
-) -> Tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
+) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
     """Compute Von Neumann entropy regularization loss.
 
     Uses eigenvalue decomposition of activation covariance to compute:
@@ -114,12 +113,12 @@ def von_neumann_entropy_loss(
     """
     if not config.USE_ENTROPY_REGULARIZATION:
         return tf.constant(0.0), tf.constant(0.0), tf.constant(0.0)
-    
+
     _load_ops()
     entropy_weight = entropy_weight if entropy_weight is not None else config.ENTROPY_REG_WEIGHT
     spectral_weight = spectral_weight if spectral_weight is not None else config.SPECTRAL_REG_WEIGHT
     target_entropy = target_entropy if target_entropy is not None else config.TARGET_ENTROPY
-    
+
     return _module.von_neumann_entropy_loss(
         activations,
         entropy_weight=entropy_weight,

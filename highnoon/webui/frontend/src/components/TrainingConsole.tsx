@@ -25,6 +25,18 @@ interface LogEntry {
     composite_score?: number;
     efficiency_score?: number;
     param_count?: number;
+    // Architecture info (on trial start)
+    hidden_dim?: number;
+    num_blocks?: number;
+    num_experts?: number;
+    batch_size?: number;
+    optimizer?: string;
+    vocab_size?: number;
+    sequence_length?: number;
+    // Training state indicators
+    phase?: string;
+    barren_plateau_detected?: boolean;
+    crystallization_active?: boolean;
 }
 
 interface TrainingConsoleProps {
@@ -56,6 +68,9 @@ export function TrainingConsole({ sweepId, isRunning, devMode = false }: Trainin
     const [currentPerplexity, setCurrentPerplexity] = useState<number | null>(null);
     const [currentConfidence, setCurrentConfidence] = useState<number | null>(null);
     const [currentMemoryMb, setCurrentMemoryMb] = useState<number | null>(null);
+    const [currentGradNorm, setCurrentGradNorm] = useState<number | null>(null);
+    const [currentLearningRate, setCurrentLearningRate] = useState<number | null>(null);
+    const [currentEpoch, setCurrentEpoch] = useState<number | null>(null);
     const [logIndex, setLogIndex] = useState(0);
     const consoleRef = useRef<HTMLDivElement>(null);
     const pollIntervalRef = useRef<number | null>(null);
@@ -108,6 +123,21 @@ export function TrainingConsole({ sweepId, isRunning, devMode = false }: Trainin
                         if (latestWithConfidence) {
                             setCurrentConfidence(latestWithConfidence.mean_confidence);
                         }
+                        // Update gradient norm from latest log
+                        const latestWithGradNorm = [...data.logs].reverse().find((l: LogEntry) => l.gradient_norm !== null && l.gradient_norm !== undefined);
+                        if (latestWithGradNorm) {
+                            setCurrentGradNorm(latestWithGradNorm.gradient_norm);
+                        }
+                        // Update learning rate from latest log
+                        const latestWithLR = [...data.logs].reverse().find((l: LogEntry) => l.learning_rate !== null && l.learning_rate !== undefined);
+                        if (latestWithLR) {
+                            setCurrentLearningRate(latestWithLR.learning_rate);
+                        }
+                        // Update epoch from latest log
+                        const latestWithEpoch = [...data.logs].reverse().find((l: LogEntry) => l.epoch !== null && l.epoch !== undefined);
+                        if (latestWithEpoch) {
+                            setCurrentEpoch(latestWithEpoch.epoch);
+                        }
 
                         scrollToBottom();
                     }
@@ -139,6 +169,9 @@ export function TrainingConsole({ sweepId, isRunning, devMode = false }: Trainin
         setCurrentPerplexity(null);
         setCurrentConfidence(null);
         setCurrentMemoryMb(null);
+        setCurrentGradNorm(null);
+        setCurrentLearningRate(null);
+        setCurrentEpoch(null);
     }, [sweepId]);
 
     // Filter logs - with null safety
@@ -192,34 +225,55 @@ export function TrainingConsole({ sweepId, isRunning, devMode = false }: Trainin
                 subtitle={isRunning ? 'Live' : sweepId ? 'Stopped' : 'No active sweep'}
             />
 
-            {/* Metrics display */}
+            {/* Live Metrics Header - shows real-time training state */}
             <div className="training-console__header">
                 <Terminal size={16} />
-                {currentLoss !== null && (
-                    <span className="training-console__metric">
-                        Loss: <strong>{formatLoss(currentLoss)}</strong>
-                    </span>
-                )}
-                {currentPerplexity !== null && (
-                    <span className="training-console__metric">
-                        PPL: <strong>{currentPerplexity.toFixed(2)}</strong>
-                    </span>
-                )}
-                {currentConfidence !== null && (
-                    <span className="training-console__metric">
-                        Conf: <strong>{(currentConfidence * 100).toFixed(1)}%</strong>
-                    </span>
-                )}
-                {currentStep !== null && (
-                    <span className="training-console__metric">
-                        Step: <strong>{currentStep}</strong>
-                    </span>
-                )}
-                {currentMemoryMb !== null && (
-                    <span className="training-console__metric">
-                        Mem: <strong>{currentMemoryMb.toFixed(0)}MB</strong>
-                    </span>
-                )}
+                {/* Primary metrics row */}
+                <div className="training-console__metrics-row">
+                    {currentEpoch !== null && (
+                        <span className="training-console__metric training-console__metric--epoch">
+                            Epoch: <strong>{currentEpoch}</strong>
+                        </span>
+                    )}
+                    {currentStep !== null && (
+                        <span className="training-console__metric">
+                            Step: <strong>{currentStep}</strong>
+                        </span>
+                    )}
+                    {currentLoss !== null && (
+                        <span className="training-console__metric training-console__metric--primary">
+                            Loss: <strong>{formatLoss(currentLoss)}</strong>
+                        </span>
+                    )}
+                    {currentPerplexity !== null && (
+                        <span className="training-console__metric">
+                            PPL: <strong>{currentPerplexity.toFixed(2)}</strong>
+                        </span>
+                    )}
+                </div>
+                {/* Secondary metrics row */}
+                <div className="training-console__metrics-row training-console__metrics-row--secondary">
+                    {currentGradNorm !== null && (
+                        <span className="training-console__metric training-console__metric--grad">
+                            Grad: <strong>{currentGradNorm.toFixed(4)}</strong>
+                        </span>
+                    )}
+                    {currentLearningRate !== null && (
+                        <span className="training-console__metric training-console__metric--lr">
+                            LR: <strong>{currentLearningRate.toExponential(2)}</strong>
+                        </span>
+                    )}
+                    {currentConfidence !== null && (
+                        <span className="training-console__metric">
+                            Conf: <strong>{(currentConfidence * 100).toFixed(1)}%</strong>
+                        </span>
+                    )}
+                    {currentMemoryMb !== null && (
+                        <span className="training-console__metric training-console__metric--mem">
+                            Mem: <strong>{currentMemoryMb.toFixed(0)}MB</strong>
+                        </span>
+                    )}
+                </div>
                 {devMode && (
                     <span className="training-console__dev-badge">DEV</span>
                 )}
@@ -305,6 +359,16 @@ export function TrainingConsole({ sweepId, isRunning, devMode = false }: Trainin
                                             [Trial {trialIdDisplay}]
                                         </span>
                                     )}
+                                    {log.epoch !== undefined && log.epoch !== null && (
+                                        <span className="training-console__epoch">
+                                            [E{log.epoch}]
+                                        </span>
+                                    )}
+                                    {log.step !== undefined && log.step !== null && (
+                                        <span className="training-console__step">
+                                            step={log.step}
+                                        </span>
+                                    )}
                                     {log.loss !== undefined && log.loss !== null && (
                                         <span className="training-console__loss">
                                             loss={formatLoss(log.loss)}
@@ -315,14 +379,19 @@ export function TrainingConsole({ sweepId, isRunning, devMode = false }: Trainin
                                             ppl={log.perplexity.toFixed(2)}
                                         </span>
                                     )}
+                                    {log.gradient_norm !== undefined && log.gradient_norm !== null && (
+                                        <span className="training-console__grad-norm">
+                                            grad={log.gradient_norm.toFixed(4)}
+                                        </span>
+                                    )}
+                                    {log.learning_rate !== undefined && log.learning_rate !== null && (
+                                        <span className="training-console__lr">
+                                            lr={log.learning_rate.toExponential(2)}
+                                        </span>
+                                    )}
                                     {log.mean_confidence !== undefined && log.mean_confidence !== null && (
                                         <span className="training-console__confidence">
                                             conf={( log.mean_confidence * 100).toFixed(1)}%
-                                        </span>
-                                    )}
-                                    {log.step !== undefined && log.step !== null && (
-                                        <span className="training-console__step">
-                                            step={log.step}
                                         </span>
                                     )}
                                     {log.memory_mb !== undefined && log.memory_mb !== null && (

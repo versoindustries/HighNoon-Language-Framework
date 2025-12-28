@@ -89,8 +89,7 @@ def dtc_stabilized_evolution(
     """
     if _ops is None:
         raise RuntimeError(
-            "DTC C++ operators not available. "
-            "Rebuild with: ./build_secure.sh --debug --lite"
+            "DTC C++ operators not available. " "Rebuild with: ./build_secure.sh --debug --lite"
         )
 
     return _ops.dtc_stabilized_evolution(
@@ -128,8 +127,7 @@ def dtc_order_parameter(
     """
     if _ops is None:
         raise RuntimeError(
-            "DTC C++ operators not available. "
-            "Rebuild with: ./build_secure.sh --debug --lite"
+            "DTC C++ operators not available. " "Rebuild with: ./build_secure.sh --debug --lite"
         )
 
     return _ops.dtc_order_parameter(
@@ -156,8 +154,7 @@ def apply_pi_pulse(
     """
     if _ops is None:
         raise RuntimeError(
-            "DTC C++ operators not available. "
-            "Rebuild with: ./build_secure.sh --debug --lite"
+            "DTC C++ operators not available. " "Rebuild with: ./build_secure.sh --debug --lite"
         )
 
     return _ops.apply_pi_pulse(
@@ -187,7 +184,7 @@ def is_dtc_available() -> bool:
         return False
 
 
-def get_dtc_load_error() -> Optional[str]:
+def get_dtc_load_error() -> str | None:
     """Get the error message if DTC ops failed to load.
 
     Returns:

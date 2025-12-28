@@ -49,12 +49,15 @@ try:
         _native_lib = _load_consolidated_binary()
         if _native_lib is not None:
             # Check if the ops are accessible via the library module
-            _NATIVE_OPS_AVAILABLE = hasattr(_native_lib, "quantum_galore_project") or \
-                                    hasattr(_native_lib, "compute_effective_rank")
+            _NATIVE_OPS_AVAILABLE = hasattr(_native_lib, "quantum_galore_project") or hasattr(
+                _native_lib, "compute_effective_rank"
+            )
             if not _NATIVE_OPS_AVAILABLE:
                 # TensorFlow registers ops with snake_case names on the loaded module
                 # Try to detect by looking for any GaLore-related attribute
-                lib_attrs = [a for a in dir(_native_lib) if 'galore' in a.lower() or 'rank' in a.lower()]
+                lib_attrs = [
+                    a for a in dir(_native_lib) if "galore" in a.lower() or "rank" in a.lower()
+                ]
                 _NATIVE_OPS_AVAILABLE = len(lib_attrs) > 0
             if _NATIVE_OPS_AVAILABLE:
                 logger.debug("[QUANTUM_GALORE] Native ops loaded successfully")
@@ -84,25 +87,25 @@ def _require_native():
 
 def _get_op(op_name: str):
     """Get an op from the native library.
-    
+
     TensorFlow registers ops with both snake_case and PascalCase names.
     Special handling for 'GaLore' capitalization.
     """
     _require_native()
-    
+
     # Try exact name first
     if hasattr(_native_lib, op_name):
         return getattr(_native_lib, op_name)
-    
+
     # Try PascalCase (convert from snake_case)
     # Special handling: 'galore' -> 'GaLore' (not 'Galore')
-    pascal_name = ''.join(word.capitalize() for word in op_name.split('_'))
-    pascal_name = pascal_name.replace('Galore', 'GaLore')  # Fix GaLore capitalization
+    pascal_name = "".join(word.capitalize() for word in op_name.split("_"))
+    pascal_name = pascal_name.replace("Galore", "GaLore")  # Fix GaLore capitalization
     if hasattr(_native_lib, pascal_name):
         return getattr(_native_lib, pascal_name)
-    
+
     # List available relevant ops for debugging
-    available = [a for a in dir(_native_lib) if op_name.replace('_', '').lower() in a.lower()]
+    available = [a for a in dir(_native_lib) if op_name.replace("_", "").lower() in a.lower()]
     raise RuntimeError(
         f"[QUANTUM_GALORE] Op '{op_name}' not found in native library. "
         f"Tried: {pascal_name}. Available similar: {available}"
@@ -204,7 +207,7 @@ def quantum_galore_project(
     bias: tf.Tensor,
     max_rank: int = 32,
     min_rank: int = 4,
-) -> Tuple[tf.Tensor, tf.Tensor]:
+) -> tuple[tf.Tensor, tf.Tensor]:
     """Project gradient to low-rank space using quantum random features.
 
     Uses entropy-based dynamic rank selection and quantum feature map
@@ -242,7 +245,7 @@ def quantum_galore_deproject(
     compressed: tf.Tensor,
     rotation_matrix: tf.Tensor,
     bias: tf.Tensor,
-    original_shape: Tuple[int, int],
+    original_shape: tuple[int, int],
     row_projection: bool = True,
 ) -> tf.Tensor:
     """Reconstruct full gradient from low-rank compressed representation.
@@ -278,7 +281,7 @@ def init_quantum_random_features(
     dim: int,
     seed: int = 42,
     scale: float | None = None,
-) -> Tuple[tf.Variable, tf.Variable]:
+) -> tuple[tf.Variable, tf.Variable]:
     """Initialize quantum random feature parameters.
 
     Creates rotation matrix and bias values for quantum feature map.

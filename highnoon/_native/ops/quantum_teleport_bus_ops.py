@@ -30,8 +30,8 @@ from typing import Tuple
 
 import tensorflow as tf
 
-from highnoon._native.ops.lib_loader import resolve_op_library
 from highnoon import config
+from highnoon._native.ops.lib_loader import resolve_op_library
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +44,7 @@ def _load_ops():
     global _module, _available
     if _module is not None:
         return _available
-        
+
     try:
         lib_path = resolve_op_library(__file__, "_highnoon_core.so")
         if lib_path is None:
@@ -56,8 +56,7 @@ def _load_ops():
         _available = False
         logger.warning(f"Failed to load Quantum Teleport Bus ops: {e}")
         raise RuntimeError(
-            "Quantum Teleport Bus native ops not available. "
-            "Run ./build_secure.sh to compile."
+            "Quantum Teleport Bus native ops not available. " "Run ./build_secure.sh to compile."
         ) from e
     return _available
 
@@ -82,7 +81,7 @@ def quantum_teleport_state(
     fidelity_threshold: float | None = None,
     use_error_correction: bool | None = None,
     seed: int = 42,
-) -> Tuple[tf.Tensor, tf.Tensor]:
+) -> tuple[tf.Tensor, tf.Tensor]:
     """Quantum state teleportation for cross-block communication.
 
     Implements quantum teleportation protocol:
@@ -115,15 +114,14 @@ def quantum_teleport_state(
         # Pass through if disabled, with perfect fidelity
         batch_size = tf.shape(input_state)[0]
         return input_state, tf.ones([batch_size], dtype=tf.float32)
-    
+
     _load_ops()
     entanglement_dim = entanglement_dim or config.TELEPORT_ENTANGLEMENT_DIM
     fidelity_threshold = fidelity_threshold or config.TELEPORT_FIDELITY_THRESHOLD
     use_error_correction = (
-        use_error_correction if use_error_correction is not None
-        else config.TELEPORT_USE_CORRECTION
+        use_error_correction if use_error_correction is not None else config.TELEPORT_USE_CORRECTION
     )
-    
+
     return _module.quantum_teleport_state(
         input_state,
         entanglement_dim=entanglement_dim,
@@ -150,7 +148,7 @@ def bell_measurement(
 
     Returns:
         Classical bits representing measurement outcome [batch, 2].
-        
+
         Outcomes:
         - [0, 0]: |Φ+⟩ state detected
         - [0, 1]: |Φ-⟩ state detected

@@ -47,21 +47,34 @@ from highnoon._native.ops.fused_superposition_moe_op import (
 
 # Import the custom segment_softmax implementation.
 from highnoon._native.ops.segment_softmax import segment_softmax
+
+# Phase 201.13: Adaptive Superposition Dimension
+# Phase 201.4: HD Shared Expert Basis
 from highnoon.config import (  # Phase 14.2: MoE Innovations; Phase 19.4: Thermodynamic Routing; Phase 29: Unitary Expert
     ADA_K_BASE,
     ADA_K_MAX,
     ADA_K_MIN,
     BALANCE_EMA_DECAY,
     ENABLE_EXPERT_PROBING,
+    HD_SHARED_BASIS_DIM,
+    HD_SHARED_BASIS_NUM_VECTORS,
     NEUMANN_CAYLEY_TERMS,
     NUM_SHARED_EXPERTS,
     QMOE_USE_FLOQUET_PHASE,  # S4: Floquet-QMoE phase routing
+    SUPERPOSITION_COMPLEXITY_SCALE,
     SUPERPOSITION_DIM,
+    SUPERPOSITION_MAX_DIM,
     SUPERPOSITION_MICRO_BATCH_SIZE,
+    SUPERPOSITION_MIN_DIM,
+    TENSOR_RING_NUM_CORES,
+    TENSOR_RING_RANK,
     USE_ADAPTIVE_K,
+    USE_ADAPTIVE_SUPERPOSITION,
     USE_AUX_LOSS_FREE_BALANCE,
+    USE_HD_SHARED_EXPERT_BASIS,
     USE_SHARED_EXPERTS,
     USE_SIGMOID_ROUTING,
+    USE_TENSOR_RING_MOE,
     USE_UNITARY_EXPERT,
     USE_WAVELET_ROUTING,
 )
@@ -69,6 +82,7 @@ from highnoon.models.layers.collapse import ContextualGatingCollapse
 
 # Import dependencies for SuperposedExpert
 from highnoon.models.tensor_layers import SuperpositionTTLayer
+from highnoon.utils import factorize_for_tt
 
 # Lazy import for quantum ops
 _unitary_expert_forward = None
@@ -271,31 +285,17 @@ class SuperposedExpert(layers.Layer):
         self.d_ff = d_ff
         self.superposition_dim = superposition_dim
 
-        def factorize(dim):
-            """Simple helper to factor a dimension into two, close to its sqrt."""
-            if dim <= 0:
-                return [1, dim]
-            s = int(math.sqrt(dim))
-            while s > 1 and dim % s != 0:
-                s -= 1
-            if s == 1:
-                for i in range(2, int(dim**0.5) + 2):
-                    if dim % i == 0:
-                        s = i
-                        break
-            return [s, dim // s] if s > 1 else [1, dim]
-
         self.ffn1 = SuperpositionTTLayer(
-            input_dims=factorize(d_model),
-            output_dims=factorize(d_ff),
+            input_dims=factorize_for_tt(d_model),
+            output_dims=factorize_for_tt(d_ff),
             tt_ranks=[1, 16, 1],
             superposition_dim=superposition_dim,
             name="superposed_ffn1",
         )
         self.activation = layers.Activation(tf.nn.gelu)
         self.ffn2 = SuperpositionTTLayer(
-            input_dims=factorize(d_ff),
-            output_dims=factorize(d_model),
+            input_dims=factorize_for_tt(d_ff),
+            output_dims=factorize_for_tt(d_model),
             tt_ranks=[1, 16, 1],
             superposition_dim=superposition_dim,
             name="superposed_ffn2",
@@ -370,6 +370,270 @@ class SuperposedExpert(layers.Layer):
                 "d_model": self.d_model,
                 "d_ff": self.d_ff,
                 "superposition_dim": self.superposition_dim,
+            }
+        )
+        return config
+
+
+class AdaptiveSuperposedExpert(layers.Layer):
+    """Phase 201.13: Adaptive Superposition Dimension Expert.
+
+    Extends SuperposedExpert with complexity-based superposition scaling.
+    Complex inputs (high entropy) get larger superposition for more capacity.
+    Simple inputs (low entropy) use smaller superposition for efficiency.
+
+    Complexity is estimated from token embedding entropy:
+        complexity = -sum(p * log(p)) / log(vocab_size)
+
+    Superposition dimension is then scaled:
+        S_adaptive = S_min + complexity * (S_max - S_min)
+
+    Args:
+        d_model: Model dimension.
+        d_ff: Feedforward dimension.
+        min_superposition: Minimum superposition dimension.
+        max_superposition: Maximum superposition dimension.
+        complexity_scale: Scale factor for complexity (1.0 = linear).
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        d_ff: int,
+        min_superposition: int = SUPERPOSITION_MIN_DIM,
+        max_superposition: int = SUPERPOSITION_MAX_DIM,
+        complexity_scale: float = SUPERPOSITION_COMPLEXITY_SCALE,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.d_model = d_model
+        self.d_ff = d_ff
+        self.min_superposition = min_superposition
+        self.max_superposition = max_superposition
+        self.complexity_scale = complexity_scale
+
+        # Create experts for each superposition level
+        self._experts_by_dim: dict[int, SuperposedExpert] = {}
+        for s_dim in range(min_superposition, max_superposition + 1):
+            self._experts_by_dim[s_dim] = SuperposedExpert(
+                d_model=d_model,
+                d_ff=d_ff,
+                superposition_dim=s_dim,
+                name=f"adaptive_expert_s{s_dim}",
+            )
+
+    def build(self, input_shape):
+        """Build all superposition dimension variants."""
+        for expert in self._experts_by_dim.values():
+            if not expert.built:
+                expert.build(input_shape)
+        super().build(input_shape)
+
+    def _estimate_complexity(self, inputs: tf.Tensor) -> tf.Tensor:
+        """Estimate input complexity from embedding entropy.
+
+        Args:
+            inputs: Token embeddings [num_tokens, d_model].
+
+        Returns:
+            Complexity score in [0, 1] as scalar.
+        """
+        # Compute softmax over embedding dimensions as pseudo-distribution
+        probs = tf.nn.softmax(tf.abs(inputs), axis=-1)
+
+        # Compute entropy
+        entropy = -tf.reduce_sum(probs * tf.math.log(probs + 1e-10), axis=-1)
+
+        # Normalize by max entropy (log(d_model))
+        max_entropy = tf.math.log(tf.cast(self.d_model, tf.float32))
+        normalized_entropy = tf.reduce_mean(entropy) / max_entropy
+
+        # Apply complexity scale
+        return tf.clip_by_value(
+            normalized_entropy * self.complexity_scale,
+            0.0,
+            1.0,
+        )
+
+    def call(self, inputs: tf.Tensor, training: bool = None) -> tf.Tensor:
+        """Forward pass with adaptive superposition dimension.
+
+        Args:
+            inputs: Token embeddings [num_tokens, d_model].
+            training: Whether in training mode.
+
+        Returns:
+            Expert output [num_tokens, d_model].
+        """
+        # Estimate complexity
+        complexity = self._estimate_complexity(inputs)
+
+        # Compute continuous superposition dimension
+        s_range = float(self.max_superposition - self.min_superposition)
+        s_continuous = tf.cast(self.min_superposition, tf.float32) + complexity * s_range
+
+        # Discretize to integer dimension
+        s_dim = tf.cast(tf.round(s_continuous), tf.int32)
+        s_dim = tf.clip_by_value(s_dim, self.min_superposition, self.max_superposition)
+
+        # Select appropriate expert
+        # Note: In eager mode we can use Python control flow
+        # For graph mode, we use tf.case for differentiable selection
+        s_dim_val = int(s_dim.numpy()) if tf.executing_eagerly() else self.min_superposition
+
+        if s_dim_val in self._experts_by_dim:
+            return self._experts_by_dim[s_dim_val](inputs, training=training)
+        else:
+            # Fallback to min dimension
+            return self._experts_by_dim[self.min_superposition](inputs, training=training)
+
+    def get_config(self) -> dict[str, Any]:
+        config = super().get_config()
+        config.update(
+            {
+                "d_model": self.d_model,
+                "d_ff": self.d_ff,
+                "min_superposition": self.min_superposition,
+                "max_superposition": self.max_superposition,
+                "complexity_scale": self.complexity_scale,
+            }
+        )
+        return config
+
+
+class HDSharedExpertBasis(layers.Layer):
+    """Phase 201.4: Hyperdimensional Shared Expert Basis.
+
+    Implements memory-efficient expert weights by sharing a common HD basis.
+    Each expert maintains lightweight coefficients that modulate the shared basis,
+    reducing memory by ~(num_experts / num_basis_vectors).
+
+    Architecture:
+        shared_basis: [num_vectors, hd_dim, d_model] - common across all experts
+        expert_coeffs: [num_experts, num_vectors] - per-expert modulation weights
+        W_expert_i = sum_j(coeffs[i,j] * shared_basis[j]) - reconstructed expert weight
+
+    Complexity: O(num_vectors * hd_dim * d_model) vs O(num_experts * d_model * d_ff)
+    Memory reduction: ~6x for 12 experts with 32 basis vectors
+    """
+
+    def __init__(
+        self,
+        num_experts: int,
+        d_model: int,
+        d_ff: int,
+        hd_dim: int = HD_SHARED_BASIS_DIM,
+        num_basis_vectors: int = HD_SHARED_BASIS_NUM_VECTORS,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.num_experts = num_experts
+        self.d_model = d_model
+        self.d_ff = d_ff
+        self.hd_dim = hd_dim
+        self.num_basis_vectors = num_basis_vectors
+
+    def build(self, input_shape):
+        """Build shared basis and per-expert coefficients."""
+        # Shared HD basis for up-projection: [num_vectors, d_model, hd_dim]
+        self.shared_basis_up = self.add_weight(
+            name="shared_basis_up",
+            shape=(self.num_basis_vectors, self.d_model, self.hd_dim),
+            initializer=tf.keras.initializers.GlorotUniform(),
+            trainable=True,
+        )
+        # Shared HD basis for down-projection: [num_vectors, hd_dim, d_model]
+        self.shared_basis_down = self.add_weight(
+            name="shared_basis_down",
+            shape=(self.num_basis_vectors, self.hd_dim, self.d_model),
+            initializer=tf.keras.initializers.GlorotUniform(),
+            trainable=True,
+        )
+        # Per-expert coefficients for up-projection: [num_experts, num_vectors]
+        self.expert_coeffs_up = self.add_weight(
+            name="expert_coeffs_up",
+            shape=(self.num_experts, self.num_basis_vectors),
+            initializer=tf.keras.initializers.Orthogonal(gain=0.5),
+            trainable=True,
+        )
+        # Per-expert coefficients for down-projection: [num_experts, num_vectors]
+        self.expert_coeffs_down = self.add_weight(
+            name="expert_coeffs_down",
+            shape=(self.num_experts, self.num_basis_vectors),
+            initializer=tf.keras.initializers.Orthogonal(gain=0.5),
+            trainable=True,
+        )
+        # Per-expert bias
+        self.expert_bias = self.add_weight(
+            name="expert_bias",
+            shape=(self.num_experts, self.d_model),
+            initializer="zeros",
+            trainable=True,
+        )
+        super().build(input_shape)
+
+    def call_expert(self, inputs: tf.Tensor, expert_idx: int) -> tf.Tensor:
+        """Forward pass through a specific expert using shared basis.
+
+        Args:
+            inputs: Token embeddings [num_tokens, d_model].
+            expert_idx: Index of the expert to use.
+
+        Returns:
+            Expert output [num_tokens, d_model].
+        """
+        # Get coefficients for this expert
+        coeffs_up = self.expert_coeffs_up[expert_idx]  # [num_vectors]
+        coeffs_down = self.expert_coeffs_down[expert_idx]  # [num_vectors]
+        bias = self.expert_bias[expert_idx]  # [d_model]
+
+        # Reconstruct expert weights from shared basis
+        # W_up = sum_j(coeffs[j] * basis_up[j]): [d_model, hd_dim]
+        W_up = tf.einsum("v,vdh->dh", coeffs_up, self.shared_basis_up)
+        # W_down = sum_j(coeffs[j] * basis_down[j]): [hd_dim, d_model]
+        W_down = tf.einsum("v,vhd->hd", coeffs_down, self.shared_basis_down)
+
+        # Expert forward: x -> GELU(x @ W_up) @ W_down + bias
+        hidden = tf.matmul(inputs, W_up)  # [num_tokens, hd_dim]
+        hidden = tf.nn.gelu(hidden)
+        output = tf.matmul(hidden, W_down) + bias  # [num_tokens, d_model]
+        return output
+
+    def get_config(self) -> dict[str, Any]:
+        config = super().get_config()
+        config.update(
+            {
+                "num_experts": self.num_experts,
+                "d_model": self.d_model,
+                "d_ff": self.d_ff,
+                "hd_dim": self.hd_dim,
+                "num_basis_vectors": self.num_basis_vectors,
+            }
+        )
+        return config
+
+
+class HDSharedExpert(layers.Layer):
+    """Expert wrapper that uses HDSharedExpertBasis for weight sharing.
+
+    This is a thin wrapper that stores just the expert index and delegates
+    to the shared basis for actual computation.
+    """
+
+    def __init__(self, shared_basis: HDSharedExpertBasis, expert_idx: int, **kwargs):
+        super().__init__(**kwargs)
+        self.shared_basis = shared_basis
+        self.expert_idx = expert_idx
+
+    def call(self, inputs: tf.Tensor, training: bool = None) -> tf.Tensor:
+        """Forward pass delegating to shared basis."""
+        return self.shared_basis.call_expert(inputs, self.expert_idx)
+
+    def get_config(self) -> dict[str, Any]:
+        config = super().get_config()
+        config.update(
+            {
+                "expert_idx": self.expert_idx,
             }
         )
         return config
@@ -524,8 +788,24 @@ class MoELayer(layers.Layer):
         self.floquet_routing_weight = floquet_routing_weight
         self._floquet_phase: tf.Tensor | None = None  # Set externally by TimeCrystalBlock
 
-        # Router network
-        self.router = layers.Dense(num_experts, use_bias=True, name="router")
+        # Router network - Phase 48.1: TensorRingLayer for memory-efficient routing
+        if USE_TENSOR_RING_MOE:
+            from highnoon.models.quantum.tensor_layers import TensorRingLayer
+
+            self.router = TensorRingLayer(
+                output_dim=num_experts,
+                input_dim=d_model,
+                num_cores=TENSOR_RING_NUM_CORES,
+                ring_rank=TENSOR_RING_RANK,
+                use_bias=True,
+                name="router_tensor_ring",
+            )
+            log.info(
+                f"  - Phase 48.1: TensorRing Router enabled "
+                f"(ring_rank={TENSOR_RING_RANK}, cores={TENSOR_RING_NUM_CORES})"
+            )
+        else:
+            self.router = layers.Dense(num_experts, use_bias=True, name="router")
 
         # Phase 12.12: Expert specialization components
         if self.enable_expert_probing:
@@ -542,6 +822,23 @@ class MoELayer(layers.Layer):
             )
         else:
             self.wavelet_router = None
+
+        # Phase 201.4: HD Shared Expert Basis (must be initialized before building experts)
+        self.use_hd_shared_basis = USE_HD_SHARED_EXPERT_BASIS
+        self._hd_shared_basis: HDSharedExpertBasis | None = None
+        if self.use_hd_shared_basis:
+            self._hd_shared_basis = HDSharedExpertBasis(
+                num_experts=num_experts,
+                d_model=d_model,
+                d_ff=d_ff,
+                hd_dim=HD_SHARED_BASIS_DIM,
+                num_basis_vectors=HD_SHARED_BASIS_NUM_VECTORS,
+                name="hd_shared_expert_basis",
+            )
+            log.info(
+                f"  - Phase 201.4: HD Shared Expert Basis enabled "
+                f"(hd_dim={HD_SHARED_BASIS_DIM}, vectors={HD_SHARED_BASIS_NUM_VECTORS})"
+            )
 
         # Build expert modules
         self.experts = [self._build_expert(i) for i in range(self.num_experts)]
@@ -590,9 +887,22 @@ class MoELayer(layers.Layer):
         if use_floquet_routing:
             log.info(f"  - S4: Floquet Phase Routing enabled (weight={floquet_routing_weight})")
 
+        # Phase 201.13: Log adaptive superposition
+        if USE_ADAPTIVE_SUPERPOSITION:
+            log.info(
+                f"  - Phase 201.13: Adaptive Superposition enabled "
+                f"(dim={SUPERPOSITION_MIN_DIM}-{SUPERPOSITION_MAX_DIM})"
+            )
+
     def build(self, input_shape):
         """Build layer weights."""
         expert_input_shape = tf.TensorShape([None, self.d_model])
+
+        # Phase 201.4: Build HD Shared Expert Basis BEFORE building experts
+        # The shared basis must be built first so HDSharedExpert can delegate to it
+        if self._hd_shared_basis is not None and not self._hd_shared_basis.built:
+            self._hd_shared_basis.build(expert_input_shape)
+
         for expert in self.experts:
             if not expert.built:
                 expert.build(expert_input_shape)
@@ -652,6 +962,7 @@ class MoELayer(layers.Layer):
             self._hopfield_cpp_available = False
             try:
                 from highnoon._native.ops.hopfield_memory_op import hopfield_ops_available
+
                 self._hopfield_cpp_available = hopfield_ops_available()
             except ImportError:
                 self._hopfield_cpp_available = False
@@ -665,10 +976,22 @@ class MoELayer(layers.Layer):
     def _build_expert(self, index):
         """Build expert module.
 
-        Uses UnitaryExpert when USE_UNITARY_EXPERT is enabled,
+        Uses HDSharedExpert when USE_HD_SHARED_EXPERT_BASIS is enabled,
+        UnitaryExpert when USE_UNITARY_EXPERT is enabled,
+        AdaptiveSuperposedExpert when USE_ADAPTIVE_SUPERPOSITION is enabled,
         otherwise uses SuperposedExpert.
         """
         name = f"expert_{index}" if isinstance(index, int) else f"expert_{index}"
+
+        # Phase 201.4: HD Shared Expert Basis (highest priority - best memory savings)
+        if self.use_hd_shared_basis and self._hd_shared_basis is not None:
+            if isinstance(index, int):
+                return HDSharedExpert(
+                    shared_basis=self._hd_shared_basis,
+                    expert_idx=index,
+                    name=f"hd_shared_{name}",
+                )
+            # For shared experts (non-int index), fall through to other options
 
         if USE_UNITARY_EXPERT:
             if not _unitary_expert_ops_loaded:
@@ -681,6 +1004,17 @@ class MoELayer(layers.Layer):
                     name=f"unitary_{name}",
                 )
 
+        # Phase 201.13: Adaptive Superposition Dimension
+        if USE_ADAPTIVE_SUPERPOSITION:
+            return AdaptiveSuperposedExpert(
+                d_model=self.d_model,
+                d_ff=self.d_ff,
+                min_superposition=SUPERPOSITION_MIN_DIM,
+                max_superposition=SUPERPOSITION_MAX_DIM,
+                complexity_scale=SUPERPOSITION_COMPLEXITY_SCALE,
+                name=f"adaptive_superposed_{name}",
+            )
+
         # Fallback to SuperposedExpert
         return SuperposedExpert(
             d_model=self.d_model,
@@ -689,9 +1023,7 @@ class MoELayer(layers.Layer):
             name=f"superposed_{name}",
         )
 
-    def _compute_hopfield_routing_bias(
-        self, token_states: tf.Tensor
-    ) -> tf.Tensor:
+    def _compute_hopfield_routing_bias(self, token_states: tf.Tensor) -> tf.Tensor:
         """Compute Hopfield energy-based routing bias for MoE.
 
         Phase 86 implementation: Uses Modern Hopfield Network energy to detect
@@ -718,6 +1050,7 @@ class MoELayer(layers.Layer):
             )
 
         from highnoon._native.ops.hopfield_memory_op import hopfield_moe_routing_bias
+
         return hopfield_moe_routing_bias(
             token_states,
             self.expert_patterns,
@@ -808,7 +1141,6 @@ class MoELayer(layers.Layer):
         routing_bias = tf.reshape(routing_bias, [1, self.num_experts])
 
         return routing_bias
-
 
     def call(
         self, inputs, training=None

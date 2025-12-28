@@ -44,7 +44,7 @@ def _load_ops():
     global _module, _available
     if _module is not None:
         return _available
-        
+
     try:
         lib_path = resolve_op_library(__file__, "_highnoon_core.so")
         if lib_path is None:
@@ -210,7 +210,7 @@ def adiabatic_optimizer_step(
     initial_temp: float = 10.0,
     final_temp: float = 0.01,
     seed: int = 42,
-) -> Tuple[tf.Tensor, tf.Tensor]:
+) -> tuple[tf.Tensor, tf.Tensor]:
     """Quantum adiabatic optimizer step with tunneling.
 
     This optimizer uses quantum-inspired dynamics to escape local minima
@@ -264,7 +264,7 @@ def geodesic_optimizer_step(
     velocity: tf.Tensor,
     learning_rate: float = 0.001,
     momentum: float = 0.9,
-) -> Tuple[tf.Tensor, tf.Tensor]:
+) -> tuple[tf.Tensor, tf.Tensor]:
     """Geodesic optimizer step with natural gradients on parameter manifold.
 
     This optimizer follows geodesic paths on the parameter manifold,
@@ -315,7 +315,7 @@ def sympflow_step(
     learning_rate: float = 0.001,
     mass: float = 1.0,
     friction: float = 0.1,
-) -> Tuple[tf.Tensor, tf.Tensor]:
+) -> tuple[tf.Tensor, tf.Tensor]:
     """Symplectic flow optimizer step with Hamiltonian dynamics.
 
     SympFlow uses symplectic integration to preserve the Hamiltonian
@@ -395,4 +395,3 @@ __all__ = [
     # General
     "ops_available",
 ]
-

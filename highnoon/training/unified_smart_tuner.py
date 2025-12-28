@@ -43,16 +43,16 @@ import logging
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from highnoon.training.vqc_meta_optimizer import VQCTuningDecisions
 
 import numpy as np
 import tensorflow as tf
 
 from highnoon import config as hn_config
-from highnoon.training.barren_plateau import (
-    BarrenPlateauMonitor,
-    LayerMitigation,
-)
+from highnoon.training.barren_plateau import BarrenPlateauMonitor, LayerMitigation
 from highnoon.training.control_bridge import EvolutionTimeControlBridge
 from highnoon.training.gradient_compression import TensorGaLoreCompressor
 from highnoon.training.quantum_lr_controller import QuantumAdaptiveLRController
@@ -366,9 +366,7 @@ class UnifiedSmartTuner:
             self._vqc_meta = VQCMetaOptimizer(vqc_config)
             logger.info("[SmartTuner] VQC Meta-Optimizer enabled")
         except Exception as e:
-            logger.warning(
-                "[SmartTuner] VQC Meta-Optimizer not available: %s", e
-            )
+            logger.warning("[SmartTuner] VQC Meta-Optimizer not available: %s", e)
             self._vqc_meta = None
 
     def _init_fisher_grouper(self) -> None:
@@ -387,18 +385,13 @@ class UnifiedSmartTuner:
             self._fisher_grouper = FisherLayerGrouper(self.model, fisher_config)
             logger.info("[SmartTuner] Fisher Layer Grouper enabled")
         except Exception as e:
-            logger.warning(
-                "[SmartTuner] Fisher Layer Grouper not available: %s", e
-            )
+            logger.warning("[SmartTuner] Fisher Layer Grouper not available: %s", e)
             self._fisher_grouper = None
 
     def _init_inline_qpbt(self) -> None:
         """Initialize Inline Quantum PBT component."""
         try:
-            from highnoon.training.inline_qpbt import (
-                InlineQuantumPBT,
-                InlineQPBTConfig,
-            )
+            from highnoon.training.inline_qpbt import InlineQPBTConfig, InlineQuantumPBT
 
             initial_config = {
                 "lr": self.config.lr_initial,
@@ -416,9 +409,7 @@ class UnifiedSmartTuner:
             self._inline_qpbt.set_max_steps(self._total_steps)
             logger.info("[SmartTuner] Inline Quantum PBT enabled")
         except Exception as e:
-            logger.warning(
-                "[SmartTuner] Inline Quantum PBT not available: %s", e
-            )
+            logger.warning("[SmartTuner] Inline Quantum PBT not available: %s", e)
             self._inline_qpbt = None
 
     def _init_qng(self) -> None:
@@ -433,9 +424,7 @@ class UnifiedSmartTuner:
             )
             logger.info("[SmartTuner] Quantum Natural Gradient enabled")
         except Exception as e:
-            logger.warning(
-                "[SmartTuner] Quantum Natural Gradient not available: %s", e
-            )
+            logger.warning("[SmartTuner] Quantum Natural Gradient not available: %s", e)
             self._qng = None
 
     def _init_memory(self) -> None:
@@ -504,9 +493,7 @@ class UnifiedSmartTuner:
                 self._grad_norm_history = self._grad_norm_history[-50:]
 
         # 1. EMERGENCY CHECK: Gradient explosion or NaN
-        if gradient_norm > self.config.emergency_grad_threshold or not math.isfinite(
-            gradient_norm
-        ):
+        if gradient_norm > self.config.emergency_grad_threshold or not math.isfinite(gradient_norm):
             return self._emergency_response(gradient_norm, loss)
 
         # Check if recovering from emergency
@@ -581,14 +568,10 @@ class UnifiedSmartTuner:
 
         # 4. COORDINATED DECISION MAKING (with quantum enhancement)
         if bp_detected and self._current_phase != "emergency":
-            return self._barren_plateau_response(
-                entropy, gradient_norm, vqc_decisions
-            )
+            return self._barren_plateau_response(entropy, gradient_norm, vqc_decisions)
 
         elif self._current_phase == "exploration":
-            return self._exploration_response(
-                entropy, loss_trend, gradient_norm, vqc_decisions
-            )
+            return self._exploration_response(entropy, loss_trend, gradient_norm, vqc_decisions)
 
         elif self._current_phase == "exploitation":
             return self._exploitation_response(step, gradient_norm, vqc_decisions)
@@ -615,9 +598,7 @@ class UnifiedSmartTuner:
             self._current_phase = "exploitation"
             self._exploration_factor = 0.2
 
-    def _emergency_response(
-        self, gradient_norm: float, loss: float
-    ) -> TuningDecisions:
+    def _emergency_response(self, gradient_norm: float, loss: float) -> TuningDecisions:
         """Emergency response for gradient explosion."""
         self._emergency_mode = True
         self._emergency_step_count = 0
@@ -656,7 +637,7 @@ class UnifiedSmartTuner:
         self,
         entropy: float,
         gradient_norm: float,
-        vqc_decisions: "VQCTuningDecisions | None" = None,
+        vqc_decisions: VQCTuningDecisions | None = None,
     ) -> TuningDecisions:
         """Coordinated response to barren plateau detection.
 
@@ -732,7 +713,7 @@ class UnifiedSmartTuner:
         entropy: float,
         loss_trend: float,
         gradient_norm: float,
-        vqc_decisions: "VQCTuningDecisions | None" = None,
+        vqc_decisions: VQCTuningDecisions | None = None,
     ) -> TuningDecisions:
         """Response during exploration phase - higher variance allowed.
 
@@ -769,7 +750,7 @@ class UnifiedSmartTuner:
             galore_rank = max(8, min(128, galore_rank))
             max_grad_norm *= vqc_decisions.max_grad_norm_multiplier
             # Add VQC exploration boost
-            lr_scale *= (1.0 + vqc_decisions.exploration_boost * 0.1)
+            lr_scale *= 1.0 + vqc_decisions.exploration_boost * 0.1
 
         effective_lr = base_lr * lr_scale
         effective_lr = max(self.config.lr_min, min(self.config.lr_max, effective_lr))
@@ -792,7 +773,7 @@ class UnifiedSmartTuner:
         self,
         step: int,
         gradient_norm: float,
-        vqc_decisions: "VQCTuningDecisions | None" = None,
+        vqc_decisions: VQCTuningDecisions | None = None,
     ) -> TuningDecisions:
         """Response during exploitation phase - stable, lower LR.
 
@@ -969,15 +950,15 @@ class UnifiedSmartTuner:
 
         # Build trajectory from history
         trajectory = []
-        for i, (loss, grad_norm) in enumerate(
-            zip(self._loss_history, self._grad_norm_history)
-        ):
+        for i, (loss, grad_norm) in enumerate(zip(self._loss_history, self._grad_norm_history)):
             trajectory.append(
                 {
                     "step": i,
-                    "learning_rate": self._lr_controller._state.lr_history[i]
-                    if i < len(self._lr_controller._state.lr_history)
-                    else self.config.lr_initial,
+                    "learning_rate": (
+                        self._lr_controller._state.lr_history[i]
+                        if i < len(self._lr_controller._state.lr_history)
+                        else self.config.lr_initial
+                    ),
                     "galore_rank": self.config.galore_rank,
                     "loss": loss,
                     "grad_norm": grad_norm,
@@ -993,9 +974,7 @@ class UnifiedSmartTuner:
             tuner_trajectory=trajectory,
         )
 
-    def suggest_initial_config(
-        self, architecture_config: dict
-    ) -> dict[str, Any]:
+    def suggest_initial_config(self, architecture_config: dict) -> dict[str, Any]:
         """Get suggested initial configuration from cross-trial memory.
 
         Args:

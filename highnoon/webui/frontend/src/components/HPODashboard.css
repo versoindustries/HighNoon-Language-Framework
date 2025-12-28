@@ -323,6 +323,43 @@
     color: var(--text-muted);
 }
 
+/* Wide metric card for architecture details */
+.hpo-dashboard__metric-card--wide {
+    grid-column: span 2;
+    background: linear-gradient(135deg, var(--bg-surface) 0%, rgba(6, 182, 212, 0.08) 100%);
+    border-color: rgba(6, 182, 212, 0.3);
+}
+
+.hpo-dashboard__architecture-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: var(--spacing-sm);
+    margin-top: var(--spacing-xs);
+}
+
+.hpo-dashboard__arch-item {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: var(--spacing-xs) var(--spacing-sm);
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: var(--radius-sm);
+}
+
+.hpo-dashboard__arch-label {
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    letter-spacing: 0.05em;
+}
+
+.hpo-dashboard__arch-value {
+    font-size: var(--text-sm);
+    font-weight: var(--font-semibold);
+    color: var(--color-info);
+    font-variant-numeric: tabular-nums;
+}
+
 /* =============================================================================
    CHARTS SECTION
    ============================================================================= */

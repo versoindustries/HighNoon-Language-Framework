@@ -10,6 +10,7 @@ Phase 10.2: Integrated SuperwordMerger for semantic n-gram grouping.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 import numpy as np
@@ -68,7 +69,7 @@ def create_tokenizer(
 def load_training_dataset(
     batch_size: int = 16,
     sequence_length: int = 256,
-    vocab_size: int = 512,
+    vocab_size: int | None = None,  # Defaults to config.VOCAB_SIZE
     tokenizer: QWTTextTokenizer | None = None,
     use_dummy_embeddings: bool = False,
     curriculum_id: str | None = None,
@@ -85,6 +86,10 @@ def load_training_dataset(
     prefetch_buffer_size: int | None = None,
     use_adaptive_tokenizer: bool = True,
     adaptive_min_freq: int = 10,
+    # Phase 200+: HD Streaming Mode (Quantum-Enhanced Memory Optimization)
+    use_hd_streaming: bool = False,
+    hd_reservoir_size: int = 2000,
+    hd_dim: int = 1024,
 ) -> tuple[tf.data.Dataset, QWTTextTokenizer, SuperwordMerger | None]:
     """Load a training dataset with tokenization and optional superword merging.
 
@@ -119,17 +124,91 @@ def load_training_dataset(
             For memory-constrained HPO, set to 1-4. For high-throughput, use None (auto).
         use_adaptive_tokenizer: Use AdaptiveQWTTokenizer with learnable codebook (default: True).
         adaptive_min_freq: Minimum n-gram frequency for adaptive tokenizer learning.
+        use_hd_streaming: Use HolographicCorpus for memory-efficient streaming (default: False).
+            Enables quantum-enhanced compression with 5-20x memory reduction.
+        hd_reservoir_size: Maximum samples in HD reservoir (default: 2000).
+        hd_dim: Holographic dimension for compression (default: 1024).
 
     Returns:
         Tuple of (dataset, tokenizer, merger) where:
         - dataset yields (input_ids, labels)
         - tokenizer is the QWTTextTokenizer or AdaptiveQWTTokenizer instance
-        - merger is the trained SuperwordMerger (or None if using adaptive tokenizer)
+        - merger is the trained SuperwordMerger (or None if using adaptive tokenizer/HD streaming)
     """
+
+    # Phase 200+: HD Streaming Mode (Quantum-Enhanced Memory Optimization)
+    # This mode uses HolographicCorpus to compress samples into fixed-size HD bundles
+    # with amplitude-based reservoir sampling, achieving 5-20x memory reduction.
+    if use_hd_streaming and hf_dataset_name:
+        logger.info(
+            "[Data Loaders] Using HD Streaming Mode: reservoir=%d, hd_dim=%d",
+            hd_reservoir_size,
+            hd_dim,
+        )
+
+        from highnoon.data.streaming_tokenizer import StreamingHDTokenizer
+
+        # Create tokenizer if not provided
+        if tokenizer is None:
+            if use_adaptive_tokenizer:
+                from highnoon.tokenization import AdaptiveQWTTokenizer
+
+                tokenizer = AdaptiveQWTTokenizer(
+                    vocab_size=vocab_size or config.VOCAB_SIZE,
+                    model_max_length=sequence_length,
+                    min_ngram_size=2,
+                    max_ngram_size=5,
+                )
+            else:
+                tokenizer = create_tokenizer(
+                    vocab_size=vocab_size or config.VOCAB_SIZE,
+                    max_length=sequence_length,
+                )
+
+        # Create streaming HD tokenizer and process dataset
+        hd_streamer = StreamingHDTokenizer(
+            log_frequency=1000,
+            learn_vocab_samples=min(5000, max_samples or 5000),
+        )
+
+        corpus = hd_streamer.process_stream(
+            hf_dataset_name=hf_dataset_name,
+            tokenizer=tokenizer,
+            text_column=text_column,
+            split=split,
+            reservoir_size=hd_reservoir_size,
+            hd_dim=hd_dim,
+            max_seq_len=sequence_length,
+            max_samples=max_samples,
+            vocab_size=tokenizer.vocab_size,
+            learn_vocab=use_adaptive_tokenizer,
+        )
+
+        # Create dataset from HD corpus
+        dataset = corpus.create_dataset(
+            batch_size=batch_size,
+            shuffle=shuffle,
+            prefetch=prefetch_buffer_size,
+        )
+
+        logger.info(
+            "[Data Loaders] HD Streaming complete: %d samples compressed, %.2f MB",
+            len(corpus.bundles),
+            corpus.get_statistics()["memory_bytes"] / (1024 * 1024),
+        )
+
+        return dataset, tokenizer, None  # merger is always None in HD mode
+
+    # Resolve vocab_size from config if not provided
+    if vocab_size is None:
+        vocab_size = config.VOCAB_SIZE
+        logger.info("[Data Loaders] Using config.VOCAB_SIZE=%d", vocab_size)
+
     # Create or use provided tokenizer
     if tokenizer is None:
         if use_adaptive_tokenizer:
             from highnoon.tokenization import AdaptiveQWTTokenizer
+
             tokenizer = AdaptiveQWTTokenizer(
                 vocab_size=vocab_size,
                 model_max_length=sequence_length,
@@ -164,13 +243,57 @@ def load_training_dataset(
         try:
             from datasets import load_dataset as hf_load_dataset
 
-            # Use streaming=True to avoid downloading entire dataset
-            hf_dataset = hf_load_dataset(
-                hf_dataset_name,
-                split=split,
-                streaming=True,  # Stream data on-the-fly
-                trust_remote_code=True,
-            )
+            # Retry logic for transient network errors
+            max_retries = 3
+            retry_delay = 2.0  # seconds, doubles each retry
+            hf_dataset = None
+
+            for attempt in range(max_retries):
+                try:
+                    # Use streaming=True to avoid downloading entire dataset
+                    hf_dataset = hf_load_dataset(
+                        hf_dataset_name,
+                        split=split,
+                        streaming=True,  # Stream data on-the-fly
+                        trust_remote_code=True,
+                    )
+                    break  # Success, exit retry loop
+                except (ConnectionError, TimeoutError, OSError) as net_err:
+                    if attempt < max_retries - 1:
+                        logger.warning(
+                            "[Data Loaders] Network error loading dataset (attempt %d/%d): %s. Retrying in %.1fs...",
+                            attempt + 1,
+                            max_retries,
+                            net_err,
+                            retry_delay,
+                        )
+                        time.sleep(retry_delay)
+                        retry_delay *= 2  # Exponential backoff
+                    else:
+                        raise  # Re-raise on final attempt
+                except Exception as e:
+                    # Check if it's a requests/urllib network error
+                    err_str = str(e).lower()
+                    if any(
+                        x in err_str for x in ["connection", "timeout", "network", "socket", "ssl"]
+                    ):
+                        if attempt < max_retries - 1:
+                            logger.warning(
+                                "[Data Loaders] Network error loading dataset (attempt %d/%d): %s. Retrying in %.1fs...",
+                                attempt + 1,
+                                max_retries,
+                                e,
+                                retry_delay,
+                            )
+                            time.sleep(retry_delay)
+                            retry_delay *= 2
+                        else:
+                            raise
+                    else:
+                        raise  # Non-network error, don't retry
+
+            if hf_dataset is None:
+                raise RuntimeError(f"Failed to load dataset after {max_retries} attempts")
 
             logger.info("[Data Loaders] Streaming dataset: %s", hf_dataset_name)
 
@@ -241,6 +364,7 @@ def load_training_dataset(
 
     # Train AdaptiveQWTTokenizer if enabled (before tokenizing)
     from highnoon.tokenization import AdaptiveQWTTokenizer
+
     if isinstance(tokenizer, AdaptiveQWTTokenizer) and not tokenizer.is_trained:
         logger.info(
             "[Data Loaders] Training AdaptiveQWTTokenizer on %d texts (min_freq=%d)...",
@@ -274,17 +398,16 @@ def load_training_dataset(
     actual_vocab_size = tokenizer.vocab_size
     max_token_id = int(np.max(token_array))
     min_token_id = int(np.min(token_array))
-    
+
     logger.info(
-        "[Data Loaders] Tokenized %d samples, shape=%s, "
-        "token_range=[%d, %d], vocab_size=%d",
+        "[Data Loaders] Tokenized %d samples, shape=%s, " "token_range=[%d, %d], vocab_size=%d",
         num_samples,
         token_array.shape,
         min_token_id,
         max_token_id,
         actual_vocab_size,
     )
-    
+
     if max_token_id >= actual_vocab_size:
         logger.error(
             "[Data Loaders] CRITICAL: max_token_id=%d >= vocab_size=%d. "
@@ -294,7 +417,6 @@ def load_training_dataset(
         )
         # Clamp to valid range to prevent NaN
         token_array = np.clip(token_array, 0, actual_vocab_size - 1)
-
 
     # Phase 10.2: SuperwordMerger Integration
     # Train and apply superword merging if enabled

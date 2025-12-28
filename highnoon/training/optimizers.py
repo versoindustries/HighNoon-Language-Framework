@@ -524,17 +524,17 @@ class SympFlowQNGOptimizer(tf.keras.optimizers.Optimizer):
         **kwargs,
     ):
         # Pass clipnorm to base class if supported, otherwise handle manually
-        if 'clipnorm' not in kwargs:
-            kwargs['clipnorm'] = clipnorm
+        if "clipnorm" not in kwargs:
+            kwargs["clipnorm"] = clipnorm
         super().__init__(learning_rate=learning_rate, name=name, **kwargs)
 
         # Import config for defaults
         from highnoon import config as cfg
 
-        self.mass = mass or getattr(cfg, 'SYMPFLOW_MASS', 1.0)
-        self.friction = friction or getattr(cfg, 'SYMPFLOW_FRICTION', 0.01)
-        self.geodesic_weight = geodesic_weight or getattr(cfg, 'SYMPFLOW_GEODESIC_WEIGHT', 0.1)
-        self._use_geodesic = getattr(cfg, 'SYMPFLOW_USE_QNG_GEODESIC', True)
+        self.mass = mass or getattr(cfg, "SYMPFLOW_MASS", 1.0)
+        self.friction = friction or getattr(cfg, "SYMPFLOW_FRICTION", 0.01)
+        self.geodesic_weight = geodesic_weight or getattr(cfg, "SYMPFLOW_GEODESIC_WEIGHT", 0.1)
+        self._use_geodesic = getattr(cfg, "SYMPFLOW_USE_QNG_GEODESIC", True)
         self._clipnorm = clipnorm
 
         # Momentum slots
@@ -552,9 +552,7 @@ class SympFlowQNGOptimizer(tf.keras.optimizers.Optimizer):
         self.qfim_diags = []
         for var in var_list:
             # Momentum slot (initialized to zero)
-            self.momentums.append(
-                self.add_variable_from_reference(var, "momentum")
-            )
+            self.momentums.append(self.add_variable_from_reference(var, "momentum"))
             # QFIM diagonal estimate (initialized to 1.0 for stability)
             qfim_slot = self.add_variable_from_reference(var, "qfim_diag")
             qfim_slot.assign(tf.ones_like(var))
@@ -649,7 +647,7 @@ class SympFlowQNGOptimizer(tf.keras.optimizers.Optimizer):
 
         # Skip update if gradient is non-finite
         if not grad_finite:
-            var_name = getattr(var, 'name', 'unknown')
+            var_name = getattr(var, "name", "unknown")
             logger.warning(f"[SympFlowQNG] Skipping update for {var_name}: non-finite gradient")
             return
 
@@ -666,7 +664,7 @@ class SympFlowQNGOptimizer(tf.keras.optimizers.Optimizer):
                 grad_values = tf.cond(
                     grad_norm > self._clipnorm,
                     lambda: grad_values * (self._clipnorm / (grad_norm + 1e-8)),
-                    lambda: grad_values
+                    lambda: grad_values,
                 )
             m_slices = tf.gather(momentum, grad.indices)
             new_m = m_slices - lr * grad_values
@@ -686,7 +684,7 @@ class SympFlowQNGOptimizer(tf.keras.optimizers.Optimizer):
             clipped_grad = tf.cond(
                 grad_norm > self._clipnorm,
                 lambda: grad * (self._clipnorm / (grad_norm + 1e-8)),
-                lambda: grad
+                lambda: grad,
             )
 
         # Step 1: First half-step for momentum
@@ -705,7 +703,7 @@ class SympFlowQNGOptimizer(tf.keras.optimizers.Optimizer):
         if tf.reduce_all(tf.math.is_finite(update)):
             var.assign_add(update)
         else:
-            var_name = getattr(var, 'name', 'unknown')
+            var_name = getattr(var, "name", "unknown")
             logger.warning(f"[SympFlowQNG] Skipping update for {var_name}: non-finite update value")
             return
 
@@ -725,10 +723,12 @@ class SympFlowQNGOptimizer(tf.keras.optimizers.Optimizer):
     def get_config(self):
         """Get optimizer configuration."""
         config = super().get_config()
-        config.update({
-            "mass": self.mass,
-            "friction": self.friction,
-            "geodesic_weight": self.geodesic_weight,
-            "clipnorm": self._clipnorm,
-        })
+        config.update(
+            {
+                "mass": self.mass,
+                "friction": self.friction,
+                "geodesic_weight": self.geodesic_weight,
+                "clipnorm": self._clipnorm,
+            }
+        )
         return config

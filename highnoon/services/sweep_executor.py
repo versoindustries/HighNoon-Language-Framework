@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import gzip
 import json
 import logging
 import math
@@ -24,6 +25,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+# Phase 201.6: Sweep compression config
+from highnoon.config import SWEEP_COMPRESS_CHECKPOINTS, SWEEP_MAX_IN_MEMORY_TRIALS
 
 # Note: Using synchronous file I/O for checkpoints (small files)
 
@@ -111,6 +115,12 @@ class SweepConfig:
 
     # Convergence-based stopping (runs until convergence detected)
     auto_stop_on_convergence: bool = True
+
+    # PBT (Population-Based Training) configuration
+    enable_pbt: bool = False  # Enable cross-trial weight transfer
+    pbt_checkpoint_dir: str = "pbt_checkpoints"  # Shared checkpoint directory
+    pbt_exploit_threshold: float = 1.2  # Exploit if 20% worse than best
+    pbt_explore_perturbation: float = 0.2  # ±20% perturbation on explore
 
     # Additional model config passthrough
     model_config: dict[str, Any] = field(default_factory=dict)
@@ -287,6 +297,16 @@ class RetryStrategy:
                         int(modified["hidden_dim"] * self.scale_factors["hidden_dim"]),
                     )
 
+        elif failure_type == "crash":
+            # Trial crashed before producing a loss - reduce model complexity
+            logger.warning("[HPO] Trial crashed (no loss produced), reducing complexity")
+            if "batch_size" in modified and retry_count == 1:
+                modified["batch_size"] = max(1, modified["batch_size"] // 2)
+            if retry_count > 1 and "num_reasoning_blocks" in modified:
+                modified["num_reasoning_blocks"] = max(2, modified["num_reasoning_blocks"] - 2)
+            if retry_count > 2 and "num_moe_experts" in modified:
+                modified["num_moe_experts"] = max(2, modified["num_moe_experts"] // 2)
+
         logger.info(
             f"[HPO] Modified config for retry {retry_count}: "
             f"failure_type={failure_type}, changes applied"
@@ -294,12 +314,12 @@ class RetryStrategy:
 
         return modified
 
-    def classify_failure(self, error_message: str | None, loss: float) -> str:
+    def classify_failure(self, error_message: str | None, loss: float | None) -> str:
         """Classify the type of failure from error message and loss.
 
         Args:
             error_message: Error message from trial
-            loss: Final loss value
+            loss: Final loss value (may be None if trial crashed)
 
         Returns:
             Failure type string
@@ -312,6 +332,10 @@ class RetryStrategy:
                 return "swap_spike"
             if "memory" in error_lower:
                 return "memory_critical"
+
+        # Handle None loss (trial crashed before producing a loss)
+        if loss is None:
+            return "crash"
 
         if math.isnan(loss):
             return "nan_loss"
@@ -362,10 +386,18 @@ class SweepCheckpointer:
                 "max_parallel": executor.config.max_parallel,
                 "objective": executor.config.objective,
             },
+            # Phase 201.6: Track evicted trials count
+            "evicted_trials_count": getattr(executor, "_evicted_trials_count", 0),
         }
 
-        with open(self.checkpoint_file, "w") as f:
-            f.write(json.dumps(checkpoint, indent=2))
+        # Phase 201.6: Use gzip compression for checkpoint files
+        if SWEEP_COMPRESS_CHECKPOINTS:
+            checkpoint_path = self.storage_path / f"{self.sweep_id}_checkpoint.json.gz"
+            with gzip.open(checkpoint_path, "wt", encoding="utf-8") as f:
+                json.dump(checkpoint, f, indent=2)
+        else:
+            with open(self.checkpoint_file, "w") as f:
+                f.write(json.dumps(checkpoint, indent=2))
 
         logger.info(f"[HPO] Checkpoint saved: {len(executor.completed_trials)} trials completed")
 
@@ -375,6 +407,12 @@ class SweepCheckpointer:
         Returns:
             Checkpoint data dictionary or None if no checkpoint exists
         """
+        # Phase 201.6: Try gzip first, then plain JSON
+        gzip_file = self.storage_path / f"{self.sweep_id}_checkpoint.json.gz"
+        if gzip_file.exists():
+            with gzip.open(gzip_file, "rt", encoding="utf-8") as f:
+                return json.load(f)
+
         if not self.checkpoint_file.exists():
             return None
 
@@ -602,6 +640,11 @@ class SweepExecutor:
         )
         self.checkpointer = SweepCheckpointer(sweep_id, self.storage_path)
 
+        # Phase 201.6: LRU eviction tracking
+        self._max_in_memory_trials = SWEEP_MAX_IN_MEMORY_TRIALS
+        self._evicted_trials_count = 0
+        self._pareto_protected_ids: set[str] = set()  # Never evict Pareto-optimal trials
+
     def _log(self, level: str, message: str, **extra: Any) -> None:
         """Log a message and optionally call the log callback.
 
@@ -761,6 +804,16 @@ class SweepExecutor:
                 self._log("INFO", f"Starting trial {trial_id} (attempt {retries + 1})")
                 result = await self._execute_trial_subprocess(trial_id, current_config)
 
+                # Check for budget exceeded - special case: skip without retry or counting
+                if math.isnan(result.loss) and result.error and "budget" in result.error.lower():
+                    self._log(
+                        "WARNING",
+                        f"Trial {trial_id} skipped: exceeds parameter budget (not counted)",
+                    )
+                    # Mark as budget skip with a flag the processor can detect
+                    result.error = "BUDGET_EXCEEDED: " + (result.error or "")
+                    return result
+
                 if result.loss == float("inf") or math.isnan(result.loss):
                     failure_type = self.retry_strategy.classify_failure(result.error, result.loss)
                     if retries < max_retries:
@@ -813,6 +866,15 @@ class SweepExecutor:
 
         with open(config_file, "w") as f:
             json.dump(config, f, indent=2)
+
+        # VERBOSE: Print trial start info for debugging
+        print(f"\n[HPO DEBUG] Starting trial {trial_id}")
+        print(f"[HPO DEBUG] Config file: {config_file}")
+        print(
+            f"[HPO DEBUG] Key hyperparams: lr={config.get('learning_rate')}, "
+            f"optimizer={config.get('optimizer')}, batch_size={config.get('batch_size')}"
+        )
+        print(f"[HPO DEBUG] Dataset: {config.get('hf_dataset_name', 'sample_texts')}")
 
         # Run trial subprocess with complete environment
         trial_runner_module = "highnoon.services.hpo_trial_runner"
@@ -907,13 +969,66 @@ class SweepExecutor:
                     logger.debug(f"[HPO] Could not read metrics.jsonl for memory: {e}")
 
         if process.returncode != 0 and not error:
-            error = stderr.decode()[:500] if stderr else "Unknown error"
+            # Capture full error - don't truncate for debugging
+            error = stderr.decode() if stderr else "Unknown error"
 
-        # Log trial output for debugging
+        # VERBOSE LOGGING: Print trial subprocess output to console for debugging
+        print(f"\n{'='*80}")
+        print(
+            f"[HPO DEBUG] Trial {trial_id} completed in {wall_time:.1f}s (exit code: {process.returncode})"
+        )
+        print(
+            f"[HPO DEBUG] Config: learning_rate={config.get('learning_rate')}, "
+            f"optimizer={config.get('optimizer')}, max_grad_norm={config.get('max_grad_norm')}"
+        )
+        print(
+            f"[HPO DEBUG] Model: hidden_dim={config.get('hidden_dim')}, "
+            f"blocks={config.get('num_reasoning_blocks')}, experts={config.get('num_moe_experts')}"
+        )
+        print(f"[HPO DEBUG] Loss: {loss}")
+        if error:
+            # Print full error, not truncated
+            print("[HPO DEBUG] Error:")
+            for line in error.split("\n"):
+                if line.strip():
+                    print(f"  [ERROR] {line}")
+
         if stdout:
-            for line in stdout.decode().split("\n")[-10:]:  # Last 10 lines
+            stdout_text = stdout.decode()
+            print(f"\n[HPO DEBUG] === STDOUT ({len(stdout_text)} chars) ===")
+            # Print all stdout lines
+            for line in stdout_text.split("\n"):
+                if line.strip():
+                    print(f"  | {line}")
+
+        if stderr:
+            stderr_text = stderr.decode()
+            print(f"\n[HPO DEBUG] === STDERR ({len(stderr_text)} chars) ===")
+            # Print ALL stderr lines for debugging, not just last 50
+            for line in stderr_text.split("\n"):
+                if line.strip():
+                    print(f"  ! {line}")
+
+        print(f"{'='*80}\n")
+
+        # Log trial output for debugging (for the WebUI logs)
+        # Send more lines to WebUI for better visibility
+        if stdout:
+            for line in stdout.decode().split("\n")[-30:]:  # Last 30 lines (was 10)
                 if line.strip():
                     self._log("INFO", line.strip(), trial_id=trial_id)
+
+        # Also send errors to WebUI logs (so they appear in TrainingConsole)
+        if error and process.returncode != 0:
+            # Send full error to WebUI, split into lines for readability
+            self._log(
+                "ERROR",
+                f"Trial {trial_id} failed (exit code {process.returncode})",
+                trial_id=trial_id,
+            )
+            for line in error.split("\n")[-50:]:  # Last 50 lines of error
+                if line.strip():
+                    self._log("ERROR", line.strip(), trial_id=trial_id)
 
         result = TrialResult(
             trial_id=trial_id,
@@ -948,10 +1063,29 @@ class SweepExecutor:
             self.running_trials.pop(result.trial_id, None)
             self.running_trial_configs.pop(result.trial_id, None)
 
+            # Check for budget exceeded - don't count as a completed trial
+            if result.error and result.error.startswith("BUDGET_EXCEEDED:"):
+                self._log(
+                    "INFO",
+                    f"Trial {result.trial_id} skipped (budget exceeded), requesting replacement trial",
+                )
+                # Request a replacement trial from the scheduler
+                try:
+                    queued = await self._queue_next_trials(1)
+                    if queued > 0:
+                        self._log("INFO", "Replacement trial queued")
+                except Exception as e:
+                    self._log("WARNING", f"Failed to queue replacement trial: {e}")
+                return  # Don't count this trial
+
             # Add to completed
             self.completed_trials.append(result)
 
             # Report to scheduler for adaptive sampling
+            # CRITICAL: Must call report_result(), NOT report_intermediate()!
+            # - report_intermediate(): Only updates amplitude during trial execution
+            # - report_result(): Updates trial history, triggers population evolution,
+            #   enables convergence tracking, and quantum tunneling mechanisms
             try:
                 from highnoon.services.hpo_schedulers import TrialResult as SchedulerTrialResult
 
@@ -963,12 +1097,20 @@ class SweepExecutor:
                     wall_time_seconds=result.wall_time_seconds,
                     is_complete=True,
                 )
-                self.scheduler.report_intermediate(scheduler_result)
+                # Use report_result to trigger QAHPO population evolution
+                self.scheduler.report_result(scheduler_result)
             except Exception as e:
                 self._log("WARNING", f"Failed to report to scheduler: {e}")
 
             # Update Pareto frontier
             self.scorer.update_pareto_frontier(result)
+
+            # Phase 201.6: Track Pareto-optimal trials for LRU protection
+            if result.is_on_pareto_frontier:
+                self._pareto_protected_ids.add(result.trial_id)
+
+            # Phase 201.6: LRU eviction - keep memory bounded for large sweeps
+            self._evict_old_trials_if_needed()
 
             # Update best trial
             if result.loss < (self.best_trial.loss if self.best_trial else float("inf")):
@@ -988,6 +1130,46 @@ class SweepExecutor:
             # Periodic checkpoint
             if len(self.completed_trials) % self.config.fault_tolerance.checkpoint_frequency == 0:
                 await self.checkpointer.save_checkpoint(self)
+
+    def _evict_old_trials_if_needed(self) -> None:
+        """Phase 201.6: Evict oldest non-essential trials if over memory limit.
+
+        Protects:
+        - Best trial (self.best_trial)
+        - Pareto frontier trials (self._pareto_protected_ids)
+        - Most recent N trials (where N = _max_in_memory_trials)
+
+        Evicts oldest trials that don't meet protection criteria.
+        """
+        if len(self.completed_trials) <= self._max_in_memory_trials:
+            return
+
+        # How many to evict
+        num_to_evict = len(self.completed_trials) - self._max_in_memory_trials
+
+        # Build eviction candidates (oldest first, excluding protected)
+        best_id = self.best_trial.trial_id if self.best_trial else None
+        evictable = []
+
+        for trial in self.completed_trials:
+            if trial.trial_id == best_id:
+                continue  # Protect best
+            if trial.trial_id in self._pareto_protected_ids:
+                continue  # Protect Pareto-optimal
+            evictable.append(trial)
+
+        # Evict oldest first (they're at the front of the list)
+        to_evict = evictable[:num_to_evict]
+        if to_evict:
+            evict_ids = {t.trial_id for t in to_evict}
+            self.completed_trials = [
+                t for t in self.completed_trials if t.trial_id not in evict_ids
+            ]
+            self._evicted_trials_count += len(to_evict)
+            logger.debug(
+                f"[HPO] Evicted {len(to_evict)} old trials, "
+                f"keeping {len(self.completed_trials)} in memory"
+            )
 
     def _restore_from_checkpoint(self, checkpoint: dict[str, Any]) -> None:
         """Restore state from checkpoint.

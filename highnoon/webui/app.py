@@ -1128,7 +1128,7 @@ def create_app(debug: bool = False) -> FastAPI:
 
     def load_curriculum_presets() -> dict[str, dict[str, Any]]:
         """Load curriculum presets from JSON file.
-        
+
         Returns dictionary mapping preset IDs to preset configurations.
         Falls back to minimal defaults if file not found.
         """
@@ -1137,11 +1137,13 @@ def create_app(debug: bool = False) -> FastAPI:
                 with open(CURRICULUM_PRESETS_FILE, encoding="utf-8") as f:
                     data = json.load(f)
                     presets = data.get("presets", {})
-                    print(f"[Curriculum] Loaded {len(presets)} presets from {CURRICULUM_PRESETS_FILE}")
+                    print(
+                        f"[Curriculum] Loaded {len(presets)} presets from {CURRICULUM_PRESETS_FILE}"
+                    )
                     return presets
             except Exception as e:
                 print(f"[Curriculum] Failed to load presets: {e}")
-        
+
         # Fallback defaults if JSON not found
         return {
             "verso-baseline": {
@@ -1157,7 +1159,7 @@ def create_app(debug: bool = False) -> FastAPI:
 
     def save_curriculum_presets(presets: dict[str, dict[str, Any]]) -> None:
         """Save curriculum presets to JSON file.
-        
+
         This allows dynamic updates to presets when users create new curricula
         and want to save them as reusable presets.
         """
@@ -1168,11 +1170,11 @@ def create_app(debug: bool = False) -> FastAPI:
             if CURRICULUM_PRESETS_FILE.exists():
                 with open(CURRICULUM_PRESETS_FILE, encoding="utf-8") as f:
                     existing_data = json.load(f)
-            
+
             # Update presets while preserving version info
             existing_data["presets"] = presets
             existing_data["last_updated"] = datetime.now().isoformat()[:10]
-            
+
             with open(CURRICULUM_PRESETS_FILE, "w", encoding="utf-8") as f:
                 json.dump(existing_data, f, indent=2)
             print(f"[Curriculum] Saved {len(presets)} presets to {CURRICULUM_PRESETS_FILE}")
@@ -1189,32 +1191,34 @@ def create_app(debug: bool = False) -> FastAPI:
     @app.get("/api/curricula/presets")
     async def list_curriculum_presets():
         """List all available curriculum presets from JSON.
-        
+
         Returns list of presets with their datasets for HPO page selection.
         """
         # Reload from file to get latest
         presets = load_curriculum_presets()
-        
+
         result = []
         for preset_id, preset_data in presets.items():
             datasets = preset_data.get("hf_datasets", [])
             stages = preset_data.get("stages", [])
-            
+
             # Count total datasets including from stages
             total_datasets = set(datasets)
             for stage in stages:
                 for ds in stage.get("datasets", []):
                     total_datasets.add(ds)
-            
-            result.append({
-                "id": preset_id,
-                "name": preset_data.get("name", preset_id),
-                "description": preset_data.get("description", ""),
-                "dataset_count": len(total_datasets),
-                "stage_count": len(stages),
-                "hf_datasets": datasets,
-            })
-        
+
+            result.append(
+                {
+                    "id": preset_id,
+                    "name": preset_data.get("name", preset_id),
+                    "description": preset_data.get("description", ""),
+                    "dataset_count": len(total_datasets),
+                    "stage_count": len(stages),
+                    "hf_datasets": datasets,
+                }
+            )
+
         return {
             "presets": result,
             "total_count": len(result),
@@ -1224,10 +1228,10 @@ def create_app(debug: bool = False) -> FastAPI:
     async def get_curriculum_preset(preset_id: str):
         """Get full details of a specific curriculum preset."""
         presets = load_curriculum_presets()
-        
+
         if preset_id not in presets:
             raise HTTPException(status_code=404, detail=f"Preset '{preset_id}' not found")
-        
+
         preset = presets[preset_id]
         return {
             "id": preset_id,
@@ -1237,12 +1241,12 @@ def create_app(debug: bool = False) -> FastAPI:
     @app.post("/api/curricula/presets/{preset_id}")
     async def save_curriculum_as_preset(preset_id: str, request: dict):
         """Save a curriculum as a reusable preset.
-        
+
         If preset_id already exists, it will be updated.
         Otherwise, a new preset is created.
         """
         presets = load_curriculum_presets()
-        
+
         # Create or update preset
         presets[preset_id] = {
             "name": request.get("name", preset_id),
@@ -1250,14 +1254,14 @@ def create_app(debug: bool = False) -> FastAPI:
             "hf_datasets": request.get("hf_datasets", []),
             "stages": request.get("stages", []),
         }
-        
+
         # Save back to file
         save_curriculum_presets(presets)
-        
+
         # Update in-memory presets
         global CURRICULUM_PRESETS
         CURRICULUM_PRESETS = presets
-        
+
         return {"status": "saved", "preset_id": preset_id}
 
     # ========================================================================
@@ -1583,18 +1587,18 @@ def create_app(debug: bool = False) -> FastAPI:
 
         These presets can be selected in the HPO page for quick curriculum selection
         without needing to manually configure stages.
-        
+
         Loads from artifacts/curriculum_presets.json which contains 172+ datasets
         across 9 curriculum presets for frontier-class LLM training.
         """
         # Reload from file to get latest (supports dynamic updates)
         current_presets = load_curriculum_presets()
-        
+
         presets = []
         for preset_id, preset_data in current_presets.items():
             # Check if preset has explicit stages (like verso-baseline)
             json_stages = preset_data.get("stages", [])
-            
+
             if json_stages:
                 # Use the explicit staged curriculum from JSON
                 stages = [
@@ -1605,8 +1609,7 @@ def create_app(debug: bool = False) -> FastAPI:
                         "epochs": stage.get("epochs", 1),
                         "description": stage.get("description", ""),
                         "datasets": [
-                            {"dataset_id": ds, "weight": 1.0}
-                            for ds in stage.get("datasets", [])
+                            {"dataset_id": ds, "weight": 1.0} for ds in stage.get("datasets", [])
                         ],
                     }
                     for i, stage in enumerate(json_stages)
@@ -1623,13 +1626,13 @@ def create_app(debug: bool = False) -> FastAPI:
                         ],
                     }
                 ]
-            
+
             # Count total unique datasets across all stages
             all_datasets = set(preset_data.get("hf_datasets", []))
             for stage in json_stages:
                 for ds in stage.get("datasets", []):
                     all_datasets.add(ds)
-            
+
             presets.append(
                 {
                     "id": preset_id,
@@ -2413,11 +2416,13 @@ def create_app(debug: bool = False) -> FastAPI:
         model_config = {
             "sweep_id": sweep_id,
             # Core architecture
-            "vocab_size": payload.vocab_size,
+            # Note: vocab_size intentionally omitted if not specified
+            # Trial runner will use tokenizer.vocab_size from trained tokenizer
+            **({"vocab_size": payload.vocab_size} if payload.vocab_size else {}),
             "hidden_dim": payload.embedding_dim or 512,
             "num_reasoning_blocks": payload.num_reasoning_blocks or 8,
             "num_moe_experts": payload.num_moe_experts or 8,
-            "sequence_length": min(payload.context_window or 512, 512),
+            "sequence_length": payload.context_window or 512,
             "batch_size": payload.batch_sizes[0] if payload.batch_sizes else 8,
             "learning_rate": lr_value,
             "optimizer": payload.optimizers[0] if payload.optimizers else "sophiag",
@@ -2467,7 +2472,11 @@ def create_app(debug: bool = False) -> FastAPI:
             json.dump(model_config, f, indent=2)
 
         # Add initial log entry
-        mode_label = "until convergence" if payload.auto_stop_on_convergence else f"{effective_max_trials} trials"
+        mode_label = (
+            "until convergence"
+            if payload.auto_stop_on_convergence
+            else f"{effective_max_trials} trials"
+        )
         hpo_logs[sweep_id] = [
             {
                 "timestamp": datetime.now().isoformat(),
@@ -2543,7 +2552,7 @@ def create_app(debug: bool = False) -> FastAPI:
                 # Save complete training config for Training page using HPOTrainingConfig bridge
                 try:
                     from highnoon.services.hpo_training_bridge import HPOTrainingConfig
-                    
+
                     training_config = HPOTrainingConfig.from_hpo_sweep(
                         {
                             "sweep_id": sweep_id,
@@ -2551,15 +2560,17 @@ def create_app(debug: bool = False) -> FastAPI:
                             "model_config": sweep.get("model_config", {}),
                             "config": sweep.get("config", {}),
                             "best_loss": result.best_loss,
-                            "best_composite_score": result.best_trial.composite_score if result.best_trial else None,
+                            "best_composite_score": (
+                                result.best_trial.composite_score if result.best_trial else None
+                            ),
                         }
                     )
-                    
+
                     # Save training config for Training page
                     training_config_path = config_dir / f"sweep_{sweep_id}_training_config.json"
                     training_config.save(training_config_path)
                     sweep["training_config_path"] = str(training_config_path)
-                    
+
                     print(f"[HPO] Saved training config to {training_config_path}")
                 except Exception as config_err:
                     print(f"[HPO] Warning: Could not save training config: {config_err}")
@@ -2612,8 +2623,7 @@ def create_app(debug: bool = False) -> FastAPI:
             completed = len(executor.completed_trials)
             # Count pruned trials (those with error or inf loss)
             pruned_trials = sum(
-                1 for t in executor.completed_trials
-                if t.error or t.loss == float("inf")
+                1 for t in executor.completed_trials if t.error or t.loss == float("inf")
             )
             best_loss = executor.best_trial.loss if executor.best_trial else None
             best_trial_id = executor.best_trial.trial_id if executor.best_trial else None
@@ -2724,15 +2734,17 @@ def create_app(debug: bool = False) -> FastAPI:
 
             # Add running trials with actual config data
             for trial_id, config in executor.running_trial_configs.items():
-                trials.append({
-                    "trial_id": trial_id,
-                    "status": "running",
-                    "loss": None,
-                    "learning_rate": config.get("learning_rate", 0.0),
-                    "batch_size": config.get("batch_size"),
-                    "optimizer": config.get("optimizer"),
-                    "hyperparams": config,
-                })
+                trials.append(
+                    {
+                        "trial_id": trial_id,
+                        "status": "running",
+                        "loss": None,
+                        "learning_rate": config.get("learning_rate", 0.0),
+                        "batch_size": config.get("batch_size"),
+                        "optimizer": config.get("optimizer"),
+                        "hyperparams": config,
+                    }
+                )
         else:
             trials = sweep.get("trials", [])
 
@@ -2741,14 +2753,14 @@ def create_app(debug: bool = False) -> FastAPI:
     @app.get("/api/training/load_from_sweep/{sweep_id}")
     async def load_training_config_from_sweep(sweep_id: str):
         """Load training configuration from completed HPO sweep.
-        
+
         Returns the full training configuration saved after HPO sweep completion,
         including model architecture, tuned hyperparameters, and all feature flags.
         This enables seamless transition from HPO page to Training page.
-        
+
         Args:
             sweep_id: The HPO sweep ID to load configuration from.
-            
+
         Returns:
             Training configuration dictionary with:
             - sweep_id: Original sweep ID
@@ -2760,20 +2772,19 @@ def create_app(debug: bool = False) -> FastAPI:
         sweep = hpo_sweeps.get(sweep_id)
         if not sweep:
             raise HTTPException(status_code=404, detail="HPO sweep not found")
-        
+
         # Check if sweep has completed
         if sweep.get("state") != "completed":
             raise HTTPException(
-                status_code=400, 
-                detail=f"HPO sweep is not completed (state: {sweep.get('state')})"
+                status_code=400, detail=f"HPO sweep is not completed (state: {sweep.get('state')})"
             )
-        
+
         # Try to load saved training config
         training_config_path = sweep.get("training_config_path")
         if training_config_path:
             try:
                 from highnoon.services.hpo_training_bridge import HPOTrainingConfig
-                
+
                 config = HPOTrainingConfig.load(training_config_path)
                 return {
                     "status": "success",
@@ -2785,19 +2796,21 @@ def create_app(debug: bool = False) -> FastAPI:
                 }
             except Exception as e:
                 print(f"[Training] Warning: Could not load saved config: {e}")
-        
+
         # Fallback: build from sweep data
         best_hp = sweep.get("best_hyperparams", {})
         model_config = sweep.get("model_config", {})
         sweep_config = sweep.get("config", {})
-        
+
         return {
             "status": "success",
             "sweep_id": sweep_id,
             "training_config": {
                 "learning_rate": best_hp.get("learning_rate", 1e-4),
                 "batch_size": best_hp.get("batch_size", 32),
-                "optimizer": best_hp.get("optimizer", sweep_config.get("optimizers", ["sophiag"])[0]),
+                "optimizer": best_hp.get(
+                    "optimizer", sweep_config.get("optimizers", ["sophiag"])[0]
+                ),
                 "weight_decay": best_hp.get("weight_decay", 0.01),
                 "epochs": sweep_config.get("epochs", 10),
                 "loss_function": best_hp.get("loss_function", "sparse_categorical_crossentropy"),
@@ -3093,6 +3106,79 @@ def create_app(debug: bool = False) -> FastAPI:
         """List all HPO sweeps."""
         return {"sweeps": list(hpo_sweeps.values())}
 
+    @app.get("/api/hpo/sweep/{sweep_id}/importance")
+    async def get_hyperparameter_importance(sweep_id: str):
+        """Get fANOVA hyperparameter importance analysis for a sweep.
+
+        Returns importance scores showing which hyperparameters
+        contribute most to variance in model performance.
+
+        Requires at least 10 completed trials for reliable analysis.
+        """
+        from highnoon.services.hpo_importance import HyperparameterImportanceAnalyzer
+
+        sweep = hpo_sweeps.get(sweep_id)
+        if not sweep:
+            raise HTTPException(status_code=404, detail="HPO sweep not found")
+
+        trials = sweep.get("trials", [])
+        if len(trials) < 10:
+            return {
+                "error": "Insufficient trials",
+                "message": f"Need at least 10 trials for importance analysis, got {len(trials)}",
+                "n_trials": len(trials),
+            }
+
+        # Extract configs and losses from trials
+        configs = []
+        losses = []
+        for trial in trials:
+            if trial.get("status") == "completed" and trial.get("loss") is not None:
+                hyperparams = trial.get("hyperparams", {})
+                if hyperparams:
+                    configs.append(hyperparams)
+                    losses.append(trial["loss"])
+
+        if len(configs) < 10:
+            return {
+                "error": "Insufficient completed trials",
+                "message": f"Need at least 10 completed trials with hyperparams, got {len(configs)}",
+                "n_trials": len(configs),
+            }
+
+        # Run fANOVA analysis
+        analyzer = HyperparameterImportanceAnalyzer(n_trees=100, min_trials=10)
+        success = analyzer.fit(configs, losses)
+
+        if not success:
+            return {
+                "error": "Analysis failed",
+                "message": "fANOVA fitting failed (may need more diverse trials)",
+            }
+
+        # Get results
+        result = analyzer.get_importance()
+        if result is None:
+            return {"error": "No results", "message": "Analysis produced no results"}
+
+        # Get marginal curves for top 3 parameters
+        marginal_curves = {}
+        for i, imp in enumerate(result.individual[:3]):
+            curve = analyzer.get_marginal_curve(imp.name)
+            if curve:
+                marginal_curves[imp.name] = {
+                    "x_values": curve.x_values,
+                    "y_mean": curve.y_mean,
+                    "y_std": curve.y_std,
+                    "is_categorical": curve.is_categorical,
+                }
+
+        return {
+            "sweep_id": sweep_id,
+            "importance": result.to_dict(),
+            "marginal_curves": marginal_curves,
+        }
+
     # ========================================================================
     # HPO Log Streaming - Real-time training logs
     # ========================================================================
@@ -3238,7 +3324,7 @@ def create_app(debug: bool = False) -> FastAPI:
 
         if config_file.exists():
             try:
-                with open(config_file, "r") as f:
+                with open(config_file) as f:
                     config = json.load(f)
                 return {"config": config}
             except Exception as e:
@@ -3337,9 +3423,7 @@ def create_app(debug: bool = False) -> FastAPI:
             memory.clear()
             return {"status": "cleared", "message": "Cross-trial memory cleared"}
         except ImportError:
-            raise HTTPException(
-                status_code=500, detail="TunerMemory module not available"
-            )
+            raise HTTPException(status_code=500, detail="TunerMemory module not available")
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
@@ -3357,9 +3441,7 @@ def create_app(debug: bool = False) -> FastAPI:
                 "kept": keep_top_n,
             }
         except ImportError:
-            raise HTTPException(
-                status_code=500, detail="TunerMemory module not available"
-            )
+            raise HTTPException(status_code=500, detail="TunerMemory module not available")
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
@@ -3387,6 +3469,251 @@ def create_app(debug: bool = False) -> FastAPI:
             return {"suggested": {}, "architecture": {}, "message": "Memory not available"}
         except Exception as e:
             return {"suggested": {}, "error": str(e)}
+
+    # ========================================================================
+    # API Routes - Quantum Training Enhancement Config (Part 10 cleanup.md)
+    # ========================================================================
+
+    class TrainingEnhancementConfig(BaseModel):
+        """Exposes all training enhancement flags from config.py."""
+
+        # GaLore Compression
+        use_tensor_galore: bool = True
+        galore_rank: int = 32
+        galore_vqc_aware: bool = True
+
+        # Quantum Natural Gradient
+        use_quantum_natural_gradient: bool = True
+        qng_damping: float = 1e-4
+
+        # SympFlow Optimizer
+        use_sympflow: bool = True
+        sympflow_mass: float = 1.0
+        sympflow_friction: float = 0.1
+
+        # Barren Plateau Detection
+        barren_plateau_monitor: bool = True
+        barren_plateau_threshold: float = 1e-6
+
+        # QHPM Crystallization
+        use_qhpm_crystallization: bool = True
+        crystallization_threshold: float = 0.85
+
+        # Neural ZNE
+        use_neural_zne: bool = True
+
+        # Entropy Regularization
+        use_entropy_regularization: bool = True
+        entropy_reg_weight: float = 0.01
+
+    @app.get("/api/config/training")
+    async def get_training_enhancement_config():
+        """Get current training enhancement configuration."""
+        config_file = PROJECT_ROOT / "artifacts" / "training_enhancement_config.json"
+
+        if config_file.exists():
+            try:
+                with open(config_file) as f:
+                    config = json.load(f)
+                return {"config": config}
+            except Exception as e:
+                logger.warning("[TrainingConfig] Failed to load config: %s", e)
+
+        # Return defaults from config.py
+        from highnoon import config as hn_config
+
+        return {
+            "config": {
+                "use_tensor_galore": getattr(hn_config, "USE_TENSOR_GALORE", True),
+                "galore_rank": getattr(hn_config, "GALORE_RANK", 32),
+                "galore_vqc_aware": getattr(hn_config, "GALORE_VQC_AWARE", True),
+                "use_quantum_natural_gradient": getattr(
+                    hn_config, "USE_QUANTUM_NATURAL_GRADIENT", True
+                ),
+                "qng_damping": getattr(hn_config, "QNG_DAMPING_FACTOR", 1e-4),
+                "use_sympflow": getattr(hn_config, "USE_SYMPFLOW_OPTIMIZER", True),
+                "sympflow_mass": getattr(hn_config, "SYMPFLOW_MASS", 1.0),
+                "sympflow_friction": getattr(hn_config, "SYMPFLOW_FRICTION", 0.1),
+                "barren_plateau_monitor": getattr(hn_config, "BARREN_PLATEAU_MONITOR", True),
+                "barren_plateau_threshold": getattr(hn_config, "BARREN_PLATEAU_THRESHOLD", 1e-6),
+                "use_qhpm_crystallization": getattr(hn_config, "USE_QHPM_CRYSTALLIZATION", True),
+                "crystallization_threshold": getattr(
+                    hn_config, "COCONUT_CRYSTALLIZE_THRESHOLD", 0.85
+                ),
+                "use_neural_zne": getattr(hn_config, "USE_NEURAL_ZNE", True),
+                "use_entropy_regularization": getattr(
+                    hn_config, "USE_ENTROPY_REGULARIZATION", True
+                ),
+                "entropy_reg_weight": getattr(hn_config, "ENTROPY_REG_WEIGHT", 0.01),
+            }
+        }
+
+    @app.put("/api/config/training")
+    async def update_training_enhancement_config(config: TrainingEnhancementConfig):
+        """Update training enhancement configuration."""
+        config_dict = config.model_dump()
+
+        config_file = PROJECT_ROOT / "artifacts" / "training_enhancement_config.json"
+        config_file.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            with open(config_file, "w") as f:
+                json.dump(config_dict, f, indent=2)
+            logger.info("[TrainingConfig] Configuration updated: %s", config_dict)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to save config: {e}")
+
+        return {"status": "updated", "config": config_dict}
+
+    # ========================================================================
+    # API Routes - Quantum Synergy Config (Part 10 cleanup.md)
+    # ========================================================================
+
+    class QuantumSynergyConfig(BaseModel):
+        """Exposes all synergy flags from config.py (S1-S19)."""
+
+        # S1-S12 Core Synergies
+        s1_unified_qssm_gating: bool = True
+        s2_coconut_qmamba_amplitudes: bool = True
+        s5_qhpm_hopfield_threshold: bool = True
+        s8_neural_zne_qssm_stats: bool = True
+        s11_alphaqubit_decoder: bool = True
+        s12_sympflow_qng_geodesic: bool = True
+
+        # New Synergies (S13-S22)
+        s18_cayley_dense: bool = True
+        s19_coconut_crystallize: bool = True
+        s20_galore_bp_aware: bool = True
+        s21_qalrc_quls_entropy: bool = True
+        s22_bp_qalrc_escape: bool = True
+
+    @app.get("/api/config/synergies")
+    async def get_synergy_config():
+        """Get current quantum synergy configuration."""
+        config_file = PROJECT_ROOT / "artifacts" / "synergy_config.json"
+
+        if config_file.exists():
+            try:
+                with open(config_file) as f:
+                    config = json.load(f)
+                return {"config": config}
+            except Exception as e:
+                logger.warning("[SynergyConfig] Failed to load config: %s", e)
+
+        # Return defaults from config.py
+        from highnoon import config as hn_config
+
+        return {
+            "config": {
+                "s1_unified_qssm_gating": getattr(hn_config, "USE_UNIFIED_QSSM_GATING", True),
+                "s2_coconut_qmamba_amplitudes": getattr(
+                    hn_config, "COCONUT_USE_QMAMBA_AMPLITUDES", True
+                ),
+                "s5_qhpm_hopfield_threshold": getattr(
+                    hn_config, "QHPM_USE_HOPFIELD_THRESHOLD", True
+                ),
+                "s8_neural_zne_qssm_stats": getattr(hn_config, "NEURAL_ZNE_USE_QSSM_STATS", True),
+                "s11_alphaqubit_decoder": getattr(hn_config, "USE_UNIFIED_ALPHAQUBIT", True),
+                "s12_sympflow_qng_geodesic": getattr(hn_config, "SYMPFLOW_USE_QNG_GEODESIC", True),
+                "s18_cayley_dense": getattr(hn_config, "USE_CAYLEY_VQC", True),
+                "s19_coconut_crystallize": True,
+                "s20_galore_bp_aware": True,
+                "s21_qalrc_quls_entropy": True,
+                "s22_bp_qalrc_escape": True,
+            }
+        }
+
+    @app.put("/api/config/synergies")
+    async def update_synergy_config(config: QuantumSynergyConfig):
+        """Update quantum synergy configuration."""
+        config_dict = config.model_dump()
+
+        config_file = PROJECT_ROOT / "artifacts" / "synergy_config.json"
+        config_file.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            with open(config_file, "w") as f:
+                json.dump(config_dict, f, indent=2)
+            logger.info("[SynergyConfig] Configuration updated: %s", config_dict)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to save config: {e}")
+
+        return {"status": "updated", "config": config_dict}
+
+    # ========================================================================
+    # API Routes - Architecture Config (Part 10 cleanup.md)
+    # ========================================================================
+
+    class ArchitectureConfig(BaseModel):
+        """Exposes architecture-level quantum config flags."""
+
+        # COCONUT parameters
+        coconut_max_thought_steps: int = 8
+        coconut_bfs_branches: int = 4
+        coconut_crystallize_threshold: float = 0.85
+
+        # Memory Builder options
+        use_holographic_state_binding: bool = True
+        use_state_bus: bool = True
+        use_unified_quantum_bus: bool = True
+
+        # Token shift mode
+        token_shift_mode: str = "data_dependent"
+
+        # Block pattern
+        reasoning_block_pattern: str = "mamba_timecrystal_wlam_moe_hybrid"
+
+    @app.get("/api/config/architecture")
+    async def get_architecture_config():
+        """Get current architecture configuration."""
+        config_file = PROJECT_ROOT / "artifacts" / "architecture_config.json"
+
+        if config_file.exists():
+            try:
+                with open(config_file) as f:
+                    config = json.load(f)
+                return {"config": config}
+            except Exception as e:
+                logger.warning("[ArchConfig] Failed to load config: %s", e)
+
+        # Return defaults from config.py
+        from highnoon import config as hn_config
+
+        return {
+            "config": {
+                "coconut_max_thought_steps": getattr(hn_config, "CONTINUOUS_THOUGHT_STEPS", 8),
+                "coconut_bfs_branches": getattr(hn_config, "COCONUT_BFS_BRANCHES", 4),
+                "coconut_crystallize_threshold": getattr(
+                    hn_config, "COCONUT_CRYSTALLIZE_THRESHOLD", 0.85
+                ),
+                "use_holographic_state_binding": getattr(
+                    hn_config, "USE_HOLOGRAPHIC_STATE_BINDING", True
+                ),
+                "use_state_bus": getattr(hn_config, "USE_STATE_BUS", True),
+                "use_unified_quantum_bus": getattr(hn_config, "USE_UNIFIED_QUANTUM_BUS", True),
+                "token_shift_mode": getattr(hn_config, "TOKEN_SHIFT_MODE", "data_dependent"),
+                "reasoning_block_pattern": getattr(
+                    hn_config, "REASONING_BLOCK_PATTERN", "mamba_timecrystal_wlam_moe_hybrid"
+                ),
+            }
+        }
+
+    @app.put("/api/config/architecture")
+    async def update_architecture_config(config: ArchitectureConfig):
+        """Update architecture configuration."""
+        config_dict = config.model_dump()
+
+        config_file = PROJECT_ROOT / "artifacts" / "architecture_config.json"
+        config_file.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            with open(config_file, "w") as f:
+                json.dump(config_dict, f, indent=2)
+            logger.info("[ArchConfig] Configuration updated: %s", config_dict)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to save config: {e}")
+
+        return {"status": "updated", "config": config_dict}
 
     # ========================================================================
     # API Routes - Distributed Training

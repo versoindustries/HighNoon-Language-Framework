@@ -862,10 +862,7 @@ class TimeCrystalSequenceBlock(FusedReasoningBlockMixin, ControlVarMixin, layers
 
 # Import DTC ops for Floquet evolution (optional - graceful fallback)
 try:
-    from highnoon._native.ops.dtc_ops import (
-        dtc_stabilized_evolution,
-        is_dtc_available,
-    )
+    from highnoon._native.ops.dtc_ops import dtc_stabilized_evolution, is_dtc_available
 except ImportError:
     dtc_stabilized_evolution = None
 
@@ -971,9 +968,7 @@ class FloquetTimeCrystalBlock(TimeCrystalBlock):
             f"use_floquet={self.use_floquet_evolution}"
         )
 
-    def floquet_hamiltonian_correction(
-        self, t: tf.Tensor, q: tf.Tensor, p: tf.Tensor
-    ) -> tf.Tensor:
+    def floquet_hamiltonian_correction(self, t: tf.Tensor, q: tf.Tensor, p: tf.Tensor) -> tf.Tensor:
         """Compute time-periodic Floquet Hamiltonian correction.
 
         The correction term is: V(t) = A · cos(ωt) · Σ(q · p)
@@ -1044,11 +1039,11 @@ class FloquetTimeCrystalBlock(TimeCrystalBlock):
         Args:
             entanglement: Entanglement strength from UnifiedQuantumBus (0-1 range).
         """
-        if not getattr(config, 'DTC_ADAPTIVE_PERIOD', True):
+        if not getattr(config, "DTC_ADAPTIVE_PERIOD", True):
             return
 
         # Store base period on first call
-        if not hasattr(self, '_base_floquet_period'):
+        if not hasattr(self, "_base_floquet_period"):
             self._base_floquet_period = self.floquet_period
 
         # Clamp entanglement to [0, 1]
@@ -1069,7 +1064,8 @@ class FloquetTimeCrystalBlock(TimeCrystalBlock):
 
             log.debug(
                 "[DTC-S10] Entanglement=%.3f -> floquet_period=%d",
-                entanglement, self.floquet_period
+                entanglement,
+                self.floquet_period,
             )
 
     def get_effective_period(self) -> int:
@@ -1116,9 +1112,7 @@ class FloquetTimeCrystalBlock(TimeCrystalBlock):
             q_t, p_t = tf.split(unpacked_state, 2, axis=-1)
 
             # Compute Floquet correction
-            floquet_correction = self.floquet_hamiltonian_correction(
-                current_step, q_t, p_t
-            )
+            floquet_correction = self.floquet_hamiltonian_correction(current_step, q_t, p_t)
 
             # Apply correction to output (scaled residual)
             correction_scale = tf.nn.sigmoid(self.H_drive_amplitude)
@@ -1128,10 +1122,7 @@ class FloquetTimeCrystalBlock(TimeCrystalBlock):
             self._floquet_step_counter.assign(current_step + 1.0)
 
             # Phase 130.3: Update Floquet phase for VQC modulation
-            new_phase = tf.math.mod(
-                self.H_drive_frequency * (current_step + 1.0),
-                2.0 * math.pi
-            )
+            new_phase = tf.math.mod(self.H_drive_frequency * (current_step + 1.0), 2.0 * math.pi)
             self._floquet_phase.assign(new_phase)
 
         return output, new_state
@@ -1228,4 +1219,3 @@ class FloquetTimeCrystalSequenceBlock(TimeCrystalSequenceBlock):
             }
         )
         return config_dict
-

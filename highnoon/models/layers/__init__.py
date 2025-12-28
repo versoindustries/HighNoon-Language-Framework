@@ -80,8 +80,8 @@ DualPathEmbedding: type | None = None
 
 try:
     from highnoon.models.layers.hyperdimensional_layer import (
-        HyperdimensionalEmbedding,
         DualPathEmbedding,
+        HyperdimensionalEmbedding,
     )
 except ImportError:
     pass
@@ -109,4 +109,3 @@ __all__ = [
     "HyperdimensionalEmbedding",
     "DualPathEmbedding",
 ]
-

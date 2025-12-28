@@ -5,21 +5,50 @@
     border-radius: var(--radius-lg);
     background: var(--color-background-secondary);
     transition: all 0.3s ease;
-    max-height: 300px;
+    max-height: 350px;
+    min-height: 200px;
+    height: 350px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.training-console--expanded {
+    max-height: 700px;
+    height: 700px;
+}
+
+/* Ensure CardContent wrapper fills available space and allows scrolling */
+.training-console .card-content,
+.training-console > div:last-child {
+    flex: 1;
+    min-height: 0;  /* Critical for flex children to allow shrinking */
+    overflow: hidden;
     display: flex;
     flex-direction: column;
 }
 
-.training-console--expanded {
-    max-height: 600px;
+.training-console__header {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px 16px;
+    color: var(--color-text-primary);
+    font-weight: 500;
+    background: linear-gradient(180deg, rgba(0, 0, 0, 0.3), transparent);
+    border-bottom: 1px solid var(--color-border);
 }
 
-.training-console__header {
+.training-console__metrics-row {
     display: flex;
     align-items: center;
     gap: 8px;
-    color: var(--color-text-primary);
-    font-weight: 500;
+    flex-wrap: wrap;
+}
+
+.training-console__metrics-row--secondary {
+    padding-left: 24px;
+    opacity: 0.85;
 }
 
 .training-console__metric {
@@ -28,11 +57,60 @@
     background: var(--color-background-tertiary);
     border-radius: var(--radius-sm);
     color: var(--color-text-secondary);
+    border: 1px solid transparent;
+    transition: all 0.2s ease;
 }
 
 .training-console__metric strong {
     color: var(--color-primary);
     font-weight: 600;
+}
+
+/* Primary metric (loss) gets emphasis */
+.training-console__metric--primary {
+    background: rgba(16, 185, 129, 0.15);
+    border-color: rgba(16, 185, 129, 0.3);
+}
+
+.training-console__metric--primary strong {
+    color: #10b981;
+}
+
+/* Epoch indicator */
+.training-console__metric--epoch {
+    background: rgba(99, 102, 241, 0.15);
+    border-color: rgba(99, 102, 241, 0.3);
+}
+
+.training-console__metric--epoch strong {
+    color: #6366f1;
+}
+
+/* Gradient norm - warn if high */
+.training-console__metric--grad {
+    background: rgba(245, 158, 11, 0.1);
+}
+
+.training-console__metric--grad strong {
+    color: #f59e0b;
+}
+
+/* Learning rate */
+.training-console__metric--lr {
+    background: rgba(236, 72, 153, 0.1);
+}
+
+.training-console__metric--lr strong {
+    color: #ec4899;
+}
+
+/* Memory usage */
+.training-console__metric--mem {
+    background: rgba(6, 182, 212, 0.1);
+}
+
+.training-console__metric--mem strong {
+    color: #06b6d4;
 }
 
 .training-console__dev-badge {
@@ -113,13 +191,16 @@
 .training-console__logs {
     flex: 1;
     overflow-y: auto;
+    overflow-x: hidden;
     padding: 8px 12px;
     font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Roboto Mono', monospace;
     font-size: 0.75rem;
     line-height: 1.6;
     background: #0a0a0a;
-    min-height: 150px;
+    min-height: 0;  /* Critical for flex scrolling */
     max-height: 100%;
+    /* Ensure scrollbar is visible on all platforms */
+    scrollbar-gutter: stable;
 }
 
 .training-console__empty {
@@ -206,6 +287,33 @@
     color: #06b6d4;
     font-weight: 500;
     background: rgba(6, 182, 212, 0.15);
+    padding: 0 6px;
+    border-radius: 3px;
+}
+
+/* Epoch indicator in log entries */
+.training-console__epoch {
+    color: #6366f1;
+    font-weight: 600;
+    background: rgba(99, 102, 241, 0.15);
+    padding: 0 6px;
+    border-radius: 3px;
+}
+
+/* Gradient norm in log entries */
+.training-console__grad-norm {
+    color: #f59e0b;
+    font-weight: 500;
+    background: rgba(245, 158, 11, 0.12);
+    padding: 0 6px;
+    border-radius: 3px;
+}
+
+/* Learning rate in log entries */
+.training-console__lr {
+    color: #ec4899;
+    font-weight: 500;
+    background: rgba(236, 72, 153, 0.12);
     padding: 0 6px;
     border-radius: 3px;
 }

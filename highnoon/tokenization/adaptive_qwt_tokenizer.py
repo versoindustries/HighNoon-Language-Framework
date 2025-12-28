@@ -33,7 +33,8 @@ Example:
 from __future__ import annotations
 
 import logging
-from typing import Any, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 from highnoon.tokenization.qwt_text_tokenizer import QWTTextTokenizer
 from highnoon.tokenization.superword_merger import SuperwordMerger, SuperwordMergerConfig
@@ -191,16 +192,39 @@ class AdaptiveQWTTokenizer(QWTTextTokenizer):
             self._codebook_capacity,
         )
 
-        # Tokenize all texts to byte tokens
+        # Tokenize all texts to byte tokens with interrupt handling
         token_sequences: list[list[int]] = []
-        for text in texts:
-            encoding = self._encode_one(
-                text,
-                truncation=True,
-                max_length=self.model_max_length,
-                add_special_tokens=False,
+        interrupted = False
+        try:
+            for i, text in enumerate(texts):
+                encoding = self._encode_one(
+                    text,
+                    truncation=True,
+                    max_length=self.model_max_length,
+                    add_special_tokens=False,
+                )
+                token_sequences.append(encoding.input_ids)
+                # Log progress periodically
+                if (i + 1) % 5000 == 0:
+                    logger.info("[AdaptiveQWT] Tokenized %d/%d texts...", i + 1, len(texts))
+        except KeyboardInterrupt:
+            logger.warning(
+                "[AdaptiveQWT] Tokenization interrupted at %d/%d texts. "
+                "Continuing with partial data.",
+                len(token_sequences),
+                len(texts),
             )
-            token_sequences.append(encoding.input_ids)
+            interrupted = True
+
+        if not token_sequences:
+            logger.warning("[AdaptiveQWT] No sequences tokenized, returning 0")
+            return 0
+
+        if interrupted:
+            logger.info(
+                "[AdaptiveQWT] Using %d tokenized sequences (interrupted)",
+                len(token_sequences),
+            )
 
         # Create and train SuperwordMerger
         merger_config = SuperwordMergerConfig(
@@ -465,4 +489,3 @@ class AdaptiveQWTTokenizer(QWTTextTokenizer):
 
 
 __all__ = ["AdaptiveQWTTokenizer"]
-

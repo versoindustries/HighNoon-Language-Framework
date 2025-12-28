@@ -47,12 +47,16 @@ from highnoon.training.distributed import (
     setup_cpu_threading,
     validate_tf_config,
 )
+from highnoon.training.pbt_callback import PBTCallback, PBTCheckpointManager, PBTConfig
 from highnoon.training.trainer import Trainer
 
 __all__ = [
     "AdaptiveCurriculumScheduler",
     "ClusterConfig",
     "CurriculumScheduler",
+    "PBTCallback",
+    "PBTCheckpointManager",
+    "PBTConfig",
     "Trainer",
     "create_cpu_strategy",
     "get_distributed_dataset",

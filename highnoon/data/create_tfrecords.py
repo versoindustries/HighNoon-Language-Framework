@@ -160,10 +160,12 @@ def create_tfrecords(
             return_tensors=None,
         )
 
-        current_shard_examples.append({
-            "input_ids": encoded["input_ids"],
-            "attention_mask": encoded["attention_mask"],
-        })
+        current_shard_examples.append(
+            {
+                "input_ids": encoded["input_ids"],
+                "attention_mask": encoded["attention_mask"],
+            }
+        )
         num_examples += 1
 
         # Write shard if full
@@ -191,8 +193,7 @@ def create_tfrecords(
         json.dump(metadata, f, indent=2)
 
     logger.info(
-        f"Created {num_shards} TFRecord shards with {num_examples} examples "
-        f"in {output_dir}"
+        f"Created {num_shards} TFRecord shards with {num_examples} examples " f"in {output_dir}"
     )
 
     return metadata
@@ -216,11 +217,9 @@ def load_tfrecord_dataset(
         tf.data.Dataset ready for training.
     """
     # Find TFRecord files
-    tfrecord_files = sorted([
-        os.path.join(tfrecord_dir, f)
-        for f in os.listdir(tfrecord_dir)
-        if f.endswith(".tfrecord")
-    ])
+    tfrecord_files = sorted(
+        [os.path.join(tfrecord_dir, f) for f in os.listdir(tfrecord_dir) if f.endswith(".tfrecord")]
+    )
 
     if not tfrecord_files:
         raise ValueError(f"No TFRecord files found in {tfrecord_dir}")

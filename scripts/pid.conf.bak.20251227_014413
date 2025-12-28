@@ -37,4 +37,3 @@ error_threshold = 2.500000
 hysteresis = 0.030000
 output_amplitude = 1.500000
 patience = 50.000000
-

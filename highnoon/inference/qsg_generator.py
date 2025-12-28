@@ -172,16 +172,14 @@ class QSGGenerator:
 
     def _get_coconut_block(self):
         """Lazy load Phase 87 CoCoNut continuous thought block.
-        
+
         Returns:
             ContinuousThoughtBlock instance or None if disabled/unavailable.
         """
         if self._coconut_block is None and self.config.use_coconut_reasoning:
             try:
-                from highnoon.models.reasoning.continuous_thought import (
-                    ContinuousThoughtBlock,
-                )
-                
+                from highnoon.models.reasoning.continuous_thought import ContinuousThoughtBlock
+
                 # Get embedding dim from model
                 if hasattr(self.model, "embedding_dim"):
                     embedding_dim = self.model.embedding_dim
@@ -190,7 +188,7 @@ class QSGGenerator:
                 else:
                     # Default fallback
                     embedding_dim = 768
-                
+
                 self._coconut_block = ContinuousThoughtBlock(
                     embedding_dim=embedding_dim,
                     num_thought_steps=4,
@@ -203,25 +201,25 @@ class QSGGenerator:
             except Exception as e:
                 logger.warning(f"Could not initialize CoCoNut block: {e}")
                 self._coconut_block = None
-        
+
         return self._coconut_block
 
     def _apply_coconut_reasoning(self, hidden_states: tf.Tensor) -> tf.Tensor:
         """Apply Phase 87 CoCoNut multi-path reasoning to context.
-        
+
         Enhances hidden states through multi-path BFS thought exploration
         with Grover-inspired amplitude scoring.
-        
+
         Args:
             hidden_states: Context hidden states [batch, seq_len, dim].
-            
+
         Returns:
             Enhanced hidden states with continuous thought reasoning.
         """
         coconut_block = self._get_coconut_block()
         if coconut_block is None:
             return hidden_states
-        
+
         return coconut_block(hidden_states, training=False)
 
     def generate(

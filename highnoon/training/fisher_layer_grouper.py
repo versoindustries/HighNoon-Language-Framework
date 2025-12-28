@@ -49,6 +49,13 @@ from typing import Any
 import numpy as np
 import tensorflow as tf
 
+from highnoon.config import (
+    FISHER_TN_RANK_MAX,
+    FISHER_TN_RANK_MIN,
+    FISHER_TN_RANK_SCALE,
+    USE_FISHER_TN_RANKS,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -97,6 +104,9 @@ class GroupStatistics:
         mean_weight_norm: Mean weight norm for the group.
         lr_scale: Computed learning rate scale.
         galore_rank: Allocated GaLore rank.
+        tt_rank: Allocated Tensor-Train rank for TTDense layers.
+        tucker_ranks: Allocated Tucker ranks [R1, R2] for TuckerLayer.
+        tensor_ring_rank: Allocated Tensor-Ring bond dimension.
     """
 
     group_id: int
@@ -106,6 +116,10 @@ class GroupStatistics:
     mean_weight_norm: float = 0.0
     lr_scale: float = 1.0
     galore_rank: int = 32
+    # Phase 201.11: TN rank allocation
+    tt_rank: int = 8  # Tensor-Train rank
+    tucker_ranks: list[int] = field(default_factory=lambda: [8, 8])  # Tucker [R1, R2]
+    tensor_ring_rank: int = 8  # TensorRing bond dimension
 
 
 # =============================================================================
@@ -185,6 +199,10 @@ class FisherLayerGrouper:
             "qng",
         ]
 
+        # Phase 201.S1: VQC gradient variance tracking for GaLore synergy
+        self._vqc_gradient_variance: dict[str, float] = {}
+        self._vqc_variance_boost: float = 1.5  # Fisher boost for high-variance VQC layers
+
         logger.info(
             "[FisherGrouper] Initialized: %d groups, use_qfim=%s, regroup_freq=%d",
             self.config.num_groups,
@@ -257,7 +275,9 @@ class FisherLayerGrouper:
                         fisher_diag = tf.reduce_mean(qfim_state.qfim_diagonal)
 
             # EMA update
-            fisher_val = float(fisher_diag.numpy() if hasattr(fisher_diag, 'numpy') else fisher_diag)
+            fisher_val = float(
+                fisher_diag.numpy() if hasattr(fisher_diag, "numpy") else fisher_diag
+            )
 
             if var_name not in self._fisher_estimates:
                 self._fisher_estimates[var_name] = tf.Variable(
@@ -272,10 +292,63 @@ class FisherLayerGrouper:
 
             # Update weight norm
             self._weight_norms[var_name] = float(
-                tf.norm(var).numpy() if hasattr(tf.norm(var), 'numpy') else tf.norm(var)
+                tf.norm(var).numpy() if hasattr(tf.norm(var), "numpy") else tf.norm(var)
             )
 
         self._sample_count += 1
+
+    def register_vqc_variance(self, variable_name: str, variance: float) -> None:
+        """Phase 201.S1: Register VQC gradient variance for GaLore synergy.
+
+        High variance in VQC gradients indicates that the quantum layer is
+        actively learning and needs more gradient capacity. This variance
+        boosts the Fisher estimate for rank allocation.
+
+        Args:
+            variable_name: Name of the VQC-related variable.
+            variance: Computed gradient variance from GaLore compressor.
+        """
+        # EMA update
+        alpha = 0.1
+        if variable_name in self._vqc_gradient_variance:
+            old_var = self._vqc_gradient_variance[variable_name]
+            variance = alpha * variance + (1 - alpha) * old_var
+        self._vqc_gradient_variance[variable_name] = variance
+
+        # Boost Fisher estimate for high-variance VQC layers
+        if variable_name in self._fisher_estimates and variance > 0.1:
+            current = float(self._fisher_estimates[variable_name].numpy())
+            boosted = current * self._vqc_variance_boost
+            self._fisher_estimates[variable_name].assign(boosted)
+            logger.debug(
+                "[FisherGrouper] VQC variance boost for %s: variance=%.4f, fisher %.4f -> %.4f",
+                variable_name,
+                variance,
+                current,
+                boosted,
+            )
+
+    def get_vqc_rank_allocation(self) -> dict[str, int]:
+        """Phase 201.S1: Get VQC-aware rank allocations for GaLore.
+
+        Returns rank allocations that are boosted for high-variance VQC layers.
+        This provides the feedback loop from VQC gradients to GaLore rank.
+
+        Returns:
+            Dict mapping variable names to recommended GaLore ranks.
+        """
+        allocations = {}
+        base_rank = 32
+
+        for var_name, variance in self._vqc_gradient_variance.items():
+            if variance > 0.1:  # High variance threshold
+                # Linear interpolation: variance 0.1 -> base_rank, variance 1.0 -> 2x base_rank
+                boost_factor = 1.0 + min(0.9, (variance - 0.1) / 0.9)
+                allocations[var_name] = int(base_rank * boost_factor)
+            else:
+                allocations[var_name] = base_rank
+
+        return allocations
 
     def regroup_layers(self, step: int = 0) -> dict[str, int]:
         """Recompute layer groupings using k-means on Fisher values.
@@ -310,10 +383,9 @@ class FisherLayerGrouper:
 
         # Extract Fisher values
         var_names = list(self._fisher_estimates.keys())
-        fisher_values = np.array([
-            float(self._fisher_estimates[name].numpy())
-            for name in var_names
-        ])
+        fisher_values = np.array(
+            [float(self._fisher_estimates[name].numpy()) for name in var_names]
+        )
 
         # Handle edge cases
         if len(var_names) < self.config.num_groups:
@@ -339,8 +411,7 @@ class FisherLayerGrouper:
 
         # Update groupings
         self._layer_groups = {
-            var_names[i]: label_map.get(labels[i], 0)
-            for i in range(len(var_names))
+            var_names[i]: label_map.get(labels[i], 0) for i in range(len(var_names))
         }
 
         # Update group statistics
@@ -434,9 +505,7 @@ class FisherLayerGrouper:
             group_names = [var_names[i] for i in np.where(mask)[0]] if var_names else []
 
             # Compute weight norms for this group
-            group_weight_norms = [
-                self._weight_norms.get(name, 1.0) for name in group_names
-            ]
+            group_weight_norms = [self._weight_norms.get(name, 1.0) for name in group_names]
 
             self._group_stats[g] = GroupStatistics(
                 group_id=g,
@@ -446,9 +515,11 @@ class FisherLayerGrouper:
                 mean_weight_norm=float(np.mean(group_weight_norms)) if group_weight_norms else 1.0,
             )
 
-        # Compute LR scales and GaLore ranks
+        # Compute LR scales, GaLore ranks, and TN ranks
         self._compute_lr_scales()
         self._compute_galore_ranks()
+        if USE_FISHER_TN_RANKS:
+            self._compute_tn_ranks()
 
     def _compute_lr_scales(self) -> None:
         """Compute LARS/LAMB style learning rate scales per group.
@@ -459,9 +530,7 @@ class FisherLayerGrouper:
         if not self._group_stats:
             return
 
-        max_fisher = max(
-            s.mean_fisher for s in self._group_stats.values()
-        )
+        max_fisher = max(s.mean_fisher for s in self._group_stats.values())
 
         for group_id, stats in self._group_stats.items():
             if max_fisher > 1e-10:
@@ -496,15 +565,15 @@ class FisherLayerGrouper:
             )
 
             # Compute influence scores from group Fisher values
-            fisher_values = tf.constant([
-                self._group_stats[g].mean_fisher
-                for g in sorted(self._group_stats.keys())
-            ], dtype=tf.float32)
+            fisher_values = tf.constant(
+                [self._group_stats[g].mean_fisher for g in sorted(self._group_stats.keys())],
+                dtype=tf.float32,
+            )
 
-            weight_norms = tf.constant([
-                self._group_stats[g].mean_weight_norm
-                for g in sorted(self._group_stats.keys())
-            ], dtype=tf.float32)
+            weight_norms = tf.constant(
+                [self._group_stats[g].mean_weight_norm for g in sorted(self._group_stats.keys())],
+                dtype=tf.float32,
+            )
 
             influence = compute_block_influence(fisher_values, weight_norms)
 
@@ -541,6 +610,66 @@ class FisherLayerGrouper:
                 proportion = stats.mean_fisher / total_fisher
                 stats.galore_rank = max(8, int(total_budget * proportion))
 
+    def _compute_tn_ranks(self) -> None:
+        """Compute Tensor Network rank allocation across groups.
+
+        Phase 201.11: Fisher-based TN Rank Allocation.
+
+        Allocates TT, Tucker, and TensorRing ranks proportionally to Fisher
+        Information. Higher importance groups get larger ranks to preserve
+        model capacity at compression boundaries.
+
+        Formula:
+            layer_importance = fisher_value / total_fisher
+            layer_rank = min_rank + floor(importance * (max_rank - min_rank) * scale)
+        """
+        if not self._group_stats:
+            return
+
+        total_fisher = sum(s.mean_fisher for s in self._group_stats.values())
+
+        if total_fisher < 1e-10:
+            # Uniform allocation at minimum rank
+            for stats in self._group_stats.values():
+                stats.tt_rank = FISHER_TN_RANK_MIN
+                stats.tucker_ranks = [FISHER_TN_RANK_MIN, FISHER_TN_RANK_MIN]
+                stats.tensor_ring_rank = FISHER_TN_RANK_MIN
+            logger.debug("[FisherGrouper] TN ranks set to minimum (no Fisher signal)")
+            return
+
+        rank_range = FISHER_TN_RANK_MAX - FISHER_TN_RANK_MIN
+
+        for stats in self._group_stats.values():
+            # Compute importance proportion (0 to 1)
+            proportion = stats.mean_fisher / total_fisher
+
+            # Apply scale factor and compute rank
+            scaled_proportion = min(1.0, proportion * FISHER_TN_RANK_SCALE * len(self._group_stats))
+            rank_delta = int(np.floor(scaled_proportion * rank_range))
+
+            # Compute final ranks
+            base_rank = FISHER_TN_RANK_MIN + rank_delta
+
+            # TT rank (single value)
+            stats.tt_rank = base_rank
+
+            # Tucker ranks (slightly asymmetric for rectangular matrices)
+            # Higher rank for first mode to prioritize output dimension
+            stats.tucker_ranks = [
+                min(FISHER_TN_RANK_MAX, base_rank + 2),
+                base_rank,
+            ]
+
+            # TensorRing rank (use base rank)
+            stats.tensor_ring_rank = base_rank
+
+        logger.debug(
+            "[FisherGrouper] TN ranks computed: TT=%s, Tucker=%s, TR=%s",
+            [s.tt_rank for s in self._group_stats.values()],
+            [s.tucker_ranks for s in self._group_stats.values()],
+            [s.tensor_ring_rank for s in self._group_stats.values()],
+        )
+
     def get_group_lr_scales(self) -> dict[int, float]:
         """Get learning rate scales per group.
 
@@ -556,6 +685,61 @@ class FisherLayerGrouper:
             Dict mapping group ID to GaLore rank.
         """
         return {g: s.galore_rank for g, s in self._group_stats.items()}
+
+    def get_tt_ranks(self) -> dict[int, int]:
+        """Get Tensor-Train ranks per group.
+
+        Phase 201.11: Fisher-based TN rank allocation.
+
+        Returns:
+            Dict mapping group ID to TT rank.
+        """
+        return {g: s.tt_rank for g, s in self._group_stats.items()}
+
+    def get_tucker_ranks(self) -> dict[int, list[int]]:
+        """Get Tucker ranks per group.
+
+        Phase 201.11: Fisher-based TN rank allocation.
+
+        Returns:
+            Dict mapping group ID to Tucker ranks [R1, R2].
+        """
+        return {g: s.tucker_ranks for g, s in self._group_stats.items()}
+
+    def get_tensor_ring_ranks(self) -> dict[int, int]:
+        """Get TensorRing ranks per group.
+
+        Phase 201.11: Fisher-based TN rank allocation.
+
+        Returns:
+            Dict mapping group ID to TensorRing bond dimension.
+        """
+        return {g: s.tensor_ring_rank for g, s in self._group_stats.items()}
+
+    def get_variable_tn_ranks(self, variable_name: str) -> dict[str, Any]:
+        """Get TN ranks for a specific variable's group.
+
+        Phase 201.11: Fisher-based TN rank allocation.
+
+        Args:
+            variable_name: Name of the variable.
+
+        Returns:
+            Dict with tt_rank, tucker_ranks, tensor_ring_rank for this variable's group.
+        """
+        group_id = self.get_variable_group(variable_name)
+        if group_id in self._group_stats:
+            stats = self._group_stats[group_id]
+            return {
+                "tt_rank": stats.tt_rank,
+                "tucker_ranks": stats.tucker_ranks,
+                "tensor_ring_rank": stats.tensor_ring_rank,
+            }
+        return {
+            "tt_rank": FISHER_TN_RANK_MIN,
+            "tucker_ranks": [FISHER_TN_RANK_MIN, FISHER_TN_RANK_MIN],
+            "tensor_ring_rank": FISHER_TN_RANK_MIN,
+        }
 
     def get_variable_group(self, variable_name: str) -> int:
         """Get group ID for a specific variable.
@@ -588,10 +772,7 @@ class FisherLayerGrouper:
         Returns:
             Dict mapping variable names to Fisher values.
         """
-        return {
-            name: float(var.numpy())
-            for name, var in self._fisher_estimates.items()
-        }
+        return {name: float(var.numpy()) for name, var in self._fisher_estimates.items()}
 
     def get_statistics(self) -> dict[str, Any]:
         """Get grouper statistics for logging/monitoring.

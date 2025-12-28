@@ -64,6 +64,21 @@ import tensorflow as tf
 
 from highnoon import config as hn_config
 
+# Optional import for UnifiedSmartTuner integration
+try:
+    from highnoon.training.unified_smart_tuner import (
+        TuningDecisions,
+        UnifiedSmartTuner,
+        UnifiedSmartTunerConfig,
+    )
+
+    SMART_TUNER_AVAILABLE = True
+except ImportError:
+    SMART_TUNER_AVAILABLE = False
+    UnifiedSmartTuner = None
+    UnifiedSmartTunerConfig = None
+    TuningDecisions = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -96,9 +111,7 @@ class TrainingConfig:
     use_meta_controller: bool = field(
         default_factory=lambda: getattr(hn_config, "USE_META_CONTROLLER", True)
     )
-    use_galore: bool = field(
-        default_factory=lambda: getattr(hn_config, "USE_TENSOR_GALORE", False)
-    )
+    use_galore: bool = field(default_factory=lambda: getattr(hn_config, "USE_TENSOR_GALORE", False))
     use_qalrc: bool = field(
         default_factory=lambda: getattr(hn_config, "USE_QUANTUM_LR_CONTROLLER", False)
     )
@@ -178,12 +191,14 @@ class EnterpriseTrainingConfig:
     max_grad_norm: float = 1.0
     max_nan_consecutive: int = 5
     log_frequency: int = 10
-    
+
     # Loss function configuration (selectable from WebUI)
-    # Supported: 'sparse_categorical_crossentropy', 'categorical_crossentropy', 
+    # Supported: 'sparse_categorical_crossentropy', 'categorical_crossentropy',
     # 'mse', 'mae', 'huber', 'custom'
     loss_function: str = field(
-        default_factory=lambda: getattr(hn_config, "TRAINING_LOSS_FUNCTION", "sparse_categorical_crossentropy")
+        default_factory=lambda: getattr(
+            hn_config, "TRAINING_LOSS_FUNCTION", "sparse_categorical_crossentropy"
+        )
     )
     label_smoothing: float = field(
         default_factory=lambda: getattr(hn_config, "LABEL_SMOOTHING", 0.0)
@@ -198,18 +213,12 @@ class EnterpriseTrainingConfig:
     )
 
     # GaLore Gradient Compression (Phase T2)
-    use_galore: bool = field(
-        default_factory=lambda: getattr(hn_config, "USE_TENSOR_GALORE", True)
-    )
-    galore_rank: int = field(
-        default_factory=lambda: getattr(hn_config, "GALORE_RANK", 32)
-    )
+    use_galore: bool = field(default_factory=lambda: getattr(hn_config, "USE_TENSOR_GALORE", True))
+    galore_rank: int = field(default_factory=lambda: getattr(hn_config, "GALORE_RANK", 32))
     galore_update_proj_gap: int = field(
         default_factory=lambda: getattr(hn_config, "GALORE_UPDATE_PROJ_GAP", 200)
     )
-    galore_scale: float = field(
-        default_factory=lambda: getattr(hn_config, "GALORE_SCALE", 0.25)
-    )
+    galore_scale: float = field(default_factory=lambda: getattr(hn_config, "GALORE_SCALE", 0.25))
     galore_vqc_aware: bool = field(
         default_factory=lambda: getattr(hn_config, "GALORE_VQC_AWARE", True)
     )
@@ -252,9 +261,7 @@ class EnterpriseTrainingConfig:
     use_qng: bool = field(
         default_factory=lambda: getattr(hn_config, "USE_QUANTUM_NATURAL_GRADIENT", True)
     )
-    qng_damping: float = field(
-        default_factory=lambda: getattr(hn_config, "QNG_DAMPING", 1e-4)
-    )
+    qng_damping: float = field(default_factory=lambda: getattr(hn_config, "QNG_DAMPING", 1e-4))
     qng_apply_to_quantum_only: bool = field(
         default_factory=lambda: getattr(hn_config, "QNG_APPLY_TO_QUANTUM_ONLY", True)
     )
@@ -277,9 +284,7 @@ class EnterpriseTrainingConfig:
     spectral_reg_weight: float = field(
         default_factory=lambda: getattr(hn_config, "SPECTRAL_REG_WEIGHT", 0.01)
     )
-    target_entropy: float = field(
-        default_factory=lambda: getattr(hn_config, "TARGET_ENTROPY", 0.5)
-    )
+    target_entropy: float = field(default_factory=lambda: getattr(hn_config, "TARGET_ENTROPY", 0.5))
 
     # QHPM Crystallization (replaces EWC)
     use_qhpm_crystallization: bool = field(
@@ -296,20 +301,14 @@ class EnterpriseTrainingConfig:
     )
 
     # Legacy EWC (deprecated but supported)
-    enable_ewc: bool = field(
-        default_factory=lambda: getattr(hn_config, "ENABLE_EWC", False)
-    )
-    ewc_lambda: float = field(
-        default_factory=lambda: getattr(hn_config, "EWC_LAMBDA", 0.0)
-    )
+    enable_ewc: bool = field(default_factory=lambda: getattr(hn_config, "ENABLE_EWC", False))
+    ewc_lambda: float = field(default_factory=lambda: getattr(hn_config, "EWC_LAMBDA", 0.0))
 
     # SympFlow Optimizer (Phase 46)
     use_sympflow: bool = field(
         default_factory=lambda: getattr(hn_config, "USE_SYMPFLOW_OPTIMIZER", True)
     )
-    sympflow_mass: float = field(
-        default_factory=lambda: getattr(hn_config, "SYMPFLOW_MASS", 1.0)
-    )
+    sympflow_mass: float = field(default_factory=lambda: getattr(hn_config, "SYMPFLOW_MASS", 1.0))
     sympflow_friction: float = field(
         default_factory=lambda: getattr(hn_config, "SYMPFLOW_FRICTION", 0.1)
     )
@@ -318,17 +317,13 @@ class EnterpriseTrainingConfig:
     )
 
     # Neural ZNE Error Mitigation (Phase T6)
-    use_neural_zne: bool = field(
-        default_factory=lambda: getattr(hn_config, "USE_NEURAL_ZNE", True)
-    )
+    use_neural_zne: bool = field(default_factory=lambda: getattr(hn_config, "USE_NEURAL_ZNE", True))
     neural_zne_hidden_dim: int = field(
         default_factory=lambda: getattr(hn_config, "NEURAL_ZNE_HIDDEN_DIM", 128)
     )
 
     # Neural QEM (Phase 129)
-    use_neural_qem: bool = field(
-        default_factory=lambda: getattr(hn_config, "USE_NEURAL_QEM", True)
-    )
+    use_neural_qem: bool = field(default_factory=lambda: getattr(hn_config, "USE_NEURAL_QEM", True))
     neural_qem_hidden_dim: int = field(
         default_factory=lambda: getattr(hn_config, "NEURAL_QEM_HIDDEN_DIM", 128)
     )
@@ -371,6 +366,28 @@ class EnterpriseTrainingConfig:
         default_factory=lambda: getattr(hn_config, "QULS_ADAPTIVE_WEIGHTS", True)
     )
 
+    # UnifiedSmartTuner Integration
+    use_unified_smart_tuner: bool = field(
+        default_factory=lambda: getattr(hn_config, "USE_UNIFIED_SMART_TUNER", True)
+    )
+    smart_tuner_coordination_mode: str = field(
+        default_factory=lambda: getattr(hn_config, "SMART_TUNER_MODE", "balanced")
+    )
+    smart_tuner_warmup_steps: int = field(
+        default_factory=lambda: getattr(hn_config, "SMART_TUNER_WARMUP_STEPS", 1000)
+    )
+    smart_tuner_exploration_steps: int = field(
+        default_factory=lambda: getattr(hn_config, "SMART_TUNER_EXPLORATION_STEPS", 10000)
+    )
+    smart_tuner_memory_enabled: bool = field(
+        default_factory=lambda: getattr(hn_config, "SMART_TUNER_MEMORY_ENABLED", True)
+    )
+    smart_tuner_webui_reporting: bool = field(
+        default_factory=lambda: getattr(hn_config, "SMART_TUNER_WEBUI_REPORTING", True)
+    )
+    lr_min: float = field(default_factory=lambda: getattr(hn_config, "SMART_TUNER_LR_MIN", 1e-7))
+    lr_max: float = field(default_factory=lambda: getattr(hn_config, "SMART_TUNER_LR_MAX", 1e-2))
+
     def to_basic_config(self) -> TrainingConfig:
         """Convert to basic TrainingConfig for backward compatibility."""
         return TrainingConfig(
@@ -384,22 +401,22 @@ class EnterpriseTrainingConfig:
         )
 
     @classmethod
-    def from_hpo_config(cls, hpo_config: dict) -> "EnterpriseTrainingConfig":
+    def from_hpo_config(cls, hpo_config: dict) -> EnterpriseTrainingConfig:
         """Create config from HPO sweep configuration dictionary.
-        
+
         Maps HPO parameter names (from StartHPORequest) to EnterpriseTrainingConfig
         fields, enabling seamless integration between HPO tuner and TrainingEngine.
-        
+
         Args:
             hpo_config: Dictionary from HPO sweep containing tuned hyperparameters
                         and feature flags.
-        
+
         Returns:
             EnterpriseTrainingConfig with all parameters set from HPO config.
-        
+
         Example:
             >>> from highnoon.training.training_engine import EnterpriseTrainingConfig
-            >>> 
+            >>>
             >>> hpo_config = {"use_tensor_galore": True, "galore_rank": 64, ...}
             >>> config = EnterpriseTrainingConfig.from_hpo_config(hpo_config)
         """
@@ -462,14 +479,23 @@ class EnterpriseTrainingConfig:
             "quls_coherence_weight": "quls_coherence_weight",
             "quls_symplectic_weight": "quls_symplectic_weight",
             "quls_adaptive_weights": "quls_adaptive_weights",
+            # UnifiedSmartTuner (HPO/WebUI integration)
+            "use_unified_smart_tuner": "use_unified_smart_tuner",
+            "smart_tuner_coordination_mode": "smart_tuner_coordination_mode",
+            "smart_tuner_warmup_steps": "smart_tuner_warmup_steps",
+            "smart_tuner_exploration_steps": "smart_tuner_exploration_steps",
+            "smart_tuner_memory_enabled": "smart_tuner_memory_enabled",
+            "smart_tuner_webui_reporting": "smart_tuner_webui_reporting",
+            "lr_min": "lr_min",
+            "lr_max": "lr_max",
         }
-        
+
         # Build kwargs for constructor
         kwargs = {}
         for hpo_key, config_field in field_mappings.items():
             if hpo_key in hpo_config:
                 kwargs[config_field] = hpo_config[hpo_key]
-        
+
         return cls(**kwargs)
 
 
@@ -806,9 +832,7 @@ class MemoryManagerCallback(BaseCallback):
             )
             logger.info("MemoryManagerCallback initialized with EnterpriseMemoryManager")
         except ImportError:
-            logger.warning(
-                "EnterpriseMemoryManager not available, using basic memory monitoring"
-            )
+            logger.warning("EnterpriseMemoryManager not available, using basic memory monitoring")
 
     def on_batch_end(self, step: int, result: StepResult) -> bool:
         self._step_count += 1
@@ -1047,6 +1071,8 @@ class TrainingEngine:
         self._qalrc = None
         self._barren_detector = None
         self._quls = None
+        self._smart_tuner = None
+        self._total_steps = 10000  # Default, can be set via set_total_steps()
 
         if self.config.use_meta_controller:
             self._init_meta_controller()
@@ -1061,8 +1087,25 @@ class TrainingEngine:
             self._init_barren_plateau_detector()
 
         # Initialize QULS - Quantum Unified Loss System (Phase 132)
-        if getattr(self.config, 'use_quls', False):
+        if getattr(self.config, "use_quls", False):
             self._init_quls()
+
+        # Initialize UnifiedSmartTuner for coordinated training parameter control
+        # When enabled, this replaces independent operation of QALRC, GaLore, etc.
+        if getattr(self.config, "use_unified_smart_tuner", False) and SMART_TUNER_AVAILABLE:
+            self._init_smart_tuner()
+
+        # Phase 9: Detect if optimizer supports periodic Hessian updates (SophiaG, QIAO)
+        self._supports_hessian_update = hasattr(self.optimizer, "update_hessian")
+        self._hessian_update_frequency = getattr(self.config, "hessian_update_frequency", 100)
+        self._last_hessian_data = None  # Cache data batch for Hessian updates
+        if self._supports_hessian_update:
+            # Wire model reference for SophiaG/QIAO (required for update_hessian)
+            if hasattr(self.optimizer, "model") and self.optimizer.model is None:
+                self.optimizer.model = model
+            logger.info(
+                f"Optimizer supports Hessian updates (update every {self._hessian_update_frequency} steps)"
+            )
 
         # Training state
         self._global_step = 0
@@ -1081,52 +1124,60 @@ class TrainingEngine:
             f"meta_controller={self._meta_callback is not None}, "
             f"galore={self._galore is not None}, "
             f"qalrc={self._qalrc is not None}, "
-            f"barren_detector={self._barren_detector is not None}"
+            f"barren_detector={self._barren_detector is not None}, "
+            f"hessian_updates={self._supports_hessian_update}, "
+            f"smart_tuner={self._smart_tuner is not None}"
         )
+
+        # HPO/WebUI tracking
+        self._sweep_id: str | None = None
+        self._webui_report_frequency: int = 10  # Report to WebUI every N steps
 
     def _build_loss_fn(self) -> Callable[[tf.Tensor, tf.Tensor], tf.Tensor]:
         """Build loss function from configuration.
-        
+
         Builds the appropriate Keras loss based on config.loss_function.
         Supports label smoothing for classification losses.
-        
+
         Returns:
             Loss function with signature (y_true, y_pred) -> tf.Tensor.
         """
         loss_name = self.config.loss_function.lower()
-        label_smoothing = getattr(self.config, 'label_smoothing', 0.0)
-        
-        if loss_name == 'sparse_categorical_crossentropy':
+        label_smoothing = getattr(self.config, "label_smoothing", 0.0)
+
+        if loss_name == "sparse_categorical_crossentropy":
+
             def loss_fn(y_true, y_pred):
                 return tf.keras.losses.sparse_categorical_crossentropy(
                     y_true, y_pred, from_logits=True
                 )
+
             return loss_fn
-            
-        elif loss_name == 'categorical_crossentropy':
+
+        elif loss_name == "categorical_crossentropy":
             loss_obj = tf.keras.losses.CategoricalCrossentropy(
                 from_logits=True, label_smoothing=label_smoothing
             )
             return loss_obj
-            
-        elif loss_name == 'mse' or loss_name == 'mean_squared_error':
+
+        elif loss_name == "mse" or loss_name == "mean_squared_error":
             return tf.keras.losses.MeanSquaredError()
-            
-        elif loss_name == 'mae' or loss_name == 'mean_absolute_error':
+
+        elif loss_name == "mae" or loss_name == "mean_absolute_error":
             return tf.keras.losses.MeanAbsoluteError()
-            
-        elif loss_name == 'huber':
+
+        elif loss_name == "huber":
             return tf.keras.losses.Huber()
-            
-        elif loss_name == 'binary_crossentropy':
+
+        elif loss_name == "binary_crossentropy":
             return tf.keras.losses.BinaryCrossentropy(from_logits=True)
-            
-        elif loss_name == 'cosine_similarity':
+
+        elif loss_name == "cosine_similarity":
             return tf.keras.losses.CosineSimilarity()
-            
-        elif loss_name == 'kl_divergence':
+
+        elif loss_name == "kl_divergence":
             return tf.keras.losses.KLDivergence()
-            
+
         else:
             # Default to MSE for unknown loss types (safe fallback)
             logger.warning(
@@ -1187,7 +1238,7 @@ class TrainingEngine:
                 entropy_smoothing=self.config.qalrc_entropy_smoothing,
             )
             logger.info(f"QALRC initialized: initial_lr={initial_lr}")
-        except (ImportError, TypeError) as e:
+        except (ImportError, TypeError):
             # TypeError handles case where QuantumAdaptiveLRController doesn't accept all args
             try:
                 from highnoon.training.quantum_lr_controller import QuantumAdaptiveLRController
@@ -1223,26 +1274,28 @@ class TrainingEngine:
     def _init_quls(self) -> None:
         """Initialize Quantum Unified Loss System (Phase 132)."""
         try:
-            from highnoon.training.quantum_loss import QULSConfig, QuantumUnifiedLoss
+            from highnoon.training.quantum_loss import QuantumUnifiedLoss, QULSConfig
 
             # Build QULS config from EnterpriseTrainingConfig
             quls_config = QULSConfig(
                 enabled=True,
-                primary_loss=getattr(self.config, 'loss_function', 'sparse_categorical_crossentropy'),
-                label_smoothing=getattr(self.config, 'label_smoothing', 0.1),
-                fidelity_enabled=getattr(hn_config, 'USE_QUANTUM_FIDELITY_LOSS', True),
-                fidelity_weight=getattr(self.config, 'quls_fidelity_weight', 0.01),
-                born_rule_enabled=getattr(hn_config, 'USE_BORN_RULE_LOSS', True),
-                born_rule_weight=getattr(self.config, 'quls_born_rule_weight', 0.005),
-                entropy_enabled=getattr(self.config, 'use_entropy_regularization', True),
-                entropy_weight=getattr(self.config, 'entropy_reg_weight', 0.01),
-                target_entropy=getattr(self.config, 'target_entropy', 0.5),
-                coherence_enabled=getattr(hn_config, 'QULS_COHERENCE_ENABLED', True),
-                coherence_weight=getattr(self.config, 'quls_coherence_weight', 0.01),
-                symplectic_enabled=getattr(hn_config, 'QULS_SYMPLECTIC_ENABLED', True),
-                symplectic_weight=getattr(self.config, 'quls_symplectic_weight', 0.01),
-                entanglement_enabled=getattr(hn_config, 'QULS_ENTANGLEMENT_ENABLED', True),
-                adaptive_weights=getattr(self.config, 'quls_adaptive_weights', True),
+                primary_loss=getattr(
+                    self.config, "loss_function", "sparse_categorical_crossentropy"
+                ),
+                label_smoothing=getattr(self.config, "label_smoothing", 0.1),
+                fidelity_enabled=getattr(hn_config, "USE_QUANTUM_FIDELITY_LOSS", True),
+                fidelity_weight=getattr(self.config, "quls_fidelity_weight", 0.01),
+                born_rule_enabled=getattr(hn_config, "USE_BORN_RULE_LOSS", True),
+                born_rule_weight=getattr(self.config, "quls_born_rule_weight", 0.005),
+                entropy_enabled=getattr(self.config, "use_entropy_regularization", True),
+                entropy_weight=getattr(self.config, "entropy_reg_weight", 0.01),
+                target_entropy=getattr(self.config, "target_entropy", 0.5),
+                coherence_enabled=getattr(hn_config, "QULS_COHERENCE_ENABLED", True),
+                coherence_weight=getattr(self.config, "quls_coherence_weight", 0.01),
+                symplectic_enabled=getattr(hn_config, "QULS_SYMPLECTIC_ENABLED", True),
+                symplectic_weight=getattr(self.config, "quls_symplectic_weight", 0.01),
+                entanglement_enabled=getattr(hn_config, "QULS_ENTANGLEMENT_ENABLED", True),
+                adaptive_weights=getattr(self.config, "quls_adaptive_weights", True),
             )
 
             self._quls = QuantumUnifiedLoss(quls_config)
@@ -1254,6 +1307,221 @@ class TrainingEngine:
         except ImportError as e:
             logger.warning(f"QULS unavailable: {e}")
             self._quls = None
+
+    def _init_smart_tuner(self) -> None:
+        """Initialize UnifiedSmartTuner for coordinated training parameter control.
+
+        The smart tuner provides a single orchestration point for:
+        - Learning rate control (QALRC)
+        - Gradient compression (GaLore)
+        - Barren plateau detection and mitigation
+        - Meta-controller coordination
+        - Cross-trial memory for HPO
+
+        When enabled, individual component operations are delegated to the tuner.
+        """
+        if not SMART_TUNER_AVAILABLE or UnifiedSmartTunerConfig is None:
+            logger.warning("UnifiedSmartTuner not available")
+            return
+
+        try:
+            initial_lr = float(
+                self.optimizer.learning_rate.numpy()
+                if hasattr(self.optimizer.learning_rate, "numpy")
+                else self.optimizer.learning_rate
+            )
+
+            smart_tuner_config = UnifiedSmartTunerConfig(
+                enabled=True,
+                memory_enabled=getattr(self.config, "smart_tuner_memory_enabled", True),
+                coordination_mode=getattr(self.config, "smart_tuner_coordination_mode", "balanced"),
+                lr_initial=initial_lr,
+                lr_min=getattr(self.config, "lr_min", 1e-7),
+                lr_max=getattr(self.config, "lr_max", 1e-2),
+                galore_rank=getattr(self.config, "galore_rank", 32),
+                barren_plateau_threshold=getattr(self.config, "barren_plateau_threshold", 1e-6),
+                meta_controller_frequency=getattr(self.config, "meta_controller_frequency", 10),
+                max_grad_norm=getattr(self.config, "max_grad_norm", 1.0),
+                warmup_steps=getattr(self.config, "smart_tuner_warmup_steps", 1000),
+                exploration_steps=getattr(self.config, "smart_tuner_exploration_steps", 10000),
+            )
+
+            self._smart_tuner = UnifiedSmartTuner(
+                model=self.model,
+                optimizer=self.optimizer,
+                config=smart_tuner_config,
+                total_steps=self._total_steps,
+            )
+
+            logger.info(
+                f"UnifiedSmartTuner initialized: mode={smart_tuner_config.coordination_mode}, "
+                f"lr_initial={initial_lr:.2e}, memory_enabled={smart_tuner_config.memory_enabled}"
+            )
+
+        except Exception as e:
+            logger.warning(f"Failed to initialize UnifiedSmartTuner: {e}")
+            self._smart_tuner = None
+
+    def set_sweep_id(self, sweep_id: str) -> None:
+        """Set the HPO sweep ID for WebUI status reporting.
+
+        Args:
+            sweep_id: The HPO sweep identifier from the WebUI.
+        """
+        self._sweep_id = sweep_id
+        logger.info(f"TrainingEngine linked to HPO sweep: {sweep_id}")
+
+    def set_total_steps(self, total_steps: int) -> None:
+        """Set the total number of training steps.
+
+        This is used by the UnifiedSmartTuner for phase calculations
+        (warmup, exploration, exploitation).
+
+        Args:
+            total_steps: Total number of training steps.
+        """
+        self._total_steps = total_steps
+        if self._smart_tuner is not None and hasattr(self._smart_tuner, "total_steps"):
+            self._smart_tuner.total_steps = total_steps
+            logger.info(f"UnifiedSmartTuner total_steps updated to: {total_steps}")
+
+    def _report_to_webui(self) -> None:
+        """Report Smart Tuner status to WebUI API.
+
+        This method sends the current tuner state to the WebUI backend
+        so the HPODashboard can display real-time status.
+
+        Only reports if:
+        - A sweep_id is set
+        - WebUI reporting is enabled in config
+        - Smart tuner is active
+        """
+        if not getattr(self.config, "smart_tuner_webui_reporting", True):
+            return
+
+        if self._sweep_id is None:
+            return
+
+        if self._global_step % self._webui_report_frequency != 0:
+            return
+
+        # Build status from smart tuner or individual components
+        status = self._build_tuner_status()
+
+        # Non-blocking POST to WebUI (fire and forget)
+        self._async_post_status(status)
+
+    def _build_tuner_status(self) -> dict:
+        """Build smart tuner status dictionary for WebUI.
+
+        Returns:
+            Dictionary with tuner state that matches SmartTunerStatusResponse.
+        """
+        if self._smart_tuner is not None:
+            # Get status from unified smart tuner
+            return {
+                "enabled": True,
+                "current_phase": getattr(self._smart_tuner, "current_phase", "unknown"),
+                "exploration_factor": getattr(self._smart_tuner, "exploration_factor", 1.0),
+                "emergency_mode": getattr(self._smart_tuner, "emergency_mode", False),
+                "global_step": self._global_step,
+                "coordination_mode": getattr(
+                    self.config, "smart_tuner_coordination_mode", "balanced"
+                ),
+                "lr_controller_stats": self._get_qalrc_stats(),
+                "bp_monitor_stats": self._get_bp_monitor_stats(),
+                "galore_stats": self._get_galore_stats(),
+            }
+        else:
+            # Build status from individual components
+            return {
+                "enabled": False,
+                "current_phase": "independent",
+                "exploration_factor": 1.0,
+                "emergency_mode": False,
+                "global_step": self._global_step,
+                "coordination_mode": "none",
+                "lr_controller_stats": self._get_qalrc_stats(),
+                "bp_monitor_stats": self._get_bp_monitor_stats(),
+                "galore_stats": self._get_galore_stats(),
+            }
+
+    def _get_qalrc_stats(self) -> dict:
+        """Get QALRC statistics for WebUI."""
+        if self._qalrc is not None:
+            return {
+                "current_lr": self._current_lr,
+                "gradient_entropy": (
+                    self._qalrc.get_gradient_entropy()
+                    if hasattr(self._qalrc, "get_gradient_entropy")
+                    else 0.0
+                ),
+            }
+        return {}
+
+    def _get_bp_monitor_stats(self) -> dict:
+        """Get barren plateau monitor statistics for WebUI."""
+        if self._barren_detector is not None:
+            return {
+                "active": self._barren_plateau_active,
+                "recovery_steps_remaining": self._barren_plateau_recovery_steps,
+                "lr_scale_factor": (
+                    self._barren_detector.get_lr_scale_factor()
+                    if hasattr(self._barren_detector, "get_lr_scale_factor")
+                    else 1.0
+                ),
+            }
+        return {}
+
+    def _get_galore_stats(self) -> dict:
+        """Get GaLore statistics for WebUI."""
+        if self._galore is not None:
+            return {
+                "rank": self._galore.rank,
+                "compression_ratio": getattr(self._galore, "last_compression_ratio", 1.0),
+            }
+        return {}
+
+    def _async_post_status(self, status: dict) -> None:
+        """Asynchronously POST status to WebUI (non-blocking).
+
+        Uses a thread to avoid blocking the training loop.
+
+        Args:
+            status: Status dictionary to send.
+        """
+        import threading
+
+        def post_status():
+            try:
+                import json
+                import urllib.request
+
+                webui_url = os.environ.get("HIGHNOON_WEBUI_URL", "http://localhost:8000")
+                url = f"{webui_url}/api/smart-tuner/status"
+
+                data = json.dumps(
+                    {
+                        "sweep_id": self._sweep_id,
+                        **status,
+                    }
+                ).encode("utf-8")
+
+                req = urllib.request.Request(
+                    url,
+                    data=data,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=2) as resp:
+                    resp.read()  # Consume response
+            except Exception:
+                # Silently ignore WebUI reporting failures
+                pass
+
+        # Fire and forget
+        thread = threading.Thread(target=post_status, daemon=True)
+        thread.start()
 
     def _safe_set_learning_rate(self, new_lr: float) -> None:
         """Safely set optimizer learning rate (TF2 compatible).
@@ -1268,9 +1536,9 @@ class TrainingEngine:
         """
         if not hasattr(self.optimizer, "learning_rate"):
             return
-        
+
         lr_attr = self.optimizer.learning_rate
-        
+
         # Method 1: Try .assign() directly (works for tf.Variable)
         if hasattr(lr_attr, "assign"):
             try:
@@ -1278,14 +1546,14 @@ class TrainingEngine:
                 return
             except AttributeError:
                 pass
-        
+
         # Method 2: Use K.set_value (works for both Variable and Tensor)
         try:
             tf.keras.backend.set_value(lr_attr, new_lr)
             return
         except Exception:
             pass
-        
+
         # Method 3: Direct attribute assignment (last resort)
         try:
             self.optimizer.learning_rate = tf.Variable(
@@ -1311,6 +1579,10 @@ class TrainingEngine:
         # Initialize QULS loss components tracking
         quls_components: dict[str, float] = {}
 
+        # Phase 9: Cache data batch for periodic Hessian updates (SophiaG/QIAO)
+        if self._supports_hessian_update:
+            self._last_hessian_data = (inputs, labels)
+
         with tf.GradientTape() as tape:
             predictions = self.model(inputs, training=True)
 
@@ -1325,13 +1597,12 @@ class TrainingEngine:
             if self._quls is not None:
                 # Set training state for adaptive weighting
                 self._quls.set_training_state(
-                    step=self._global_step,
-                    total_steps=max(1, getattr(self, '_total_steps', 10000))
+                    step=self._global_step, total_steps=max(1, getattr(self, "_total_steps", 10000))
                 )
 
                 # Collect hidden states if available (for entropy regularization)
                 hidden_states = None
-                if hasattr(self.model, 'get_hidden_states'):
+                if hasattr(self.model, "get_hidden_states"):
                     try:
                         hidden_states = self.model.get_hidden_states()
                     except Exception:
@@ -1339,7 +1610,7 @@ class TrainingEngine:
 
                 # Collect coherence metrics if available (from QCB)
                 coherence_metrics = None
-                if hasattr(self.model, 'get_coherence_metrics'):
+                if hasattr(self.model, "get_coherence_metrics"):
                     try:
                         coherence_metrics = self.model.get_coherence_metrics()
                     except Exception:
@@ -1347,9 +1618,45 @@ class TrainingEngine:
 
                 # Collect Hamiltonian energies if available (from TimeCrystal blocks)
                 hamiltonian_energies = None
-                if hasattr(self.model, 'get_hamiltonian_energies'):
+                if hasattr(self.model, "get_hamiltonian_energies"):
                     try:
                         hamiltonian_energies = self.model.get_hamiltonian_energies()
+                    except Exception:
+                        pass
+
+                # Phase 9: Collect VQC outputs for Born rule loss
+                vqc_outputs = None
+                if hasattr(self.model, "get_vqc_outputs"):
+                    try:
+                        vqc_outputs = self.model.get_vqc_outputs()
+                    except Exception:
+                        pass
+
+                # Phase 9: Collect bond entropies from MPS layers for entanglement regularization
+                bond_entropies = None
+                if hasattr(self.model, "get_bond_entropies"):
+                    try:
+                        bond_entropies = self.model.get_bond_entropies()
+                    except Exception:
+                        pass
+
+                # S21: Get gradient entropy from QALRC for QULS adaptive weighting
+                gradient_entropy = None
+                if self._qalrc is not None and hasattr(self._qalrc, "get_gradient_entropy"):
+                    gradient_entropy = self._qalrc.get_gradient_entropy()
+
+                # S23: Get Neural ZNE statistics for error-aware weight adjustment
+                zne_statistics = None
+                if hasattr(self.model, "get_zne_statistics"):
+                    try:
+                        zne_statistics = self.model.get_zne_statistics()
+                    except Exception:
+                        pass
+                elif hasattr(self.model, "zne_manager") and hasattr(
+                    self.model.zne_manager, "get_statistics"
+                ):
+                    try:
+                        zne_statistics = self.model.zne_manager.get_statistics()
                     except Exception:
                         pass
 
@@ -1358,9 +1665,13 @@ class TrainingEngine:
                     predictions=predictions,
                     targets=labels,
                     hidden_states=hidden_states,
+                    vqc_outputs=vqc_outputs,
                     coherence_metrics=coherence_metrics,
                     hamiltonian_energies=hamiltonian_energies,
+                    bond_entropies=bond_entropies,
+                    gradient_entropy=gradient_entropy,  # S21 synergy
                     in_barren_plateau=self._barren_plateau_active,
+                    zne_statistics=zne_statistics,  # S23 synergy
                 )
             else:
                 # Use configurable loss function
@@ -1373,9 +1684,7 @@ class TrainingEngine:
         # Check for NaN/Inf loss
         if not math.isfinite(loss_val):
             self._nan_count += 1
-            logger.warning(
-                f"NaN/Inf loss at step {self._global_step}: count={self._nan_count}"
-            )
+            logger.warning(f"NaN/Inf loss at step {self._global_step}: count={self._nan_count}")
             return StepResult(
                 loss=loss_val,
                 gradient_norm=0.0,
@@ -1391,9 +1700,7 @@ class TrainingEngine:
 
         # Filter None gradients
         grad_var_pairs = [
-            (g, v)
-            for g, v in zip(gradients, self.model.trainable_variables)
-            if g is not None
+            (g, v) for g, v in zip(gradients, self.model.trainable_variables) if g is not None
         ]
 
         if not grad_var_pairs:
@@ -1412,9 +1719,7 @@ class TrainingEngine:
         has_nan_grad = any(tf.reduce_any(tf.math.is_nan(g)) for g in gradients_only)
         if has_nan_grad:
             self._nan_count += 1
-            logger.warning(
-                f"NaN gradient at step {self._global_step}: count={self._nan_count}"
-            )
+            logger.warning(f"NaN gradient at step {self._global_step}: count={self._nan_count}")
             return StepResult(
                 loss=loss_val,
                 gradient_norm=float("inf"),
@@ -1435,7 +1740,7 @@ class TrainingEngine:
             # Use aggressive clipping (0.1 instead of default 1.0)
             emergency_grad_clip = min(0.1, self.config.max_grad_norm / 10)
             # Reduce LR to minimum
-            min_lr = getattr(self.config, 'lr_min', 1e-7)
+            min_lr = getattr(self.config, "lr_min", 1e-7)
             if hasattr(self.optimizer, "learning_rate"):
                 current_lr = float(self.optimizer.learning_rate.numpy())
                 emergency_lr = max(current_lr * 0.1, min_lr)
@@ -1472,9 +1777,22 @@ class TrainingEngine:
         galore_compression_ratio = 1.0
         galore_var_names: list[str] = []  # Track var names for decompression
         if self._galore is not None:
+            # S20: Inform GaLore of barren plateau state for rank boosting
+            if hasattr(self._galore, "set_barren_plateau_mode"):
+                self._galore.set_barren_plateau_mode(self._barren_plateau_active)
+
             original_norm = grad_norm_val
             compressed_gradients = []
             for grad, var in zip(gradients_only, vars_only):
+                # Phase 130.2: Register VQC layer gradients for variance-aware rank boosting
+                if hasattr(self._galore, "register_vqc_gradient"):
+                    var_name_lower = var.name.lower()
+                    if any(
+                        vqc_pattern in var_name_lower
+                        for vqc_pattern in ["vqc", "qmamba", "qasa", "qmoe", "quantum"]
+                    ):
+                        self._galore.register_vqc_gradient(var.name, grad)
+
                 compressed_grad, var_name = self._galore.compress(grad, var)
                 compressed_gradients.append(compressed_grad)
                 galore_var_names.append(var_name)
@@ -1488,9 +1806,7 @@ class TrainingEngine:
         # Clip gradients (in compressed space if GaLore enabled)
         # Use emergency clip value if gradient explosion was detected
         clip_norm = emergency_grad_clip if emergency_mode else self.config.max_grad_norm
-        clipped_grads, _ = tf.clip_by_global_norm(
-            gradients_only, clip_norm, use_norm=gradient_norm
-        )
+        clipped_grads, _ = tf.clip_by_global_norm(gradients_only, clip_norm, use_norm=gradient_norm)
 
         # Decompress gradients back to original shapes for applying to variables
         if self._galore is not None and galore_var_names:
@@ -1510,7 +1826,7 @@ class TrainingEngine:
             if self._barren_plateau_recovery_steps <= 0:
                 self._barren_plateau_active = False
                 # Reset the detector's global barren state on recovery
-                if hasattr(self._barren_detector, '_global_barren_detected'):
+                if hasattr(self._barren_detector, "_global_barren_detected"):
                     self._barren_detector._global_barren_detected = False
                 logger.info(
                     f"Exiting barren plateau recovery mode, mitigations active: "
@@ -1529,12 +1845,13 @@ class TrainingEngine:
         if self._qalrc is not None:
             try:
                 # QALRC requires total_steps - estimate based on dataset if not known
-                total_steps = getattr(self, '_estimated_total_steps', 100000)
+                total_steps = getattr(self, "_estimated_total_steps", 100000)
                 adaptive_lr = self._qalrc.get_learning_rate(
                     step=self._global_step,
                     total_steps=total_steps,
                     gradients=clipped_grads,  # Use decompressed gradients
                     current_loss=loss_val,
+                    barren_plateau_active=self._barren_plateau_active,  # S22 synergy
                 )
                 effective_lr = adaptive_lr
                 if hasattr(self.optimizer, "learning_rate"):
@@ -1546,6 +1863,19 @@ class TrainingEngine:
 
         # Apply gradients (decompressed to original shapes)
         self.optimizer.apply_gradients(zip(clipped_grads, vars_only))
+
+        # Phase 9: Periodic Hessian update for SophiaG/QIAO optimizers
+        if (
+            self._supports_hessian_update
+            and self._last_hessian_data is not None
+            and self._global_step > 0
+            and self._global_step % self._hessian_update_frequency == 0
+        ):
+            try:
+                self.optimizer.update_hessian(self._loss_fn, self._last_hessian_data)
+                logger.debug(f"Hessian updated at step {self._global_step}")
+            except Exception as e:
+                logger.debug(f"Hessian update failed at step {self._global_step}: {e}")
 
         # Meta-Controller update
         metrics: dict[str, float] = {}
@@ -1560,17 +1890,17 @@ class TrainingEngine:
                         logs[f"{layer.name}/energy_drift"] = float(drift.numpy())
 
             control_names = self._control_bridge.get_evolution_time_var_names()
-            
+
             # Ensure control names contain 'evolution_time' suffix for C++ PID classification
             # C++ generate_default_pid_config() classifies controls by checking for
             # "evolution_time" substring to assign proper PID gains
             control_names_for_cpp = []
             for name in control_names:
-                if 'evolution_time' not in name:
+                if "evolution_time" not in name:
                     control_names_for_cpp.append(f"{name}/evolution_time")
                 else:
                     control_names_for_cpp.append(name)
-            
+
             block_names, new_times = self._meta_callback.on_batch_end(
                 batch=self._global_step,
                 logs=logs,
@@ -1587,6 +1917,9 @@ class TrainingEngine:
                 metrics[f"quls/{key}"] = value
 
         self._global_step += 1
+
+        # Report status to WebUI for HPO dashboard
+        self._report_to_webui()
 
         return StepResult(
             loss=loss_val,
@@ -1759,9 +2092,7 @@ class TrainingEngine:
                     metrics=final_metrics,
                 )
 
-        final_metrics = {
-            key: sum(values) / len(values) for key, values in all_metrics.items()
-        }
+        final_metrics = {key: sum(values) / len(values) for key, values in all_metrics.items()}
         logger.info(
             f"Training complete: {epochs} epochs, {total_steps} steps, final_loss={last_loss:.4f}"
         )

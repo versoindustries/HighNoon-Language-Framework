@@ -236,7 +236,7 @@ def fused_hnn_step(
 
 def fused_hnn_step_available() -> bool:
     """Check if the native fused_hnn_step op is available.
-    
+
     Returns:
         True if the C++ op is loaded and ready to use.
     """
@@ -245,7 +245,7 @@ def fused_hnn_step_available() -> bool:
 
 def get_load_error() -> str | None:
     """Get the error message if native op failed to load.
-    
+
     Returns:
         Error message string, or None if op loaded successfully.
     """

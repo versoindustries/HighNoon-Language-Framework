@@ -26,33 +26,28 @@ from highnoon._native.ops import (
 )
 from highnoon.analysis.memory_profiler import MemoryProfiler
 from highnoon.analysis.system_identification import parse_log_file, prepare_data_from_logs
-from highnoon.config import (
-    # Lite Edition Limits (enforced by C++ binaries)
-    LITE_MAX_PARAMS,
-    LITE_MAX_REASONING_BLOCKS,
-    LITE_MAX_MOE_EXPERTS,
-    LITE_MAX_CONTEXT_LENGTH,
-    # EWC (deprecated but kept for compatibility)
+from highnoon.config import (  # Lite Edition Limits (enforced by C++ binaries); EWC (deprecated but kept for compatibility); GaLore gradient compression; Quantum training flags; Neural error mitigation; Meta controller
+    BARREN_PLATEAU_MONITOR,
+    BARREN_PLATEAU_RECOVERY_LR_SCALE,
+    BARREN_PLATEAU_THRESHOLD,
     ENABLE_EWC,
     EWC_LAMBDA,
-    # GaLore gradient compression
     GALORE_RANK,
     GALORE_SCALE,
     GALORE_UPDATE_PROJ_GAP,
-    USE_TENSOR_GALORE,
-    # Quantum training flags
-    USE_QUANTUM_NATURAL_GRADIENT,
-    QNG_DAMPING,
-    BARREN_PLATEAU_MONITOR,
-    BARREN_PLATEAU_THRESHOLD,
-    BARREN_PLATEAU_RECOVERY_LR_SCALE,
-    # Neural error mitigation
-    USE_NEURAL_ZNE,
-    USE_NEURAL_QEM,
-    # Meta controller
-    USE_META_CONTROLLER,
+    LITE_MAX_CONTEXT_LENGTH,
+    LITE_MAX_MOE_EXPERTS,
+    LITE_MAX_PARAMS,
+    LITE_MAX_REASONING_BLOCKS,
     META_CONTROLLER_FREQUENCY,
+    QNG_DAMPING,
+    USE_META_CONTROLLER,
+    USE_NEURAL_QEM,
+    USE_NEURAL_ZNE,
+    USE_QUANTUM_NATURAL_GRADIENT,
+    USE_TENSOR_GALORE,
 )
+
 # Note: Full config module available via `config.*` for any additional flags
 from highnoon.models.hsmn import HSMN
 from highnoon.runtime.control_config import ensure_control_configs
@@ -60,23 +55,17 @@ from highnoon.training.callbacks import HamiltonianMetaControllerCallback
 from highnoon.training.control_bridge import EvolutionTimeControlBridge
 from highnoon.training.data_utils import ensure_path
 
+# GaLore gradient compression
+from highnoon.training.gradient_compression import GaLoreOptimizerWrapper, TensorGaLoreCompressor
+
 # HPO integration
 from highnoon.training.hpo_bridge import HPOReporter, load_trial_config
 from highnoon.training.memory_budget import AdaptiveMemoryController, BatchPlan
 from highnoon.training.optimizers import SophiaG
 from highnoon.training.runtime_control import should_stop, wait_if_paused
 
-# GaLore gradient compression
-from highnoon.training.gradient_compression import (
-    GaLoreOptimizerWrapper,
-    TensorGaLoreCompressor,
-)
-
 # Unified Smart Tuner
-from highnoon.training.unified_smart_tuner import (
-    UnifiedSmartTuner,
-    UnifiedSmartTunerConfig,
-)
+from highnoon.training.unified_smart_tuner import UnifiedSmartTuner, UnifiedSmartTunerConfig
 
 # --- END: DEFINITIVE FIX ---
 
@@ -859,7 +848,11 @@ def train_on_dataset_dist(
         # The smart tuner replaces independent operation of QALRC, BarrenPlateauMonitor,
         # GaLore, and Meta-Controller with a single orchestrated system.
         smart_tuner: UnifiedSmartTuner | None = None
-        use_smart_tuner = hn_config.USE_UNIFIED_SMART_TUNER if hasattr(hn_config, 'USE_UNIFIED_SMART_TUNER') else True
+        use_smart_tuner = (
+            hn_config.USE_UNIFIED_SMART_TUNER
+            if hasattr(hn_config, "USE_UNIFIED_SMART_TUNER")
+            else True
+        )
         if use_smart_tuner:
             # Estimate total steps for the tuner
             total_training_steps = epochs * max(1, num_train_examples // max(1, batch_size))
@@ -867,16 +860,20 @@ def train_on_dataset_dist(
                 enabled=True,
                 memory_enabled=True,
                 memory_path=ensure_path(os.path.join(trial_dir or ".", "tuner_memory")),
-                coordination_mode=getattr(hn_config, 'SMART_TUNER_MODE', 'balanced'),
-                lr_initial=float(optimizer.learning_rate.numpy()) if hasattr(optimizer, 'learning_rate') else 3e-4,
+                coordination_mode=getattr(hn_config, "SMART_TUNER_MODE", "balanced"),
+                lr_initial=(
+                    float(optimizer.learning_rate.numpy())
+                    if hasattr(optimizer, "learning_rate")
+                    else 3e-4
+                ),
                 lr_min=1e-7,
                 lr_max=1e-2,
                 galore_rank=GALORE_RANK,
                 barren_plateau_threshold=BARREN_PLATEAU_THRESHOLD,
                 meta_controller_frequency=META_CONTROLLER_FREQUENCY,
                 max_grad_norm=1.0,
-                warmup_steps=getattr(hn_config, 'SMART_TUNER_WARMUP_STEPS', 1000),
-                exploration_steps=getattr(hn_config, 'SMART_TUNER_EXPLORATION_STEPS', 10000),
+                warmup_steps=getattr(hn_config, "SMART_TUNER_WARMUP_STEPS", 1000),
+                exploration_steps=getattr(hn_config, "SMART_TUNER_EXPLORATION_STEPS", 10000),
             )
             smart_tuner = UnifiedSmartTuner(
                 model=model,
@@ -1562,14 +1559,18 @@ def train_on_dataset_dist(
                             )
 
                             # Apply tuning decisions
-                            if tuning_decisions.learning_rate != float(optimizer.learning_rate.numpy()):
+                            if tuning_decisions.learning_rate != float(
+                                optimizer.learning_rate.numpy()
+                            ):
                                 optimizer.learning_rate.assign(tuning_decisions.learning_rate)
 
                             # Log smart tuner state
                             logs["smart_tuner_phase"] = tuning_decisions.phase
                             logs["smart_tuner_lr"] = tuning_decisions.learning_rate
                             logs["smart_tuner_lr_scale"] = tuning_decisions.lr_scale_factor
-                            logs["smart_tuner_exploration_factor"] = tuning_decisions.exploration_factor
+                            logs["smart_tuner_exploration_factor"] = (
+                                tuning_decisions.exploration_factor
+                            )
                             logs["smart_tuner_emergency"] = tuning_decisions.emergency_mode
                             logs["smart_tuner_bp_active"] = tuning_decisions.barren_plateau_active
 
@@ -1842,7 +1843,11 @@ def train_on_dataset_dist(
                 }
 
                 # Compute final loss (use last epoch average)
-                final_loss = epoch_train_loss / max(1, num_train_batches) if num_train_batches > 0 else float("inf")
+                final_loss = (
+                    epoch_train_loss / max(1, num_train_batches)
+                    if num_train_batches > 0
+                    else float("inf")
+                )
 
                 smart_tuner.record_trial(
                     trial_id=hpo_reporter.trial_id,

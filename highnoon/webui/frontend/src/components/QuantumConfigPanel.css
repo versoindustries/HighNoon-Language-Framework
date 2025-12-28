@@ -1,0 +1,181 @@
+/* QuantumConfigPanel.css - Quantum Configuration Panel Styles */
+
+.quantum-config-panel {
+  background: linear-gradient(145deg, #1a1e2e 0%, #0d1117 100%);
+  border-radius: 16px;
+  padding: 24px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(138, 43, 226, 0.2);
+}
+
+.quantum-config-header {
+  text-align: center;
+  margin-bottom: 24px;
+}
+
+.quantum-config-header h2 {
+  font-size: 1.8rem;
+  background: linear-gradient(135deg, #8a2be2, #00d4ff);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  margin-bottom: 8px;
+}
+
+.quantum-config-header p {
+  color: #8b8f9a;
+  font-size: 0.9rem;
+}
+
+.quantum-config-loading {
+  text-align: center;
+  color: #8b8f9a;
+  padding: 48px;
+}
+
+.quantum-config-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 24px;
+  border-bottom: 1px solid rgba(138, 43, 226, 0.2);
+  padding-bottom: 16px;
+}
+
+.quantum-config-tabs .tab {
+  flex: 1;
+  padding: 12px 24px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(138, 43, 226, 0.2);
+  border-radius: 8px;
+  color: #b0b8c9;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  font-weight: 500;
+}
+
+.quantum-config-tabs .tab:hover {
+  background: rgba(138, 43, 226, 0.1);
+  border-color: rgba(138, 43, 226, 0.4);
+}
+
+.quantum-config-tabs .tab.active {
+  background: linear-gradient(135deg, rgba(138, 43, 226, 0.2), rgba(0, 212, 255, 0.1));
+  border-color: #8a2be2;
+  color: #fff;
+}
+
+.config-form {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.config-group {
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 12px;
+  padding: 20px;
+  border: 1px solid rgba(138, 43, 226, 0.1);
+}
+
+.config-group h3 {
+  font-size: 1rem;
+  color: #00d4ff;
+  margin-bottom: 16px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid rgba(0, 212, 255, 0.2);
+}
+
+.config-group label {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+  color: #b0b8c9;
+  font-size: 0.9rem;
+}
+
+.config-group input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  accent-color: #8a2be2;
+  cursor: pointer;
+}
+
+.config-group input[type="number"],
+.config-group select {
+  padding: 8px 12px;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(138, 43, 226, 0.3);
+  border-radius: 6px;
+  color: #fff;
+  font-size: 0.9rem;
+  width: 120px;
+}
+
+.config-group select {
+  width: 200px;
+}
+
+.config-group input:focus,
+.config-group select:focus {
+  outline: none;
+  border-color: #8a2be2;
+  box-shadow: 0 0 8px rgba(138, 43, 226, 0.3);
+}
+
+.synergy-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+}
+
+.synergy-toggle {
+  display: flex;
+  align-items: center;
+  padding: 10px 14px;
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 8px;
+  transition: background 0.2s ease;
+}
+
+.synergy-toggle:hover {
+  background: rgba(138, 43, 226, 0.1);
+}
+
+.synergy-toggle span {
+  font-size: 0.85rem;
+}
+
+.save-btn {
+  padding: 14px 28px;
+  background: linear-gradient(135deg, #8a2be2, #6a1fcf);
+  border: none;
+  border-radius: 10px;
+  color: #fff;
+  font-weight: 600;
+  font-size: 1rem;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  margin-top: 16px;
+}
+
+.save-btn:hover:not(:disabled) {
+  background: linear-gradient(135deg, #9b3cf5, #7b2fe0);
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(138, 43, 226, 0.4);
+}
+
+.save-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+@media (max-width: 768px) {
+  .synergy-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .quantum-config-tabs {
+    flex-direction: column;
+  }
+}

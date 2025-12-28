@@ -24,11 +24,7 @@ Components:
 - HamiltonianMetaController: Full meta-learning controller
 """
 
-from highnoon.models.controllers.hamiltonian_nn import (
-    HamiltonianNN,
-    TimeCrystalBlock,
-    TimeCrystalSequenceBlock,
-)
+from highnoon.models.hamiltonian import HamiltonianNN, TimeCrystalBlock, TimeCrystalSequenceBlock
 
 __all__ = [
     "HamiltonianNN",

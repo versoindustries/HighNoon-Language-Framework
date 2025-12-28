@@ -47,7 +47,10 @@ OPTIMIZER_LR_RANGES: dict[str, tuple[float, float]] = {
     "qiao": (1e-5, 5e-4),  # Quantum-inspired alternating optimizer (mixer steps add stability)
     "grover": (1e-5, 5e-4),  # Grover-enhanced optimizer
     "sympflow": (1e-5, 5e-4),  # Symplectic Hamiltonian flow (symplectic integration is stable)
-    "sympflowqng": (1e-5, 2e-4),  # S12: SympFlow + QNG geodesic (conservative for geodesic corrections)
+    "sympflowqng": (
+        1e-5,
+        2e-4,
+    ),  # S12: SympFlow + QNG geodesic (conservative for geodesic corrections)
     "lion": (1e-5, 1e-4),  # Lion needs lower LR than Adam-family
 }
 
@@ -380,6 +383,33 @@ class HPOSearchSpace:
     # =========================================================================
     qmoe_vqc_layers: list[int] = field(default_factory=lambda: [1, 2, 3])
     qmoe_measurement_temp: tuple[float, float] = (0.5, 2.0)
+
+    # =========================================================================
+    # PHASE 200+: HD STREAMING CORPUS PARAMETERS
+    # =========================================================================
+    # Hyperdimensional corpus compression for memory-efficient training
+    # When use_hd_streaming=True, samples are compressed into fixed-size HD bundles
+    use_hd_streaming: bool = True  # Enabled by default for memory efficiency
+    hd_reservoir_size: list[int] = field(default_factory=lambda: [1000, 2000, 3000])
+    hd_dim: list[int] = field(default_factory=lambda: [512, 1024])
+    # Vocab sample size for tokenizer learning (lower = less memory)
+    vocab_sample_size: list[int] = field(default_factory=lambda: [2000, 5000, 10000])
+
+    # =========================================================================
+    # PHASE 201: QUANTUM MEMORY OPTIMIZATION PARAMETERS
+    # =========================================================================
+    # Phase 201.2: TTDense compression for FFN layers
+    use_tt_ffn: bool = True  # Enable TTDense for FFN projections
+    tt_ffn_ranks: list[list[int]] = field(
+        default_factory=lambda: [
+            [1, 4, 4, 1],  # Conservative
+            [1, 8, 8, 1],  # Balanced (default)
+            [1, 16, 16, 1],  # Higher expressiveness
+        ]
+    )
+    # Phase 201.3: LatentKVAttention for KV cache compression
+    use_latent_kv: bool = True  # Enable latent KV compression
+    latent_kv_dim: list[int] = field(default_factory=lambda: [32, 64, 128])
 
     # =========================================================================
     # USER-SET FIXED PARAMETERS (not tuned)
@@ -725,7 +755,9 @@ class HPOSearchSpace:
             # PHASE 127: Unified Quantum Bus
             # =================================================================
             "unified_bus_mps_bond_dim": random.choice(self.unified_bus_mps_bond_dim),
-            "unified_bus_coherence_threshold": random.uniform(*self.unified_bus_coherence_threshold),
+            "unified_bus_coherence_threshold": random.uniform(
+                *self.unified_bus_coherence_threshold
+            ),
             # =================================================================
             # PHASE 130: Quantum Synergy Parameters
             # =================================================================
@@ -757,6 +789,20 @@ class HPOSearchSpace:
             # =================================================================
             "qmoe_vqc_layers": random.choice(self.qmoe_vqc_layers),
             "qmoe_measurement_temp": random.uniform(*self.qmoe_measurement_temp),
+            # =================================================================
+            # PHASE 200+: HD Streaming Corpus Parameters
+            # =================================================================
+            "use_hd_streaming": self.use_hd_streaming,
+            "hd_reservoir_size": random.choice(self.hd_reservoir_size),
+            "hd_dim": random.choice(self.hd_dim),
+            "vocab_sample_size": random.choice(self.vocab_sample_size),
+            # =================================================================
+            # PHASE 201: Quantum Memory Optimization Parameters
+            # =================================================================
+            "use_tt_ffn": self.use_tt_ffn,
+            "tt_ffn_ranks": random.choice(self.tt_ffn_ranks),
+            "use_latent_kv": self.use_latent_kv,
+            "latent_kv_dim": random.choice(self.latent_kv_dim),
         }
 
         # Add user-set tokenizer/context config if provided

@@ -135,11 +135,15 @@ def fused_tucker_forward(
     def _fused_tucker_inner(x_in, u_in_in, core_in, u_out_in, bias_in):
         output = ops.fused_tucker_forward(x_in, u_in_in, core_in, u_out_in, bias_in)
 
-        def grad(dy):
+        def grad(dy, variables=None):
+            """Gradient function with variables kwarg for tf.custom_gradient compliance."""
             with tf.GradientTape() as tape:
                 tape.watch([x_in, u_in_in, core_in, u_out_in])
                 if bias_provided:
                     tape.watch(bias_in)
+                # Also watch any passed variables
+                if variables:
+                    tape.watch(variables)
                 ref = _tucker_forward_reference(
                     x_in, u_in_in, core_in, u_out_in, bias_in if bias_provided else None
                 )
@@ -152,7 +156,14 @@ def fused_tucker_forward(
             else:
                 grad_x, grad_u_in, grad_core, grad_u_out = grads
                 grad_bias = None
-            return grad_x, grad_u_in, grad_core, grad_u_out, grad_bias
+
+            input_grads = (grad_x, grad_u_in, grad_core, grad_u_out, grad_bias)
+
+            # Compute variable gradients if variables were passed
+            if variables:
+                var_grads = tape.gradient(ref, variables, output_gradients=dy)
+                return input_grads, var_grads
+            return input_grads
 
         return output, grad
 
@@ -200,12 +211,21 @@ def fused_tensor_ring_forward(
             ring_rank=ring_rank,
         )
 
-        def grad(dy):
-            with tf.GradientTape() as tape:
+        def grad(dy, variables=None):
+            """Gradient function with variables kwarg for tf.custom_gradient compliance.
+
+            When TensorFlow detects that the function uses tf.Variables (like the
+            ring cores), it passes them via the 'variables' kwarg. We must compute
+            and return gradients for these variables as a second return value.
+            """
+            with tf.GradientTape(persistent=True) as tape:
                 tape.watch(inputs_in)
                 tape.watch(cores_in)
                 if bias_provided:
                     tape.watch(bias_in)
+                # Also watch any passed variables (the actual tf.Variables)
+                if variables:
+                    tape.watch(variables)
                 ref = _tensor_ring_forward_reference(
                     inputs_in,
                     cores_in,
@@ -221,7 +241,17 @@ def fused_tensor_ring_forward(
             grad_inputs = grads[0]
             grad_cores = grads[1]
             grad_bias = grads[2] if bias_provided else None
-            return grad_inputs, grad_cores, grad_bias
+
+            input_grads = (grad_inputs, grad_cores, grad_bias)
+
+            # Compute variable gradients if variables were passed
+            if variables:
+                var_grads = tape.gradient(ref, variables, output_gradients=dy)
+                del tape  # Release persistent tape
+                return input_grads, var_grads
+
+            del tape  # Release persistent tape
+            return input_grads
 
         return output, grad
 

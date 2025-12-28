@@ -37,6 +37,17 @@ Available Operations:
     - intrinsic_plasticity_ops: Stiefel manifold ops (Phase 71)
 """
 
+# Phase 61: AlphaQubit Decoder
+from highnoon._native.ops.alphaqubit_ops import alphaqubit_decode, create_alphaqubit_weights
+from highnoon._native.ops.alphaqubit_ops import ops_available as alphaqubit_ops_available
+
+# Phase 45: Entropy Regularization
+from highnoon._native.ops.entropy_regularization_ops import (
+    compute_activation_covariance,
+    von_neumann_entropy_loss,
+)
+from highnoon._native.ops.entropy_regularization_ops import ops_available as entropy_ops_available
+
 # QWT tokenizer operation
 from highnoon._native.ops.fused_qwt_tokenizer import (
     fused_qwt_tokenizer,
@@ -50,6 +61,17 @@ from highnoon._native.ops.fused_wavelet_encoder import (
     fused_wavelet_encoder_available,
     fused_wavelet_encoder_chunk,
 )
+
+# Phase 71: Intrinsic Plasticity
+from highnoon._native.ops.intrinsic_plasticity_ops import (
+    cayley_parameterization,
+    compute_plasticity_metric,
+    enforce_unitary_constraint,
+    measure_layer_plasticity,
+    project_gradient_tangent,
+    retract_to_manifold,
+)
+from highnoon._native.ops.intrinsic_plasticity_ops import ops_available as plasticity_ops_available
 from highnoon._native.ops.lib_loader import resolve_op_library
 
 # MPS operations
@@ -57,53 +79,87 @@ from highnoon._native.ops.mps_contract import mps_contract
 from highnoon._native.ops.mps_temporal import mps_temporal_scan
 
 # Native optimizers (including Phase 46, 59, 60)
-from highnoon._native.ops.optimizers import (
+from highnoon._native.ops.optimizers import (  # Phase 59: Adiabatic; Phase 60: Geodesic; Phase 46: SympFlow
+    adiabatic_optimizer_available,
+    adiabatic_optimizer_step,
+    geodesic_optimizer_available,
+    geodesic_optimizer_step,
     lion_update,
     lion_update_available,
     native_optimizers_available,
     sophia_update,
     sophia_update_available,
-    # Phase 59: Adiabatic
-    adiabatic_optimizer_step,
-    adiabatic_optimizer_available,
-    # Phase 60: Geodesic
-    geodesic_optimizer_step,
-    geodesic_optimizer_available,
-    # Phase 46: SympFlow
-    sympflow_step,
-    sympflow_kinetic_energy,
     sympflow_available,
+    sympflow_kinetic_energy,
+    sympflow_step,
 )
 
+# Phases 73/79/80/84: Quantum Advanced Ops
+from highnoon._native.ops.quantum_advanced_ops import (
+    compute_coherence,
+    nqs_decoder,
+    qcot_reason,
+    waveform_attention,
+)
+from highnoon._native.ops.quantum_advanced_ops import ops_available as advanced_ops_available
+
+# Phase 76/127: Quantum Coherence Bus
+from highnoon._native.ops.quantum_coherence_bus_ops import (
+    ops_available as coherence_bus_ops_available,
+)
+from highnoon._native.ops.quantum_coherence_bus_ops import (
+    qcb_coherent_transfer,
+    qcb_initialize,
+    qcb_synchronize_phase,
+    qcb_teleport_gradient,
+    qcb_update_mesh,
+    unified_bus_propagate_entanglement,
+    unified_bus_update_strength,
+)
+
+# Phase 65/83: Quantum Crystallization
+from highnoon._native.ops.quantum_crystallization_ops import (
+    crystallize_memory,
+    retrieve_from_crystal,
+)
+from highnoon._native.ops.quantum_crystallization_ops import (
+    ops_available as crystallization_ops_available,
+)
+
+# Phase 47: Quantum Measurement Dropout
+from highnoon._native.ops.quantum_dropout_ops import (
+    entangling_dropout,
+    quantum_measurement_dropout,
+    soft_quantum_dropout,
+)
+from highnoon._native.ops.quantum_dropout_ops import ops_available as dropout_ops_available
+
 # Quantum Architecture ops (Phases 26-36, 51-52)
-from highnoon._native.ops.quantum_ops import (
-    # Phase 34: Unitary Residual
-    unitary_residual_forward,
-    unitary_residual_backward,
-    # Phase 30: Quantum Norm
-    unitary_norm_forward,
-    rms_norm_forward,
-    # Phase 29: Unitary Expert
-    unitary_expert_forward,
-    quantum_activation,
-    # Phase 26: Quantum Embedding
-    quantum_embedding_forward,
-    haar_random_key_init,
-    # Phase 27: Floquet Position
-    floquet_position_encoding_forward,
-    init_floquet_angles,
-    # Phase 33: Quantum LM Head
-    quantum_lm_head_forward,
-    # Phase 32: Grover QSG
-    grover_guided_qsg,
-    grover_single_iteration,
-    # Phase 51: Born Rule Loss
+from highnoon._native.ops.quantum_ops import (  # Phase 34: Unitary Residual; Phase 30: Quantum Norm; Phase 29: Unitary Expert; Phase 26: Quantum Embedding; Phase 27: Floquet Position; Phase 33: Quantum LM Head; Phase 32: Grover QSG; Phase 51: Born Rule Loss; Phase 52: Quantum Fidelity Loss
     born_rule_loss,
     born_rule_loss_available,
-    # Phase 52: Quantum Fidelity Loss
+    floquet_position_encoding_forward,
+    grover_guided_qsg,
+    grover_single_iteration,
+    haar_random_key_init,
+    init_floquet_angles,
+    quantum_activation,
+    quantum_embedding_forward,
     quantum_fidelity_loss,
     quantum_fidelity_loss_available,
+    quantum_lm_head_forward,
     quantum_ops_available,
+    rms_norm_forward,
+    unitary_expert_forward,
+    unitary_norm_forward,
+    unitary_residual_backward,
+    unitary_residual_forward,
+)
+
+# Phase 44: Quantum Teleport Bus
+from highnoon._native.ops.quantum_teleport_bus_ops import bell_measurement, quantum_teleport_state
+from highnoon._native.ops.quantum_teleport_bus_ops import (
+    ops_available as teleport_bus_ops_available,
 )
 
 # Selective scan (Mamba) operation
@@ -113,6 +169,21 @@ from highnoon._native.ops.selective_scan_op import (
     selective_scan_available,
 )
 
+# Specialized Quantum Ops (Phases 50, 55-58, 64, 68, 70, 72, 78)
+from highnoon._native.ops.specialized_quantum_ops import (
+    majorana_position_encode,
+    mpqr_reasoning,
+    multi_stage_hamiltonian,
+    random_natural_gradient,
+    spiking_quantum_neuron,
+    spini_optimizer,
+    symplectic_gnn_kalman,
+    td_moe_forward,
+    teleport_gradients,
+    topological_wavelet_attention,
+)
+from highnoon._native.ops.specialized_quantum_ops import ops_available as specialized_ops_available
+
 # Train step operation
 from highnoon._native.ops.train_step import (
     fused_train_step,
@@ -121,96 +192,9 @@ from highnoon._native.ops.train_step import (
     train_step_module,
 )
 
-# Phase 44: Quantum Teleport Bus
-from highnoon._native.ops.quantum_teleport_bus_ops import (
-    quantum_teleport_state,
-    bell_measurement,
-    ops_available as teleport_bus_ops_available,
-)
-
-# Phase 45: Entropy Regularization
-from highnoon._native.ops.entropy_regularization_ops import (
-    von_neumann_entropy_loss,
-    compute_activation_covariance,
-    ops_available as entropy_ops_available,
-)
-
-# Phase 47: Quantum Measurement Dropout
-from highnoon._native.ops.quantum_dropout_ops import (
-    quantum_measurement_dropout,
-    soft_quantum_dropout,
-    entangling_dropout,
-    ops_available as dropout_ops_available,
-)
-
-# Phase 61: AlphaQubit Decoder
-from highnoon._native.ops.alphaqubit_ops import (
-    alphaqubit_decode,
-    create_alphaqubit_weights,
-    ops_available as alphaqubit_ops_available,
-)
-
 # Phase 62: VQEM Error Mitigation
-from highnoon._native.ops.vqem_ops import (
-    vqem_forward,
-    vqem_train_step,
-    create_vqem_params,
-    ops_available as vqem_ops_available,
-)
-
-# Phase 71: Intrinsic Plasticity
-from highnoon._native.ops.intrinsic_plasticity_ops import (
-    cayley_parameterization,
-    enforce_unitary_constraint,
-    project_gradient_tangent,
-    retract_to_manifold,
-    compute_plasticity_metric,
-    measure_layer_plasticity,
-    ops_available as plasticity_ops_available,
-)
-
-# Phase 76/127: Quantum Coherence Bus
-from highnoon._native.ops.quantum_coherence_bus_ops import (
-    qcb_initialize,
-    qcb_coherent_transfer,
-    qcb_teleport_gradient,
-    qcb_synchronize_phase,
-    qcb_update_mesh,
-    unified_bus_propagate_entanglement,
-    unified_bus_update_strength,
-    ops_available as coherence_bus_ops_available,
-)
-
-# Phase 65/83: Quantum Crystallization
-from highnoon._native.ops.quantum_crystallization_ops import (
-    crystallize_memory,
-    retrieve_from_crystal,
-    ops_available as crystallization_ops_available,
-)
-
-# Phases 73/79/80/84: Quantum Advanced Ops
-from highnoon._native.ops.quantum_advanced_ops import (
-    nqs_decoder,
-    qcot_reason,
-    waveform_attention,
-    compute_coherence,
-    ops_available as advanced_ops_available,
-)
-
-# Specialized Quantum Ops (Phases 50, 55-58, 64, 68, 70, 72, 78)
-from highnoon._native.ops.specialized_quantum_ops import (
-    teleport_gradients,
-    spiking_quantum_neuron,
-    majorana_position_encode,
-    td_moe_forward,
-    topological_wavelet_attention,
-    mpqr_reasoning,
-    symplectic_gnn_kalman,
-    spini_optimizer,
-    multi_stage_hamiltonian,
-    random_natural_gradient,
-    ops_available as specialized_ops_available,
-)
+from highnoon._native.ops.vqem_ops import create_vqem_params, vqem_forward, vqem_train_step
+from highnoon._native.ops.vqem_ops import ops_available as vqem_ops_available
 
 __all__ = [
     # Utility
@@ -326,5 +310,3 @@ __all__ = [
     "random_natural_gradient",
     "specialized_ops_available",
 ]
-
-

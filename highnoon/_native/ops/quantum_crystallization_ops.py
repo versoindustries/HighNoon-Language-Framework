@@ -8,9 +8,11 @@ NO PYTHON FALLBACKS: RuntimeError raised if native ops unavailable.
 """
 
 import logging
+
 import tensorflow as tf
-from highnoon._native.ops.lib_loader import resolve_op_library
+
 from highnoon import config
+from highnoon._native.ops.lib_loader import resolve_op_library
 
 logger = logging.getLogger(__name__)
 

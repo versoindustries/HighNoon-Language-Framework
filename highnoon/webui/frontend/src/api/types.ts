@@ -377,3 +377,51 @@ export interface TunerSuggestion {
     exploration_factor?: number;
     target_lr?: number;
 }
+
+// ============================================================================
+// Hyperparameter Importance Analysis Types (fANOVA)
+// ============================================================================
+
+/** Individual hyperparameter importance */
+export interface ParameterImportance {
+    name: string;
+    importance: number;  // 0-1, fraction of variance explained
+    rank: number;
+    std: number;
+    is_categorical: boolean;
+}
+
+/** Pairwise interaction importance */
+export interface InteractionImportance {
+    param1: string;
+    param2: string;
+    importance: number;
+    is_significant: boolean;
+}
+
+/** Marginal effect curve for a parameter */
+export interface MarginalCurve {
+    x_values: (number | string)[];
+    y_mean: number[];
+    y_std: number[];
+    is_categorical: boolean;
+}
+
+/** Complete importance analysis result */
+export interface ImportanceResult {
+    individual: ParameterImportance[];
+    interactions: InteractionImportance[];
+    total_variance: number;
+    explained_variance: number;
+    n_trials: number;
+    param_names: string[];
+}
+
+/** API response for importance analysis */
+export interface ImportanceAnalysisResponse {
+    sweep_id: string;
+    importance: ImportanceResult;
+    marginal_curves: Record<string, MarginalCurve>;
+    error?: string;
+    message?: string;
+}

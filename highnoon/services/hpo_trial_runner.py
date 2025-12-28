@@ -8,6 +8,7 @@ Includes RSS memory tracking via psutil for trial resource monitoring.
 """
 
 import argparse
+import gc
 import json
 import logging
 import math
@@ -48,26 +49,23 @@ except (ImportError, ModuleNotFoundError):
 import highnoon.config as hn_config
 
 # Quantum control and QSG imports
-from highnoon.config import (
-    META_CONTROLLER_FREQUENCY,
-    USE_HYBRID_PID,
-    USE_QSG_GENERATION,
-    USE_QUANTUM_LR_CONTROLLER,
-    USE_RLS_SYSID,
-    # Quantum training features
-    USE_NEURAL_ZNE,
-    USE_NEURAL_QEM,
-    USE_TENSOR_GALORE,
+from highnoon.config import (  # Quantum training features; Model architecture limits; Quantum tokenization pipeline (Phase 48+)
     GALORE_RANK,
-    # Model architecture limits
+    LITE_MAX_CONTEXT_LENGTH,
+    LITE_MAX_MOE_EXPERTS,
     LITE_MAX_PARAMS,
     LITE_MAX_REASONING_BLOCKS,
-    LITE_MAX_MOE_EXPERTS,
-    LITE_MAX_CONTEXT_LENGTH,
-    # Quantum tokenization pipeline (Phase 48+)
+    META_CONTROLLER_FREQUENCY,
+    USE_HYBRID_PID,
     USE_HYPERDIMENSIONAL_EMBEDDING,
-    USE_QUANTUM_LM_HEAD,
     USE_INTELLIGENT_VOCAB_CONTROLLER,
+    USE_NEURAL_QEM,
+    USE_NEURAL_ZNE,
+    USE_QSG_GENERATION,
+    USE_QUANTUM_LM_HEAD,
+    USE_QUANTUM_LR_CONTROLLER,
+    USE_RLS_SYSID,
+    USE_TENSOR_GALORE,
     VOCAB_CONTROLLER_AUTO_TRAIN,
 )
 from highnoon.training.quantum_lr_controller import QuantumAdaptiveLRController
@@ -83,6 +81,7 @@ try:
         QULSConfig,
         create_quls_from_hpo_config,
     )
+
     QULS_AVAILABLE = True
 except (ImportError, ModuleNotFoundError):
     pass
@@ -93,14 +92,20 @@ TrainingEngine = None
 EnterpriseTrainingConfig = None
 TrainingResult = None
 try:
-    from highnoon.training.engine import (
-        TrainingEngine,
+    from highnoon.training.training_engine import (
         EnterpriseTrainingConfig,
+        TrainingEngine,
         TrainingResult,
     )
+
     TRAINING_ENGINE_AVAILABLE = True
-except (ImportError, ModuleNotFoundError):
-    pass
+    print("[HPO] TrainingEngine loaded successfully", file=sys.stderr)
+except (ImportError, ModuleNotFoundError) as e:
+    # Log the error so we can diagnose import failures
+    import sys
+
+    print(f"[HPO] WARNING: TrainingEngine import failed: {e}", file=sys.stderr)
+    TRAINING_ENGINE_AVAILABLE = False
 
 
 # QSG evaluation (lazy import to avoid circular dependencies)
@@ -683,8 +688,6 @@ def build_hsmn_model(
     config.get("adapter_scale", 0.1)
     config.get("lsh_num_hashes", 4)
     config.get("lsh_bucket_size", 32)
-    config.get("monarch_num_blocks", 4)
-    config.get("monarch_block_size", 128)
 
     logger.info("[HPO] Building HSMN model with config:")
     logger.info(f"  - hidden_dim: {hidden_dim}")
@@ -766,21 +769,47 @@ def build_hsmn_model(
     # Use HyperdimensionalEmbedding for quantum-enhanced embedding (matching debug script)
     if use_hqe:
         try:
-            from highnoon.models.layers.hyperdimensional_layer import HyperdimensionalEmbedding
-            
-            # hd_dim must be divisible by hidden_dim - compute dynamically
-            hd_dim = hidden_dim * 8  # Ensures divisibility (e.g., 768*8=6144, 512*8=4096)
-            x = HyperdimensionalEmbedding(
-                vocab_size=vocab_size,
-                model_dim=hidden_dim,
-                hd_dim=hd_dim,
-                use_ctqw=True,
-                ctqw_steps=3,
-                name="hde_embedding",
-            )(input_layer)
-            logger.info(f"[HPO] Using HyperdimensionalEmbedding: vocab={vocab_size}, hd_dim={hd_dim}")
+            # Check if we should use memory-efficient DualPathEmbedding
+            use_dual_path = getattr(hn_config, "USE_DUAL_PATH_EMBEDDING", True)
+            active_vocab_size = getattr(hn_config, "DUAL_PATH_ACTIVE_VOCAB_SIZE", 10000)
+
+            if use_dual_path:
+                from highnoon.models.layers.hyperdimensional_layer import DualPathEmbedding
+
+                # hd_dim must be divisible by hidden_dim
+                hd_dim = hidden_dim * 8  # Ensures divisibility
+                x = DualPathEmbedding(
+                    vocab_size=vocab_size,
+                    model_dim=hidden_dim,
+                    active_vocab_size=min(active_vocab_size, vocab_size),  # Don't exceed vocab
+                    hd_dim=hd_dim,
+                    use_ctqw=True,
+                    ctqw_steps=3,
+                    name="dual_path_embedding",
+                )(input_layer)
+                logger.info(
+                    f"[HPO] Using DualPathEmbedding: vocab={vocab_size}, active={min(active_vocab_size, vocab_size)}, hd_dim={hd_dim}"
+                )
+            else:
+                from highnoon.models.layers.hyperdimensional_layer import HyperdimensionalEmbedding
+
+                # hd_dim must be divisible by hidden_dim - compute dynamically
+                hd_dim = hidden_dim * 8  # Ensures divisibility (e.g., 768*8=6144, 512*8=4096)
+                x = HyperdimensionalEmbedding(
+                    vocab_size=vocab_size,
+                    model_dim=hidden_dim,
+                    hd_dim=hd_dim,
+                    use_ctqw=True,
+                    ctqw_steps=3,
+                    name="hde_embedding",
+                )(input_layer)
+                logger.info(
+                    f"[HPO] Using HyperdimensionalEmbedding: vocab={vocab_size}, hd_dim={hd_dim}"
+                )
         except (ImportError, Exception) as e:
-            logger.warning(f"[HPO] HyperdimensionalEmbedding failed ({e}), falling back to standard")
+            logger.warning(
+                f"[HPO] HyperdimensionalEmbedding failed ({e}), falling back to standard"
+            )
             x = tf.keras.layers.Embedding(
                 input_dim=vocab_size,
                 output_dim=hidden_dim,
@@ -815,7 +844,7 @@ def build_hsmn_model(
     if use_quantum_lm_head:
         try:
             from highnoon.models.reasoning.block_factory import QuantumLMHead
-            
+
             output_layer = QuantumLMHead(
                 vocab_size=vocab_size,
                 hidden_dim=hidden_dim,
@@ -1005,7 +1034,7 @@ def create_optimizer(
                 geodesic_weight=config.get("sympflowqng_geodesic_weight", 0.1),
             )
             logger.info(
-                f"[HPO] Using SympFlowQNG (Synergy S12: Symplectic + QNG Geodesic) optimizer"
+                "[HPO] Using SympFlowQNG (Synergy S12: Symplectic + QNG Geodesic) optimizer"
             )
         except ImportError:
             logger.warning("[HPO] SympFlowQNGOptimizer not available, falling back to AdamW")
@@ -1027,20 +1056,20 @@ def create_optimizer(
 
 def create_engine_config(config: dict[str, Any]) -> "EnterpriseTrainingConfig":
     """Create EnterpriseTrainingConfig from trial config dictionary.
-    
+
     This enables using TrainingEngine with all enterprise features (GaLore,
     QNG, Barren Plateau Monitor, Meta-Controller) in HPO trials, matching
     the debug script's training approach.
-    
+
     Args:
         config: Trial configuration dictionary with hyperparameters and feature flags.
-        
+
     Returns:
         EnterpriseTrainingConfig with all flags populated from trial config.
     """
     if not TRAINING_ENGINE_AVAILABLE or EnterpriseTrainingConfig is None:
         raise ImportError("TrainingEngine not available")
-    
+
     return EnterpriseTrainingConfig(
         # Core training
         max_grad_norm=config.get("max_grad_norm", 1.0),
@@ -1048,51 +1077,89 @@ def create_engine_config(config: dict[str, Any]) -> "EnterpriseTrainingConfig":
         log_frequency=config.get("log_frequency", 10),
         loss_function=config.get("loss_function", "sparse_categorical_crossentropy"),
         label_smoothing=config.get("label_smoothing", 0.0),
-        
         # Meta-Controller
         use_meta_controller=config.get("use_meta_controller", hn_config.USE_META_CONTROLLER),
-        meta_controller_frequency=config.get("meta_controller_frequency", hn_config.META_CONTROLLER_FREQUENCY),
-        
+        meta_controller_frequency=config.get(
+            "meta_controller_frequency", hn_config.META_CONTROLLER_FREQUENCY
+        ),
         # GaLore (critical for memory efficiency)
         use_galore=config.get("use_tensor_galore", hn_config.USE_TENSOR_GALORE),
         galore_rank=config.get("galore_rank", hn_config.GALORE_RANK),
-        galore_update_proj_gap=config.get("galore_update_proj_gap", hn_config.GALORE_UPDATE_PROJ_GAP),
+        galore_update_proj_gap=config.get(
+            "galore_update_proj_gap", hn_config.GALORE_UPDATE_PROJ_GAP
+        ),
         galore_scale=config.get("galore_scale", hn_config.GALORE_SCALE),
         galore_vqc_aware=config.get("galore_vqc_aware", hn_config.GALORE_VQC_AWARE),
-        
         # QALRC
-        use_qalrc=config.get("use_quantum_lr_controller", getattr(hn_config, "USE_QUANTUM_LR_CONTROLLER", True)),
+        use_qalrc=config.get(
+            "use_quantum_lr_controller", getattr(hn_config, "USE_QUANTUM_LR_CONTROLLER", True)
+        ),
         qalrc_annealing_power=config.get("qalrc_annealing_power", 2.0),
         qalrc_tunneling_probability=config.get("qalrc_tunneling_probability", 0.05),
         qalrc_entropy_smoothing=config.get("qalrc_entropy_smoothing", 0.9),
-        
         # Barren Plateau Monitor (critical for VQC layer stability)
-        use_barren_plateau_detection=config.get("barren_plateau_monitor", hn_config.BARREN_PLATEAU_MONITOR),
-        barren_plateau_threshold=config.get("barren_plateau_threshold", hn_config.BARREN_PLATEAU_THRESHOLD),
-        barren_plateau_lr_scale=config.get("barren_plateau_recovery_lr_scale", hn_config.BARREN_PLATEAU_RECOVERY_LR_SCALE),
-        
+        use_barren_plateau_detection=config.get(
+            "barren_plateau_monitor", hn_config.BARREN_PLATEAU_MONITOR
+        ),
+        barren_plateau_threshold=config.get(
+            "barren_plateau_threshold", hn_config.BARREN_PLATEAU_THRESHOLD
+        ),
+        barren_plateau_lr_scale=config.get(
+            "barren_plateau_recovery_lr_scale", hn_config.BARREN_PLATEAU_RECOVERY_LR_SCALE
+        ),
         # QNG (Quantum Natural Gradient)
         use_qng=config.get("use_quantum_natural_gradient", hn_config.USE_QUANTUM_NATURAL_GRADIENT),
         qng_damping=config.get("qng_damping", hn_config.QNG_DAMPING),
-        qng_apply_to_quantum_only=config.get("qng_apply_to_quantum_only", hn_config.QNG_APPLY_TO_QUANTUM_ONLY),
-        
+        qng_apply_to_quantum_only=config.get(
+            "qng_apply_to_quantum_only", hn_config.QNG_APPLY_TO_QUANTUM_ONLY
+        ),
         # Entropy Regularization
-        use_entropy_regularization=config.get("use_entropy_regularization", hn_config.USE_ENTROPY_REGULARIZATION),
+        use_entropy_regularization=config.get(
+            "use_entropy_regularization", hn_config.USE_ENTROPY_REGULARIZATION
+        ),
         entropy_reg_weight=config.get("entropy_reg_weight", hn_config.ENTROPY_REG_WEIGHT),
-        
         # QHPM Crystallization
-        use_qhpm_crystallization=config.get("use_qhpm_crystallization", hn_config.ENABLE_QHPM_CRYSTALLIZATION),
-        crystallization_threshold=config.get("qhpm_crystallization_threshold", hn_config.QHPM_CRYSTALLIZATION_THRESHOLD),
-        max_crystallized_directions=config.get("qhpm_max_directions", hn_config.QHPM_MAX_CRYSTALLIZED_DIRECTIONS),
-        
+        use_qhpm_crystallization=config.get(
+            "use_qhpm_crystallization", hn_config.ENABLE_QHPM_CRYSTALLIZATION
+        ),
+        crystallization_threshold=config.get(
+            "qhpm_crystallization_threshold", hn_config.QHPM_CRYSTALLIZATION_THRESHOLD
+        ),
+        max_crystallized_directions=config.get(
+            "qhpm_max_directions", hn_config.QHPM_MAX_CRYSTALLIZED_DIRECTIONS
+        ),
         # SympFlow
         use_sympflow=config.get("use_sympflow_optimizer", hn_config.USE_SYMPFLOW_OPTIMIZER),
         sympflow_mass=config.get("sympflow_mass", hn_config.SYMPFLOW_MASS),
         sympflow_friction=config.get("sympflow_friction", hn_config.SYMPFLOW_FRICTION),
-        
         # Neural ZNE/QEM
         use_neural_zne=config.get("use_neural_zne", hn_config.USE_NEURAL_ZNE),
         use_neural_qem=config.get("use_neural_qem", hn_config.USE_NEURAL_QEM),
+        # UnifiedSmartTuner (HPO/WebUI integration)
+        use_unified_smart_tuner=config.get(
+            "use_unified_smart_tuner",
+            getattr(hn_config, "USE_UNIFIED_SMART_TUNER", True),
+        ),
+        smart_tuner_coordination_mode=config.get(
+            "smart_tuner_coordination_mode",
+            getattr(hn_config, "SMART_TUNER_MODE", "balanced"),
+        ),
+        smart_tuner_warmup_steps=config.get(
+            "smart_tuner_warmup_steps",
+            getattr(hn_config, "SMART_TUNER_WARMUP_STEPS", 1000),
+        ),
+        smart_tuner_exploration_steps=config.get(
+            "smart_tuner_exploration_steps",
+            getattr(hn_config, "SMART_TUNER_EXPLORATION_STEPS", 10000),
+        ),
+        smart_tuner_memory_enabled=config.get(
+            "smart_tuner_memory_enabled",
+            getattr(hn_config, "SMART_TUNER_MEMORY_ENABLED", True),
+        ),
+        smart_tuner_webui_reporting=config.get(
+            "smart_tuner_webui_reporting",
+            getattr(hn_config, "SMART_TUNER_WEBUI_REPORTING", True),
+        ),
     )
 
 
@@ -1166,8 +1233,9 @@ def train_trial(
     # Get dimensions from config
     batch_size = trial_config.get("batch_size", 8)
     sequence_length = trial_config.get("sequence_length", 256)
-    vocab_size = trial_config.get("vocab_size", 512)
-    hidden_dim = trial_config.get("hidden_dim", 256)
+    # vocab_size is NOT set here - it's determined by tokenizer.vocab_size after training
+    # The tokenizer learns the vocabulary from the curriculum dataset
+    hidden_dim = trial_config.get("hidden_dim") or 256  # Default if None or missing
 
     # Get optional HuggingFace dataset name (set from curriculum or manually)
     hf_dataset_name = trial_config.get("hf_dataset_name") or trial_config.get("dataset_name")
@@ -1189,12 +1257,10 @@ def train_trial(
         # When USE_INTELLIGENT_VOCAB_CONTROLLER is enabled, the tokenizer auto-trains
         # on the curriculum data to learn frequent n-grams and expand vocabulary.
         use_adaptive_tokenizer = trial_config.get(
-            "use_adaptive_tokenizer",
-            USE_INTELLIGENT_VOCAB_CONTROLLER  # Use config flag as default
+            "use_adaptive_tokenizer", USE_INTELLIGENT_VOCAB_CONTROLLER  # Use config flag as default
         )
         auto_train_enabled = trial_config.get(
-            "vocab_controller_auto_train",
-            VOCAB_CONTROLLER_AUTO_TRAIN  # Use config flag as default
+            "vocab_controller_auto_train", VOCAB_CONTROLLER_AUTO_TRAIN  # Use config flag as default
         )
         # Get vocab tuning hyperparameters from HPO search space
         # These control how the tokenizer learns from the curriculum
@@ -1208,16 +1274,30 @@ def train_trial(
             f"min_freq={adaptive_min_freq}, max_ngram={vocab_max_ngram_size}"
         )
 
+        # Phase 200+: HD Streaming Mode (Quantum-Enhanced Memory Optimization)
+        # Uses HolographicCorpus for amplitude-based reservoir sampling
+        use_hd_streaming = trial_config.get("use_hd_streaming", True)  # Opt-in for now
+        hd_reservoir_size = trial_config.get("hd_reservoir_size", 2000)
+        hd_dim = trial_config.get("hd_dim", 1024)
+
+        if use_hd_streaming:
+            logger.info(f"[HPO] HD Streaming Mode: reservoir={hd_reservoir_size}, hd_dim={hd_dim}")
+
         train_dataset, tokenizer, merger = load_training_dataset(
             batch_size=batch_size,
             sequence_length=sequence_length,
-            vocab_size=vocab_size,
+            # vocab_size is NOT passed - tokenizer learns from curriculum and sets its own vocab_size
             hf_dataset_name=hf_dataset_name,
             prefetch_buffer_size=prefetch_buffer_size,
             use_adaptive_tokenizer=use_adaptive_tokenizer,
             adaptive_min_freq=adaptive_min_freq,
             max_samples=vocab_sample_size,  # Control corpus sample size for tokenizer learning
+            # HD Streaming parameters
+            use_hd_streaming=use_hd_streaming,
+            hd_reservoir_size=hd_reservoir_size,
+            hd_dim=hd_dim,
         )
+
         # Use actual tokenizer vocab size (AdaptiveQWTTokenizer returns learned size)
         # This is the EFFECTIVE vocab size after learning from curriculum
         vocab_size = tokenizer.vocab_size
@@ -1238,21 +1318,71 @@ def train_trial(
     # Create optimizer (pass model for SophiaG)
     optimizer = create_optimizer(trial_config, model=model)
 
+    # Estimate parameter count for logging
+    param_count = model.count_params()
+
+    # ========================================================================
+    # PARAM BUDGET ENFORCEMENT
+    # Skip trials that exceed the user-specified parameter budget.
+    # This prevents wasting compute on oversized models.
+    # ========================================================================
+    param_budget = trial_config.get("param_budget")
+    if param_budget is not None and param_count > param_budget:
+        budget_msg = (
+            f"Model exceeds parameter budget: {param_count / 1e6:.1f}M > {param_budget / 1e6:.1f}M. "
+            f"Skipping trial without counting as attempt."
+        )
+        logger.warning(f"[HPO] {budget_msg}")
+
+        # Clean up model to free memory
+        del model
+        del optimizer
+        gc.collect()
+
+        # Report skip to WebUI and write status file
+        hpo_reporter.log(
+            f"BUDGET_EXCEEDED: {budget_msg}",
+            level="WARNING",
+            param_count=param_count,
+            param_budget=param_budget,
+        )
+
+        # Write status.json with budget exceeded error so executor can detect it
+        hpo_reporter.complete(
+            success=False,
+            error=f"BUDGET_EXCEEDED: {budget_msg}",
+            param_count=param_count,
+        )
+
+        # Return special sentinel value indicating budget skip (not a failure)
+        # The orchestrator should recognize this and not count it as a trial
+        # Using float("nan") to distinguish from inf (training failure)
+        return float("nan")
+
+    # Log trial configuration to WebUI console for visibility
+    # Enrich config with actual values used
+    trial_config_for_log = {
+        **trial_config,
+        "vocab_size": vocab_size,
+        "param_count": param_count,
+    }
+    hpo_reporter.log_trial_start(trial_config_for_log, param_count=param_count)
+
     # ========================================================================
     # Use TrainingEngine for enterprise-grade training with all enhancements
     # This replaces the manual training loop to enable: GaLore, QNG, Barren
     # Plateau Monitor, Meta-Controller, QHPM Crystallization, Neural ZNE
     # ========================================================================
-    
+
     if not TRAINING_ENGINE_AVAILABLE:
         error_msg = "TrainingEngine not available - cannot run HPO trial"
         logger.error(f"[HPO] {error_msg}")
         hpo_reporter.complete(success=False, error=error_msg)
         return float("inf")
-    
+
     # Create TrainingEngine config from trial config
     engine_config = create_engine_config(trial_config)
-    
+
     # Log which enhancements are enabled
     logger.info("[HPO] TrainingEngine configuration:")
     logger.info(f"  GaLore: {engine_config.use_galore} (rank={engine_config.galore_rank})")
@@ -1260,37 +1390,46 @@ def train_trial(
     logger.info(f"  Barren Plateau: {engine_config.use_barren_plateau_detection}")
     logger.info(f"  Meta-Controller: {engine_config.use_meta_controller}")
     logger.info(f"  QHPM Crystallization: {engine_config.use_qhpm_crystallization}")
-    
+
     # Create TrainingEngine
     engine = TrainingEngine(
         model=model,
         optimizer=optimizer,
         config=engine_config,
     )
-    
-    # Run training with TrainingEngine
+
+    # Link engine to HPO sweep for WebUI status reporting
     total_training_steps = epochs * steps_per_epoch
-    logger.info(f"[HPO] Starting training: {epochs} epochs x {steps_per_epoch} steps = {total_training_steps} total steps")
-    
+    if sweep_id:
+        engine.set_sweep_id(sweep_id)
+    engine.set_total_steps(total_training_steps)
+
+    # Run training with TrainingEngine
+    logger.info(
+        f"[HPO] Starting training: {epochs} epochs x {steps_per_epoch} steps = {total_training_steps} total steps"
+    )
+    logger.info(f"  UnifiedSmartTuner: {engine_config.use_unified_smart_tuner}")
+
     try:
         result: TrainingResult = engine.run(
             epochs=epochs,
             dataset=train_dataset,
             callbacks=[],  # TrainingEngine handles internal callbacks
+            steps_per_epoch=steps_per_epoch,  # CRITICAL: Must pass to limit infinite generator
         )
-        
+
         best_loss = result.final_loss if result.final_loss is not None else float("inf")
         epochs_completed = result.epochs_completed
-        
+
         if not result.success:
             logger.warning(f"[HPO] Training completed with issues: {result.error}")
-            
+
     except Exception as e:
         logger.error(f"[HPO] Training failed: {e}")
         memory_manager.cleanup()
         hpo_reporter.complete(success=False, error=str(e))
         return float("inf")
-    
+
     # QSG evaluation after training
     use_qsg_evaluation = trial_config.get("use_qsg_evaluation", USE_QSG_GENERATION)
     throughput_tokens_per_sec = 0.0
@@ -1299,7 +1438,7 @@ def train_trial(
         if qsg_metrics:
             throughput_tokens_per_sec = qsg_metrics.get("tokens_per_second", 0)
             logger.info(f"[HPO] QSG metrics: {throughput_tokens_per_sec:.1f} tok/s")
-        
+
     # Early stopping logging (TrainingEngine may have stopped early)
     # The TrainingEngine handles early stopping internally.
     # The `epochs_completed` from `result` will reflect if it stopped early.
@@ -1368,7 +1507,7 @@ def train_trial(
         expected_calibration_error=quality_metrics.get("expected_calibration_error"),
         composite_score=composite_score,
         memory_peak_mb=peak_memory_mb,
-        epochs_completed=epoch + 1,  # epoch is 0-indexed
+        epochs_completed=epochs_completed,  # From TrainingResult
         throughput_tokens_per_sec=throughput_tokens_per_sec,
     )
 
@@ -1390,6 +1529,41 @@ def train_trial(
 
 def main():
     """Main entry point for HPO trial runner."""
+    import signal
+
+    # Global flag to track if we received a termination signal
+    _shutdown_requested = False
+    _shutdown_status_file = None
+    _shutdown_trial_id = None
+
+    def signal_handler(signum, frame):
+        """Handle SIGINT/SIGTERM gracefully to avoid GIL corruption."""
+        nonlocal _shutdown_requested
+        sig_name = signal.Signals(signum).name if hasattr(signal, "Signals") else str(signum)
+        logger.warning(f"[HPO] Received {sig_name}, initiating graceful shutdown...")
+        _shutdown_requested = True
+
+        # Write interrupted status if possible
+        if _shutdown_status_file and _shutdown_trial_id:
+            try:
+                status = {
+                    "trial_id": _shutdown_trial_id,
+                    "loss": None,
+                    "error": f"Interrupted by {sig_name}",
+                    "status": "interrupted",
+                }
+                with open(_shutdown_status_file, "w") as f:
+                    json.dump(status, f, indent=2)
+            except Exception:
+                pass
+
+        # Raise KeyboardInterrupt to allow graceful cleanup
+        raise KeyboardInterrupt(f"Received {sig_name}")
+
+    # Register signal handlers for graceful shutdown
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
     parser = argparse.ArgumentParser(description="HPO Trial Runner")
     parser.add_argument("--trial_id", type=str, required=True, help="Trial identifier")
     parser.add_argument(
@@ -1416,6 +1590,10 @@ def main():
     config_dir = Path(args.config).parent
     status_file = config_dir / "status.json"
 
+    # Store for signal handler access
+    _shutdown_status_file = status_file
+    _shutdown_trial_id = args.trial_id
+
     # Train trial with epoch-based training
     try:
         best_loss = train_trial(
@@ -1437,6 +1615,20 @@ def main():
             json.dump(status, f, indent=2)
 
         sys.exit(0)
+
+    except KeyboardInterrupt:
+        # Graceful shutdown requested
+        logger.warning("[HPO] Trial interrupted by user/system signal")
+        status = {
+            "trial_id": args.trial_id,
+            "loss": None,
+            "error": "Interrupted by signal",
+            "status": "interrupted",
+        }
+        with open(status_file, "w") as f:
+            json.dump(status, f, indent=2)
+        sys.exit(130)  # Standard exit code for SIGINT
+
     except Exception as e:
         logger.error(f"[HPO] Trial failed: {e}", exc_info=True)
 

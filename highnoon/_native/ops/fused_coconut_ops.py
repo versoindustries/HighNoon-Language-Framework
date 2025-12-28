@@ -39,17 +39,18 @@ _coconut_ops_available = False
 
 def _load_coconut_ops() -> bool:
     """Lazy load the native CoCoNut ops library.
-    
+
     Uses the consolidated binary loading from `highnoon._native`.
     All CoCoNut ops are compiled into `_highnoon_core.so`.
     """
     global _coconut_ops_lib, _coconut_ops_available
-    
+
     if _coconut_ops_lib is not None:
         return _coconut_ops_available
-    
+
     try:
         from highnoon._native import _load_consolidated_binary
+
         _coconut_ops_lib = _load_consolidated_binary()
         _coconut_ops_available = _coconut_ops_lib is not None
         if _coconut_ops_available:
@@ -60,7 +61,7 @@ def _load_coconut_ops() -> bool:
         logger.warning(f"Failed to load CoCoNut native ops: {e}")
         _coconut_ops_lib = None
         _coconut_ops_available = False
-    
+
     return _coconut_ops_available
 
 
@@ -89,13 +90,13 @@ def fused_coconut_bfs(
     num_paths: int = 2,
     num_thought_steps: int = 4,
     prune_threshold: float = 0.1,
-) -> Tuple[tf.Tensor, tf.Tensor]:
+) -> tuple[tf.Tensor, tf.Tensor]:
     """Multi-path BFS thought exploration with Grover-inspired amplitude scoring.
-    
+
     Expands hidden state to num_paths parallel thought paths, evolves them
     through num_thought_steps iterations, and aggregates using amplitude
     weighting.
-    
+
     Args:
         hidden_states: Input hidden states [batch, seq_len, dim].
         context: Context for amplitude scoring [batch, dim].
@@ -116,12 +117,12 @@ def fused_coconut_bfs(
         num_paths: Number of parallel thought paths (default 2, Lite max 8).
         num_thought_steps: Number of thought iterations per path.
         prune_threshold: Minimum amplitude to keep path (not used in current impl).
-    
+
     Returns:
         Tuple of:
             - output: Enhanced hidden states [batch, seq_len, dim]
             - amplitudes: Final path amplitudes [batch, num_paths]
-    
+
     Raises:
         RuntimeError: If native ops are not available.
     """
@@ -130,7 +131,7 @@ def fused_coconut_bfs(
             "FusedCoconutBFS C++ op not available. "
             "Build with: cd highnoon/_native && ./build_secure.sh --lite --debug"
         )
-    
+
     return _coconut_ops_lib.fused_coconut_bfs(
         hidden_states,
         context,
@@ -159,18 +160,18 @@ def fused_coconut_dfs_collapse(
     path_amplitudes: tf.Tensor,
     collapse_threshold: float = 0.8,
     crystallize_threshold: float = 0.9,
-) -> Tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]:
+) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]:
     """Adaptive BFS→DFS collapse based on path confidence.
-    
+
     When best path amplitude exceeds collapse_threshold, collapse to that
     single path. When it exceeds crystallize_threshold, flag for storage.
-    
+
     Args:
         path_states: Current path states [batch, num_paths, dim].
         path_amplitudes: Path quality scores [batch, num_paths].
         collapse_threshold: Threshold to collapse to single path.
         crystallize_threshold: Threshold to flag for crystallization.
-    
+
     Returns:
         Tuple of:
             - collapsed_state: Best/aggregated path [batch, dim]
@@ -180,7 +181,7 @@ def fused_coconut_dfs_collapse(
     """
     if not _load_coconut_ops():
         raise RuntimeError("FusedCoconutDFSCollapse C++ op not available.")
-    
+
     return _coconut_ops_lib.fused_coconut_dfs_collapse(
         path_states,
         path_amplitudes,
@@ -196,12 +197,12 @@ def fused_coconut_crystallize(
     crystal_ages: tf.Tensor,
     crystallize_threshold: float = 0.9,
     max_crystals: int = 64,
-) -> Tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
+) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
     """Crystallize high-confidence thought paths for reuse.
-    
+
     Stores thought paths exceeding threshold into a persistent store with
     LRU eviction when full.
-    
+
     Args:
         thought_path: Thought path to potentially store [batch, dim].
         confidence: Confidence score [batch].
@@ -209,7 +210,7 @@ def fused_coconut_crystallize(
         crystal_ages: Age counters for LRU [max_crystals].
         crystallize_threshold: Minimum confidence to store.
         max_crystals: Maximum crystals in store.
-    
+
     Returns:
         Tuple of:
             - updated_store: Updated crystal store [max_crystals, dim]
@@ -218,7 +219,7 @@ def fused_coconut_crystallize(
     """
     if not _load_coconut_ops():
         raise RuntimeError("FusedCoconutCrystallize C++ op not available.")
-    
+
     return _coconut_ops_lib.fused_coconut_crystallize(
         thought_path,
         confidence,
@@ -234,15 +235,15 @@ def fused_coconut_retrieve(
     crystal_store: tf.Tensor,
     crystal_valid: tf.Tensor,
     top_k: int = 1,
-) -> Tuple[tf.Tensor, tf.Tensor]:
+) -> tuple[tf.Tensor, tf.Tensor]:
     """Retrieve crystallized reasoning paths similar to query.
-    
+
     Args:
         query: Query embedding [batch, dim].
         crystal_store: Crystal store [max_crystals, dim].
         crystal_valid: Which slots are valid [max_crystals].
         top_k: Number of crystals to retrieve.
-    
+
     Returns:
         Tuple of:
             - retrieved: Best matching crystal [batch, dim]
@@ -250,7 +251,7 @@ def fused_coconut_retrieve(
     """
     if not _load_coconut_ops():
         raise RuntimeError("FusedCoconutRetrieve C++ op not available.")
-    
+
     return _coconut_ops_lib.fused_coconut_retrieve(
         query,
         crystal_store,
@@ -280,7 +281,7 @@ def fused_coconut_bfs_with_grad(
     num_paths: int = 2,
     num_thought_steps: int = 4,
     prune_threshold: float = 0.1,
-) -> Tuple[tf.Tensor, tf.Tensor]:
+) -> tuple[tf.Tensor, tf.Tensor]:
     """CoCoNut BFS with custom gradient for training.
 
     This wrapper uses an inner function with @tf.custom_gradient to avoid
@@ -349,14 +350,22 @@ def fused_coconut_bfs_with_grad(
     ):
         """Inner function with tensor-only signature for custom gradient."""
         output, amplitudes = fused_coconut_bfs(
-            hs, ctx,
-            ing, inb,
-            agg_w, agg_b,
-            png, pnb,
-            pd1_w, pd1_b,
-            pd2_w, pd2_b,
-            bc_w, bc_b,
-            ong, onb,
+            hs,
+            ctx,
+            ing,
+            inb,
+            agg_w,
+            agg_b,
+            png,
+            pnb,
+            pd1_w,
+            pd1_b,
+            pd2_w,
+            pd2_b,
+            bc_w,
+            bc_b,
+            ong,
+            onb,
             num_paths=num_paths,
             num_thought_steps=num_thought_steps,
             prune_threshold=prune_threshold,
@@ -375,22 +384,22 @@ def fused_coconut_bfs_with_grad(
             # Return gradients for each of the 16 tensor inputs
             # hidden_states gets grad_output, all weight/bias tensors get None
             return (
-                grad_output,   # grad for hs (hidden_states)
-                None,          # grad for ctx (context)
-                None,          # grad for ing (input_norm_gamma)
-                None,          # grad for inb (input_norm_beta)
-                None,          # grad for agg_w (aggregator_weight)
-                None,          # grad for agg_b (aggregator_bias)
-                None,          # grad for png (projector_norm_gamma)
-                None,          # grad for pnb (projector_norm_beta)
-                None,          # grad for pd1_w (projector_dense1_weight)
-                None,          # grad for pd1_b (projector_dense1_bias)
-                None,          # grad for pd2_w (projector_dense2_weight)
-                None,          # grad for pd2_b (projector_dense2_bias)
-                None,          # grad for bc_w (broadcast_weight)
-                None,          # grad for bc_b (broadcast_bias)
-                None,          # grad for ong (output_norm_gamma)
-                None,          # grad for onb (output_norm_beta)
+                grad_output,  # grad for hs (hidden_states)
+                None,  # grad for ctx (context)
+                None,  # grad for ing (input_norm_gamma)
+                None,  # grad for inb (input_norm_beta)
+                None,  # grad for agg_w (aggregator_weight)
+                None,  # grad for agg_b (aggregator_bias)
+                None,  # grad for png (projector_norm_gamma)
+                None,  # grad for pnb (projector_norm_beta)
+                None,  # grad for pd1_w (projector_dense1_weight)
+                None,  # grad for pd1_b (projector_dense1_bias)
+                None,  # grad for pd2_w (projector_dense2_weight)
+                None,  # grad for pd2_b (projector_dense2_bias)
+                None,  # grad for bc_w (broadcast_weight)
+                None,  # grad for bc_b (broadcast_bias)
+                None,  # grad for ong (output_norm_gamma)
+                None,  # grad for onb (output_norm_beta)
             )
 
         return (output, amplitudes), grad

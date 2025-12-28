@@ -1,0 +1,379 @@
+/* HPOImportanceChart.css - Styles for fANOVA importance visualization */
+
+.hpo-importance-chart {
+    background: var(--card-bg, #1a1a2e);
+    border-radius: 12px;
+    border: 1px solid var(--border-color, #2d2d44);
+    margin-top: 16px;
+    overflow: hidden;
+}
+
+.importance-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 16px;
+    background: var(--card-header-bg, #15152a);
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.importance-header:hover {
+    background: var(--card-header-hover, #1c1c35);
+}
+
+.importance-header h3 {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-primary, #e8e8f0);
+}
+
+.header-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.explained-var {
+    font-size: 12px;
+    color: var(--text-secondary, #9999aa);
+    background: var(--badge-bg, #2a2a40);
+    padding: 4px 8px;
+    border-radius: 4px;
+}
+
+.refresh-btn {
+    background: transparent;
+    border: none;
+    padding: 4px;
+    cursor: pointer;
+    color: var(--text-secondary, #9999aa);
+    display: flex;
+    align-items: center;
+    border-radius: 4px;
+    transition: all 0.2s;
+}
+
+.refresh-btn:hover:not(:disabled) {
+    color: var(--accent-blue, #60a5fa);
+    background: var(--button-hover-bg, #2a2a40);
+}
+
+.refresh-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.spinning {
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+/* Content area */
+.importance-content {
+    padding: 16px;
+}
+
+.importance-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+}
+
+@media (max-width: 800px) {
+    .importance-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
+/* Status messages */
+.importance-error,
+.importance-loading,
+.importance-pending,
+.importance-placeholder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 24px;
+    color: var(--text-secondary, #9999aa);
+    font-size: 13px;
+}
+
+.importance-error {
+    color: var(--error-color, #f87171);
+    background: var(--error-bg, rgba(248, 113, 113, 0.1));
+    border-radius: 8px;
+}
+
+.analyze-btn {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 20px;
+    background: var(--accent-blue, #60a5fa);
+    color: white;
+    border: none;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.analyze-btn:hover {
+    background: var(--accent-blue-hover, #3b82f6);
+    transform: translateY(-1px);
+}
+
+/* Importance bar chart */
+.importance-chart {
+    background: var(--chart-bg, #12121f);
+    border-radius: 8px;
+    padding: 12px;
+}
+
+.importance-chart h4 {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0 0 12px 0;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary, #9999aa);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.importance-bars {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.importance-bar-row {
+    display: grid;
+    grid-template-columns: 100px 1fr 50px;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.importance-bar-row:hover,
+.importance-bar-row.selected {
+    background: var(--row-hover-bg, rgba(96, 165, 250, 0.1));
+}
+
+.importance-bar-row.selected {
+    border-left: 3px solid var(--accent-blue, #60a5fa);
+}
+
+.param-name {
+    font-size: 12px;
+    color: var(--text-primary, #e8e8f0);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.cat-badge {
+    font-size: 9px;
+    background: var(--badge-purple, #7c3aed);
+    color: white;
+    padding: 1px 4px;
+    border-radius: 3px;
+}
+
+.bar-container {
+    height: 16px;
+    background: var(--bar-bg, #1e1e35);
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.bar-fill {
+    height: 100%;
+    border-radius: 4px;
+    transition: width 0.3s ease;
+}
+
+.importance-value {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-primary, #e8e8f0);
+    text-align: right;
+}
+
+/* Color variables for importance levels */
+:root {
+    --importance-high: #22c55e;
+    --importance-medium: #f59e0b;
+    --importance-low: #6b7280;
+}
+
+.chart-legend {
+    display: flex;
+    gap: 16px;
+    margin-top: 12px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border-color, #2d2d44);
+}
+
+.legend-item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 10px;
+    color: var(--text-secondary, #9999aa);
+}
+
+.legend-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 2px;
+}
+
+.legend-dot.high { background: var(--importance-high); }
+.legend-dot.medium { background: var(--importance-medium); }
+.legend-dot.low { background: var(--importance-low); }
+
+/* Marginal curve */
+.marginal-curve {
+    background: var(--chart-bg, #12121f);
+    border-radius: 8px;
+    padding: 12px;
+}
+
+.marginal-curve h4 {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0 0 12px 0;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary, #9999aa);
+}
+
+.marginal-curve.placeholder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 150px;
+    color: var(--text-muted, #666680);
+    font-size: 13px;
+}
+
+.line-chart {
+    width: 100%;
+    height: 100px;
+    margin: 8px 0;
+}
+
+.categorical-chart {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-around;
+    height: 80px;
+    padding: 8px;
+    gap: 8px;
+}
+
+.cat-bar-group {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    flex: 1;
+    max-width: 60px;
+}
+
+.cat-bar-wrapper {
+    height: 60px;
+    width: 100%;
+    display: flex;
+    align-items: flex-end;
+}
+
+.cat-bar {
+    width: 100%;
+    min-height: 4px;
+    background: var(--accent-blue, #60a5fa);
+    border-radius: 4px 4px 0 0;
+    transition: height 0.3s;
+}
+
+.cat-label {
+    font-size: 10px;
+    color: var(--text-secondary, #9999aa);
+    text-align: center;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
+}
+
+.curve-footer {
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border-color, #2d2d44);
+    font-size: 10px;
+    color: var(--text-muted, #666680);
+}
+
+/* Interactions */
+.interactions {
+    grid-column: 1 / -1;
+    background: var(--chart-bg, #12121f);
+    border-radius: 8px;
+    padding: 12px;
+}
+
+.interactions h4 {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0 0 8px 0;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary, #9999aa);
+    text-transform: uppercase;
+}
+
+.interactions ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+}
+
+.interactions li {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text-primary, #e8e8f0);
+    background: var(--badge-bg, #2a2a40);
+    padding: 6px 12px;
+    border-radius: 4px;
+}
+
+.inter-pct {
+    color: var(--importance-medium);
+    font-weight: 600;
+}

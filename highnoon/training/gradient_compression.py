@@ -53,7 +53,12 @@ import numpy as np
 import tensorflow as tf
 
 from highnoon import config
-from highnoon.config import GALORE_VQC_AWARE, GALORE_VQC_VARIANCE_BOOST
+from highnoon.config import (
+    GALORE_TT_MANIFOLD_PROJECTION,
+    GALORE_TT_PROJECTION_EPS,
+    GALORE_VQC_AWARE,
+    GALORE_VQC_VARIANCE_BOOST,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +117,22 @@ class TensorGaLoreCompressor:
             self._step_counter = 0
         # Phase 130.2: VQC gradient variance tracking for adaptive rank
         self._vqc_gradient_variance: dict[str, float] = {}
+        # S20: Barren plateau awareness - skip compression or boost rank during recovery
+        self._barren_plateau_active: bool = False
+        self._bp_rank_boost: float = 1.5  # Multiply rank by this during BP recovery
+        # Phase 201.12: TT layer detection patterns
+        self._tt_layer_patterns: list[str] = [
+            "tt_core",
+            "tt_dense",
+            "ttlayer",
+            "tensor_train",
+            "superposition_tt",
+            "tt_ffn",
+            "tt_lm_head",
+            "tt_embedding",
+        ]
+        # Track TT layers detected for statistics
+        self._tt_layers_detected: set[str] = set()
 
     def _initialize_projection(
         self,
@@ -147,8 +168,22 @@ class TensorGaLoreCompressor:
                     rank = min(int(rank * GALORE_VQC_VARIANCE_BOOST), d1, d2)
                     logger.debug(
                         "[GALORE] Boosted rank for VQC layer %s: variance=%.4f, new_rank=%d",
-                        variable_name, vqc_var, rank
+                        variable_name,
+                        vqc_var,
+                        rank,
                     )
+
+            # S20: Boost rank during barren plateau recovery to preserve gradient info
+            if self._barren_plateau_active:
+                boosted_rank = min(int(rank * self._bp_rank_boost), d1, d2)
+                if boosted_rank > rank:
+                    logger.debug(
+                        "[GALORE-S20] BP boost: %d → %d for %s",
+                        rank,
+                        boosted_rank,
+                        variable_name,
+                    )
+                    rank = boosted_rank
 
             # Compute SVD: G = U @ S @ V^T
             s, u, v = tf.linalg.svd(gradient)
@@ -170,8 +205,7 @@ class TensorGaLoreCompressor:
             # HOSVD mode-product has dimension tracking issues that need fixing
             # TODO: Implement proper HOSVD with correct dimension tracking
             logger.debug(
-                "[GALORE] Skipping projection init for %dD tensor '%s'",
-                ndim, variable_name
+                "[GALORE] Skipping projection init for %dD tensor '%s'", ndim, variable_name
             )
             # Return minimal state - compression/decompression will skip this
             return ProjectionState(
@@ -231,6 +265,118 @@ class TensorGaLoreCompressor:
         core_dims = [min(rank, d) for d in shape]
         return int(np.prod(core_dims))
 
+    def _is_tt_layer(self, variable_name: str) -> bool:
+        """Check if a variable belongs to a TT-decomposed layer.
+
+        Phase 201.12: TT layer detection for manifold projection.
+
+        Args:
+            variable_name: Name of the weight variable.
+
+        Returns:
+            True if this is a TT layer variable.
+        """
+        name_lower = variable_name.lower()
+        return any(pattern in name_lower for pattern in self._tt_layer_patterns)
+
+    def _project_to_tt_tangent(
+        self,
+        gradient: tf.Tensor,
+        variable: tf.Variable,
+    ) -> tf.Tensor:
+        """Project gradient to TT tangent space for TT-decomposed layers.
+
+        Phase 201.12: GaLore TT-Manifold Projection.
+
+        For TT cores G_k, projects gradient dG_k to the tangent space of the
+        TT manifold to ensure updates stay compatible with TT structure:
+
+            dG_k_projected = dG_k - G_k @ (G_k^T @ G_k)^{-1} @ (G_k^T @ dG_k)
+
+        This removes components that would take the TT core out of the manifold,
+        improving convergence by respecting the TT geometry.
+
+        Args:
+            gradient: Gradient tensor for a TT core.
+            variable: Associated TT core weight variable.
+
+        Returns:
+            Projected gradient in TT tangent space.
+        """
+        if not GALORE_TT_MANIFOLD_PROJECTION:
+            return gradient
+
+        # Get the current TT core value
+        G = variable
+        shape = gradient.shape.as_list()
+        ndim = len(shape)
+
+        if ndim == 2:
+            # 2D TT core: [r_in, d × r_out] or similar
+            # Project to tangent space of low-rank manifold
+
+            # Compute G^T @ G (normal equations matrix)
+            GtG = tf.matmul(G, G, transpose_a=True)
+
+            # Regularize for numerical stability
+            reg = GALORE_TT_PROJECTION_EPS * tf.eye(tf.shape(GtG)[0], dtype=GtG.dtype)
+            GtG_reg = GtG + reg
+
+            # Compute G^T @ dG
+            GtdG = tf.matmul(G, gradient, transpose_a=True)
+
+            # Solve (G^T @ G)^{-1} @ (G^T @ dG)
+            try:
+                solve_term = tf.linalg.solve(GtG_reg, GtdG)
+            except Exception:
+                # Fallback if solve fails (singular matrix)
+                logger.debug(
+                    "[GALORE-TT] Solve failed for %s, using regularized pinv",
+                    variable.name,
+                )
+                solve_term = tf.linalg.lstsq(GtG_reg, GtdG, l2_regularizer=GALORE_TT_PROJECTION_EPS)
+
+            # Compute projection: dG - G @ solve_term
+            correction = tf.matmul(G, solve_term)
+            projected = gradient - correction
+
+            logger.debug(
+                "[GALORE-TT] Projected %s: correction_norm=%.4e",
+                variable.name,
+                float(tf.norm(correction).numpy()),
+            )
+            return projected
+
+        elif ndim == 3:
+            # 3D TT core: [r_in, d, r_out]
+            # Flatten to 2D for projection, then reshape back
+            r_in, d, r_out = shape
+            flat_shape = [r_in, d * r_out]
+
+            G_flat = tf.reshape(G, flat_shape)
+            grad_flat = tf.reshape(gradient, flat_shape)
+
+            # Compute projection in flattened space
+            GtG = tf.matmul(G_flat, G_flat, transpose_a=True)
+            reg = GALORE_TT_PROJECTION_EPS * tf.eye(r_in, dtype=GtG.dtype)
+            GtG_reg = GtG + reg
+
+            GtdG = tf.matmul(G_flat, grad_flat, transpose_a=True)
+
+            try:
+                solve_term = tf.linalg.solve(GtG_reg, GtdG)
+            except Exception:
+                solve_term = tf.linalg.lstsq(GtG_reg, GtdG, l2_regularizer=GALORE_TT_PROJECTION_EPS)
+
+            correction = tf.matmul(G_flat, solve_term)
+            projected_flat = grad_flat - correction
+
+            return tf.reshape(projected_flat, shape)
+
+        else:
+            # Higher-order cores: skip projection
+            return gradient
+
     def compress(
         self,
         gradient: tf.Tensor,
@@ -266,6 +412,11 @@ class TensorGaLoreCompressor:
 
         state = self._projections[var_id]
 
+        # Phase 201.12: Apply TT tangent projection for TT layers before compression
+        if self._is_tt_layer(var_name) and GALORE_TT_MANIFOLD_PROJECTION:
+            self._tt_layers_detected.add(var_name)
+            gradient = self._project_to_tt_tangent(gradient, variable)
+
         if ndim == 2:
             # 2D case: project to low-rank subspace
             u, v = state.factor_matrices[0], state.factor_matrices[1]
@@ -282,8 +433,7 @@ class TensorGaLoreCompressor:
             # that require a more substantial fix. 2D covers most parameters.
             # TODO: Fix HOSVD dimension tracking across mode products
             logger.debug(
-                "[GALORE] Skipping %dD tensor '%s' - HOSVD not yet supported",
-                ndim, var_name
+                "[GALORE] Skipping %dD tensor '%s' - HOSVD not yet supported", ndim, var_name
             )
             return gradient, var_id  # Return var_id for consistent decompress lookup
 
@@ -385,6 +535,10 @@ class TensorGaLoreCompressor:
             "step_counter": self._step_counter,
             "num_variables": len(self._projections),
             "variables": {},
+            # Phase 201.12: TT layer statistics
+            "tt_manifold_projection": GALORE_TT_MANIFOLD_PROJECTION,
+            "tt_layers_detected": len(self._tt_layers_detected),
+            "tt_layer_names": list(self._tt_layers_detected)[:10],  # First 10 for brevity
         }
 
         total_original = 0
@@ -442,6 +596,30 @@ class TensorGaLoreCompressor:
             variance = alpha * variance + (1 - alpha) * old_var
 
         self._vqc_gradient_variance[variable_name] = variance
+
+    def set_barren_plateau_mode(self, active: bool, rank_boost: float = 1.5) -> None:
+        """Set barren plateau recovery mode (S20: GaLore ↔ BP synergy).
+
+        When barren plateau is detected, GaLore adjusts behavior to preserve
+        gradient information during the recovery phase:
+        - Increases rank to capture more gradient directions
+        - Prevents over-compression that could lose escape gradient signal
+
+        Args:
+            active: Whether barren plateau recovery is currently active.
+            rank_boost: Rank multiplier during BP recovery (default 1.5x).
+        """
+        old_active = self._barren_plateau_active
+        self._barren_plateau_active = active
+        self._bp_rank_boost = rank_boost
+
+        if active and not old_active:
+            logger.info(
+                "[GALORE-S20] Entering barren plateau mode: rank boosted by %.1fx",
+                rank_boost,
+            )
+        elif not active and old_active:
+            logger.info("[GALORE-S20] Exiting barren plateau mode: rank restored")
 
 
 class GaLoreOptimizerWrapper:
@@ -655,9 +833,8 @@ class QuantumGaLoreCompressor:
         s = tf.linalg.svd(gradient, compute_uv=False)
 
         if self._native_available:
-            from highnoon._native.ops.quantum_galore_ops import (
-                compute_effective_rank,
-            )
+            from highnoon._native.ops.quantum_galore_ops import compute_effective_rank
+
             rank = compute_effective_rank(s, self.max_rank, self.min_rank)
             return int(rank.numpy())
 
@@ -766,12 +943,13 @@ class QuantumGaLoreCompressor:
                 vqc_var = self._vqc_gradient_variance[var_name]
                 if vqc_var > 0.1:  # High variance threshold
                     effective_rank = min(
-                        int(effective_rank * GALORE_VQC_VARIANCE_BOOST),
-                        rows, cols
+                        int(effective_rank * GALORE_VQC_VARIANCE_BOOST), rows, cols
                     )
                     logger.debug(
                         "[QUANTUM_GALORE] VQC boost for %s: var=%.4f, rank=%d",
-                        var_name, vqc_var, effective_rank
+                        var_name,
+                        vqc_var,
+                        effective_rank,
                     )
 
             # Initialize quantum features
@@ -803,9 +981,8 @@ class QuantumGaLoreCompressor:
 
         # Apply quantum random projection via C++ or SVD fallback
         if self._native_available:
-            from highnoon._native.ops.quantum_galore_ops import (
-                quantum_galore_project,
-            )
+            from highnoon._native.ops.quantum_galore_ops import quantum_galore_project
+
             s = tf.linalg.svd(gradient, compute_uv=False)
             compressed, _ = quantum_galore_project(
                 gradient,
@@ -849,9 +1026,8 @@ class QuantumGaLoreCompressor:
         rows, cols = proj["shape"]
 
         if self._native_available:
-            from highnoon._native.ops.quantum_galore_ops import (
-                quantum_galore_deproject,
-            )
+            from highnoon._native.ops.quantum_galore_ops import quantum_galore_deproject
+
             full_update = quantum_galore_deproject(
                 compressed_update,
                 proj["rotation_matrix"],
@@ -921,6 +1097,7 @@ class QuantumGaLoreCompressor:
                 allocate_block_ranks,
                 compute_block_influence,
             )
+
             influence = compute_block_influence(grad_norms, weight_norms)
             if critical_indices is None:
                 critical_indices = [0, num_blocks - 1]
@@ -991,9 +1168,7 @@ class QuantumGaLoreCompressor:
             }
 
         if total_original > 0:
-            stats["overall_compression_ratio"] = total_original / max(
-                total_compressed, 1
-            )
+            stats["overall_compression_ratio"] = total_original / max(total_compressed, 1)
         else:
             stats["overall_compression_ratio"] = 1.0
 
@@ -1042,4 +1217,3 @@ __all__ = [
     "ProjectionState",
     "QuantumGaLoreCompressor",
 ]
-

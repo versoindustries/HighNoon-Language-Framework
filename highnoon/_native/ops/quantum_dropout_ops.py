@@ -31,8 +31,8 @@ from typing import Tuple
 
 import tensorflow as tf
 
-from highnoon._native.ops.lib_loader import resolve_op_library
 from highnoon import config
+from highnoon._native.ops.lib_loader import resolve_op_library
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +45,7 @@ def _load_ops():
     global _module, _available
     if _module is not None:
         return _available
-        
+
     try:
         lib_path = resolve_op_library(__file__, "_highnoon_core.so")
         if lib_path is None:
@@ -57,8 +57,7 @@ def _load_ops():
         _available = False
         logger.warning(f"Failed to load Quantum Dropout ops: {e}")
         raise RuntimeError(
-            "Quantum Dropout native ops not available. "
-            "Run ./build_secure.sh to compile."
+            "Quantum Dropout native ops not available. " "Run ./build_secure.sh to compile."
         ) from e
     return _available
 
@@ -110,10 +109,10 @@ def quantum_measurement_dropout(
     """
     if not config.USE_QUANTUM_MEASUREMENT_DROPOUT or not training:
         return input_tensor
-    
+
     _load_ops()
     drop_rate = drop_rate if drop_rate is not None else config.QMD_DROP_RATE
-    
+
     return _module.quantum_measurement_dropout(
         input_tensor,
         drop_rate=drop_rate,
@@ -154,11 +153,11 @@ def soft_quantum_dropout(
     """
     if not config.USE_QUANTUM_MEASUREMENT_DROPOUT or not training:
         return input_tensor
-    
+
     _load_ops()
     drop_rate = drop_rate if drop_rate is not None else config.QMD_DROP_RATE
     temperature = temperature if temperature is not None else config.QMD_SOFTENING_TEMP
-    
+
     return _module.soft_quantum_dropout(
         input_tensor,
         softening_params,
@@ -176,7 +175,7 @@ def soft_quantum_dropout_grad(
     drop_rate: float | None = None,
     temperature: float | None = None,
     seed: int = 42,
-) -> Tuple[tf.Tensor, tf.Tensor]:
+) -> tuple[tf.Tensor, tf.Tensor]:
     """Gradient computation for soft quantum dropout.
 
     Args:
@@ -196,7 +195,7 @@ def soft_quantum_dropout_grad(
     _load_ops()
     drop_rate = drop_rate if drop_rate is not None else config.QMD_DROP_RATE
     temperature = temperature if temperature is not None else config.QMD_SOFTENING_TEMP
-    
+
     return _module.soft_quantum_dropout_grad(
         grad_output,
         input_tensor,
@@ -216,7 +215,7 @@ def _soft_quantum_dropout_grad(op, grad):
     drop_rate = op.get_attr("drop_rate")
     temperature = op.get_attr("temperature")
     seed = op.get_attr("seed")
-    
+
     _load_ops()
     grad_input, grad_params = _module.soft_quantum_dropout_grad(
         grad,
@@ -255,10 +254,10 @@ def entangling_dropout(
     """
     if not config.USE_QUANTUM_MEASUREMENT_DROPOUT or not training:
         return input_tensor
-    
+
     _load_ops()
     drop_rate = drop_rate if drop_rate is not None else config.QMD_DROP_RATE
-    
+
     return _module.entangling_dropout(
         input_tensor,
         drop_rate=drop_rate,

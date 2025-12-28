@@ -29,7 +29,6 @@ Example:
 """
 
 from highnoon.tokenization.adaptive_qwt_tokenizer import AdaptiveQWTTokenizer
-from highnoon.tokenization.byte_stream_tokenizer import ByteStreamTokenizer
 from highnoon.tokenization.qwt_text_tokenizer import QWTTextTokenizer
 from highnoon.tokenization.superword_merger import (
     SuperwordEntry,
@@ -40,9 +39,7 @@ from highnoon.tokenization.superword_merger import (
 __all__ = [
     "AdaptiveQWTTokenizer",
     "QWTTextTokenizer",
-    "ByteStreamTokenizer",
     "SuperwordMerger",
     "SuperwordMergerConfig",
     "SuperwordEntry",
 ]
-

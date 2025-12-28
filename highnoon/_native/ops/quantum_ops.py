@@ -723,4 +723,3 @@ def quantum_fidelity_loss_available() -> bool:
         return hasattr(_quantum_ops_module, "quantum_fidelity_loss")
     except RuntimeError:
         return False
-

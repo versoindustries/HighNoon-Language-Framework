@@ -264,9 +264,7 @@ class VQCMetaOptimizer:
                     "Please compile the vqc_expectation op."
                 )
         except ImportError as e:
-            raise RuntimeError(
-                f"VQC Meta-Optimizer requires vqc_expectation module: {e}"
-            ) from e
+            raise RuntimeError(f"VQC Meta-Optimizer requires vqc_expectation module: {e}") from e
 
     def _init_circuit_params(self) -> None:
         """Initialize trainable VQC parameters.
@@ -287,9 +285,7 @@ class VQCMetaOptimizer:
         # Build entangler topology
         self.entangler_pairs = self._build_entangler_topology()
 
-        logger.debug(
-            "[VQCMetaOptimizer] Initialized %d circuit parameters", n_params
-        )
+        logger.debug("[VQCMetaOptimizer] Initialized %d circuit parameters", n_params)
 
     def _build_entangler_topology(self) -> tf.Tensor:
         """Build entanglement pairs based on topology config.
@@ -328,8 +324,7 @@ class VQCMetaOptimizer:
         # Measure Z on first n_outputs qubits
         # paulis: 0=I, 1=X, 2=Y, 3=Z
         self._measurement_paulis = tf.constant(
-            [[3 if j == i else 0 for j in range(self.config.num_qubits)]
-             for i in range(n_outputs)],
+            [[3 if j == i else 0 for j in range(self.config.num_qubits)] for i in range(n_outputs)],
             dtype=tf.int32,
         )
 
@@ -372,7 +367,7 @@ class VQCMetaOptimizer:
         ]
 
         # Pad to power of 2 for amplitude encoding
-        n_amplitudes = 2 ** self.config.num_qubits
+        n_amplitudes = 2**self.config.num_qubits
         features = features + [0.0] * (n_amplitudes - len(features))
 
         # Normalize to unit norm (valid quantum state)
@@ -441,8 +436,6 @@ class VQCMetaOptimizer:
         )
         return expectations
 
-
-
     def _decode_expectations(self, expectations: tf.Tensor) -> VQCTuningDecisions:
         """Decode VQC expectation values to tuning parameters.
 
@@ -454,7 +447,7 @@ class VQCMetaOptimizer:
         Returns:
             VQCTuningDecisions with decoded parameters.
         """
-        exp_np = expectations.numpy() if hasattr(expectations, 'numpy') else np.array(expectations)
+        exp_np = expectations.numpy() if hasattr(expectations, "numpy") else np.array(expectations)
 
         # Ensure we have enough expectation values
         while len(exp_np) < 6:
@@ -624,9 +617,7 @@ class VQCMetaOptimizer:
             rewards = [e.reward for e in self._experience_buffer]
             stats["mean_reward"] = float(np.mean(rewards))
             stats["std_reward"] = float(np.std(rewards))
-            stats["positive_reward_ratio"] = float(
-                sum(1 for r in rewards if r > 0) / len(rewards)
-            )
+            stats["positive_reward_ratio"] = float(sum(1 for r in rewards if r > 0) / len(rewards))
 
         return stats
 

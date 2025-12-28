@@ -272,7 +272,6 @@ def ctqw_spread(
     return ctqw_spread_tf(embeddings, steps)
 
 
-
 __all__ = [
     "holographic_bundle",
     "ctqw_spread",

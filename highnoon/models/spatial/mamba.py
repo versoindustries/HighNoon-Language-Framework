@@ -25,6 +25,7 @@ from highnoon._native.ops.selective_scan_op import selective_scan
 from highnoon.config import DEBUG_MODE, USE_AUTO_NEURAL_QEM
 from highnoon.models.reasoning.fused_contract import FusedReasoningBlockMixin
 from highnoon.models.tensor_layers import TTLayer
+from highnoon.utils import factorize_for_tt
 
 logger = logging.getLogger(__name__)
 
@@ -125,40 +126,27 @@ class SpatialBlock(FusedReasoningBlockMixin, tf.keras.layers.Layer):
         # For hybrid compatibility, set data format attribute
         self.data_format = "channels_last"
 
-        def factorize(dim):
-            if dim <= 0:
-                return [1, dim]
-            s = int(math.sqrt(dim))
-            while s > 1 and dim % s != 0:
-                s -= 1
-            if s == 1:
-                for i in range(2, int(dim**0.5) + 2):
-                    if dim % i == 0:
-                        s = i
-                        break
-            return [s, dim // s] if s > 1 else [1, dim]
-
         self.in_proj = TTLayer(
-            input_dims=factorize(self.embedding_dim),
-            output_dims=factorize(2 * self.d_inner),
+            input_dims=factorize_for_tt(self.embedding_dim),
+            output_dims=factorize_for_tt(2 * self.d_inner),
             tt_ranks=[1, 16, 1],
             name="in_proj_tt",
         )
         self.x_proj = TTLayer(
-            input_dims=factorize(self.d_inner),
-            output_dims=factorize(self.dt_rank + 2 * self.state_dim),
+            input_dims=factorize_for_tt(self.d_inner),
+            output_dims=factorize_for_tt(self.dt_rank + 2 * self.state_dim),
             tt_ranks=[1, 16, 1],
             name="x_proj_tt",
         )
         self.dt_proj = TTLayer(
-            input_dims=factorize(self.dt_rank),
-            output_dims=factorize(self.d_inner),
+            input_dims=factorize_for_tt(self.dt_rank),
+            output_dims=factorize_for_tt(self.d_inner),
             tt_ranks=[1, 16, 1],
             name="dt_proj_tt",
         )
         self.out_proj = TTLayer(
-            input_dims=factorize(self.d_inner),
-            output_dims=factorize(self.embedding_dim),
+            input_dims=factorize_for_tt(self.d_inner),
+            output_dims=factorize_for_tt(self.embedding_dim),
             tt_ranks=[1, 16, 1],
             name="out_proj_tt",
         )
@@ -457,21 +445,8 @@ class ReasoningMamba2Block(FusedReasoningBlockMixin, tf.keras.layers.Layer):
         self.data_format = "channels_last"
         # logger.info(f"[{self.name}] Using data_format: '{self.data_format}' for custom Conv1D.")
 
-        def factorize(dim):
-            if dim <= 0:
-                return [1, dim]
-            s = int(math.sqrt(dim))
-            while s > 1 and dim % s != 0:
-                s -= 1
-            if s == 1:
-                for i in range(2, int(dim**0.5) + 2):
-                    if dim % i == 0:
-                        s = i
-                        break
-            return [s, dim // s] if s > 1 else [1, dim]
-
-        in_proj_input_dims = factorize(self.embedding_dim)
-        in_proj_output_dims = factorize(2 * self.d_inner)
+        in_proj_input_dims = factorize_for_tt(self.embedding_dim)
+        in_proj_output_dims = factorize_for_tt(2 * self.d_inner)
         self.in_proj = TTLayer(
             input_dims=in_proj_input_dims,
             output_dims=in_proj_output_dims,
@@ -480,8 +455,8 @@ class ReasoningMamba2Block(FusedReasoningBlockMixin, tf.keras.layers.Layer):
         )
 
         # FIX: Replace Dense with TTLayer for consistency and graph-mode stability.
-        x_proj_input_dims = factorize(self.d_inner)
-        x_proj_output_dims = factorize(self.dt_rank + 2 * self.state_dim)
+        x_proj_input_dims = factorize_for_tt(self.d_inner)
+        x_proj_output_dims = factorize_for_tt(self.dt_rank + 2 * self.state_dim)
         self.x_proj = TTLayer(
             input_dims=x_proj_input_dims,
             output_dims=x_proj_output_dims,
@@ -489,8 +464,8 @@ class ReasoningMamba2Block(FusedReasoningBlockMixin, tf.keras.layers.Layer):
             name="x_proj",
         )
 
-        dt_proj_input_dims = factorize(self.dt_rank)
-        dt_proj_output_dims = factorize(self.d_inner)
+        dt_proj_input_dims = factorize_for_tt(self.dt_rank)
+        dt_proj_output_dims = factorize_for_tt(self.d_inner)
         self.dt_proj = TTLayer(
             input_dims=dt_proj_input_dims,
             output_dims=dt_proj_output_dims,
@@ -498,8 +473,8 @@ class ReasoningMamba2Block(FusedReasoningBlockMixin, tf.keras.layers.Layer):
             name="dt_proj",
         )
 
-        out_proj_input_dims = factorize(self.d_inner)
-        out_proj_output_dims = factorize(self.embedding_dim)
+        out_proj_input_dims = factorize_for_tt(self.d_inner)
+        out_proj_output_dims = factorize_for_tt(self.embedding_dim)
         self.out_proj = TTLayer(
             input_dims=out_proj_input_dims,
             output_dims=out_proj_output_dims,
@@ -829,16 +804,13 @@ class QMambaBlock(SpatialBlock):
         self._qmamba_qem_mitigator = None
         if USE_AUTO_NEURAL_QEM:
             from highnoon.training.neural_zne import NeuralQuantumErrorMitigator
-            self._qmamba_qem_mitigator = NeuralQuantumErrorMitigator(
-                name="qmamba_qem"
-            )
+
+            self._qmamba_qem_mitigator = NeuralQuantumErrorMitigator(name="qmamba_qem")
 
         # Phase 130.3: Coherence tracking for UnifiedQuantumBus integration
         self._last_coherence = 0.0
 
-    def superposition_evolve(
-        self, x: tf.Tensor, states: list[tf.Tensor]
-    ) -> list[tf.Tensor]:
+    def superposition_evolve(self, x: tf.Tensor, states: list[tf.Tensor]) -> list[tf.Tensor]:
         """Evolve K parallel state paths with entanglement.
 
         Each path gets a slightly different effective dt for exploration.
@@ -935,9 +907,8 @@ class QMambaBlock(SpatialBlock):
         init_amplitude = 1.0 / math.sqrt(self.num_paths)
         initial_state = tf.zeros([batch_size, self.d_inner, self.state_dim])
         states = [
-            initial_state + tf.random.normal(
-                tf.shape(initial_state), stddev=0.01, seed=42 + k
-            ) * init_amplitude
+            initial_state
+            + tf.random.normal(tf.shape(initial_state), stddev=0.01, seed=42 + k) * init_amplitude
             for k in range(self.num_paths)
         ]
 
@@ -982,9 +953,7 @@ class QMambaBlock(SpatialBlock):
             scaled_dt = dt * path_scale
 
             # Use standard selective_scan for each path
-            ssm_out_k, hidden_k = selective_scan(
-                y, scaled_dt, self.A_log, B, C, self.D
-            )
+            ssm_out_k, hidden_k = selective_scan(y, scaled_dt, self.A_log, B, C, self.D)
 
             # Connect rotation_angles to output via state-based modulation
             # states[k] is [batch, d_inner, state_dim], reduce to [batch, 1, d_inner]
@@ -1024,7 +993,7 @@ class QMambaBlock(SpatialBlock):
         # Phase 130.1: Apply auto Neural QEM if enabled
         # Use training state from call() method for proper gradient flow
         if self._qmamba_qem_mitigator is not None:
-            is_training = getattr(self, '_is_training', False)
+            is_training = getattr(self, "_is_training", False)
             output = self._qmamba_qem_mitigator(output, training=is_training)
 
         return output
@@ -1060,21 +1029,25 @@ class QMambaBlock(SpatialBlock):
 
     def get_config(self) -> dict:
         config = super().get_config()
-        config.update({
-            "num_superposition_paths": self.num_paths,
-            "entanglement_depth": self.entanglement_depth,
-            "entanglement_strength": self.entanglement_strength,
-            "use_born_rule": self.use_born_rule,
-            "gumbel_temperature": self.gumbel_temperature,
-        })
+        config.update(
+            {
+                "num_superposition_paths": self.num_paths,
+                "entanglement_depth": self.entanglement_depth,
+                "entanglement_strength": self.entanglement_strength,
+                "use_born_rule": self.use_born_rule,
+                "gumbel_temperature": self.gumbel_temperature,
+            }
+        )
         return config
 
     def fused_metadata(self) -> dict[str, int]:
         metadata = super().fused_metadata()
-        metadata.update({
-            "num_superposition_paths": int(self.num_paths),
-            "entanglement_depth": int(self.entanglement_depth),
-        })
+        metadata.update(
+            {
+                "num_superposition_paths": int(self.num_paths),
+                "entanglement_depth": int(self.entanglement_depth),
+            }
+        )
         return metadata
 
 
@@ -1142,9 +1115,7 @@ class QSSMGatedBlock(SpatialBlock):
             shape=(vqc_layers, vqc_qubits, 2),
             name="vqc_params",
             trainable=True,
-            initializer=tf.keras.initializers.RandomUniform(
-                minval=-0.15, maxval=0.15
-            ),
+            initializer=tf.keras.initializers.RandomUniform(minval=-0.15, maxval=0.15),
         )
 
         # Gate encoder weights: maps (embedding_dim + state_dim) -> vqc_qubits
@@ -1180,9 +1151,8 @@ class QSSMGatedBlock(SpatialBlock):
         self._qssm_qem_mitigator = None
         if USE_AUTO_NEURAL_QEM:
             from highnoon.training.neural_zne import NeuralQuantumErrorMitigator
-            self._qssm_qem_mitigator = NeuralQuantumErrorMitigator(
-                name="qssm_qem"
-            )
+
+            self._qssm_qem_mitigator = NeuralQuantumErrorMitigator(name="qssm_qem")
 
         # Phase 130.3: Coherence tracking for UnifiedQuantumBus integration
         self._last_coherence = 0.0
@@ -1191,8 +1161,6 @@ class QSSMGatedBlock(SpatialBlock):
     def build(self, input_shape):
         super().build(input_shape)
         # Weights are already added in __init__, build is handled by parent
-
-
 
     def _compute_vqc_gate(self, x: tf.Tensor, state: tf.Tensor) -> tf.Tensor:
         """Compute VQC-based gate values.
@@ -1209,7 +1177,7 @@ class QSSMGatedBlock(SpatialBlock):
         """
         # Project x from d_inner to embedding_dim using simple linear projection
         # Use slicing to get first embedding_dim features (d_inner >= embedding_dim)
-        x_proj = x[:, :self.embedding_dim]
+        x_proj = x[:, : self.embedding_dim]
 
         # Combine input and state for context-aware gating
         gate_input = tf.concat([x_proj, state], axis=-1)
@@ -1225,10 +1193,11 @@ class QSSMGatedBlock(SpatialBlock):
         # Project to gate values using manual weights
         vqc_expanded = tf.expand_dims(vqc_output, axis=-1)  # [batch, 1]
         vqc_tiled = tf.tile(vqc_expanded, [1, self.vqc_qubits])  # [batch, vqc_qubits]
-        gate = tf.nn.sigmoid(tf.matmul(vqc_tiled, self.gate_projection_kernel) + self.gate_projection_bias)
+        gate = tf.nn.sigmoid(
+            tf.matmul(vqc_tiled, self.gate_projection_kernel) + self.gate_projection_bias
+        )
 
         return gate
-
 
     def _simulate_vqc(self, encoded_angles: tf.Tensor) -> tf.Tensor:
         """Simulate VQC and return expectation values.
@@ -1259,12 +1228,8 @@ class QSSMGatedBlock(SpatialBlock):
             # Update states using tf.tensor_scatter_nd_update
             indices = tf.expand_dims(tf.range(batch_size), axis=1)
             indices = tf.concat([indices, tf.fill([batch_size, 1], q)], axis=1)
-            states_real = tf.tensor_scatter_nd_update(
-                states_real, indices, new_real
-            )
-            states_imag = tf.tensor_scatter_nd_update(
-                states_imag, indices, new_imag
-            )
+            states_real = tf.tensor_scatter_nd_update(states_real, indices, new_real)
+            states_imag = tf.tensor_scatter_nd_update(states_imag, indices, new_imag)
 
         # Apply VQC layers
         for layer in range(self.vqc_layers):
@@ -1290,12 +1255,8 @@ class QSSMGatedBlock(SpatialBlock):
 
                 indices = tf.expand_dims(tf.range(batch_size), axis=1)
                 indices = tf.concat([indices, tf.fill([batch_size, 1], q)], axis=1)
-                states_real = tf.tensor_scatter_nd_update(
-                    states_real, indices, new_real
-                )
-                states_imag = tf.tensor_scatter_nd_update(
-                    states_imag, indices, new_imag
-                )
+                states_real = tf.tensor_scatter_nd_update(states_real, indices, new_real)
+                states_imag = tf.tensor_scatter_nd_update(states_imag, indices, new_imag)
 
         # Compute ⟨Z⟩ expectation on first qubit: P(0) - P(1) ≈ 2*P(0) - 1
         prob_0 = states_real[:, 0] ** 2 + states_imag[:, 0] ** 2
@@ -1339,9 +1300,7 @@ class QSSMGatedBlock(SpatialBlock):
         stride = tf.constant(1, dtype=tf.int32)
         padding = tf.constant("SAME")
         x_conv_activated = tf.nn.silu(
-            fused_depthwise_conv1d(
-                x_conv, self.conv1d_filter, self.conv1d_bias, stride, padding
-            )
+            fused_depthwise_conv1d(x_conv, self.conv1d_filter, self.conv1d_bias, stride, padding)
         )
         y = x_conv_activated * z
 
@@ -1397,7 +1356,7 @@ class QSSMGatedBlock(SpatialBlock):
         # Phase 130.1: Apply auto Neural QEM if enabled
         # Use training state from call() method for proper gradient flow
         if self._qssm_qem_mitigator is not None:
-            is_training = getattr(self, '_is_training', False)
+            is_training = getattr(self, "_is_training", False)
             output = self._qssm_qem_mitigator(output, training=is_training)
 
         return output
@@ -1433,20 +1392,24 @@ class QSSMGatedBlock(SpatialBlock):
 
     def get_config(self) -> dict:
         config = super().get_config()
-        config.update({
-            "vqc_qubits": self.vqc_qubits,
-            "vqc_layers": self.vqc_layers,
-            "use_born_rule": self.use_born_rule,
-            "measurement_temp": self.measurement_temp,
-        })
+        config.update(
+            {
+                "vqc_qubits": self.vqc_qubits,
+                "vqc_layers": self.vqc_layers,
+                "use_born_rule": self.use_born_rule,
+                "measurement_temp": self.measurement_temp,
+            }
+        )
         return config
 
     def fused_metadata(self) -> dict[str, int]:
         metadata = super().fused_metadata()
-        metadata.update({
-            "vqc_qubits": int(self.vqc_qubits),
-            "vqc_layers": int(self.vqc_layers),
-        })
+        metadata.update(
+            {
+                "vqc_qubits": int(self.vqc_qubits),
+                "vqc_layers": int(self.vqc_layers),
+            }
+        )
         return metadata
 
 
@@ -1495,7 +1458,9 @@ class UnifiedQSSMBlock(QMambaBlock):
 
         # S1: Unified Q-SSM gating
         self._use_shared_gating = use_shared_gating and cfg.USE_UNIFIED_QSSM_GATING
-        self._share_vqc = cfg.UNIFIED_QSSM_SHARE_VQC if hasattr(cfg, 'UNIFIED_QSSM_SHARE_VQC') else True
+        self._share_vqc = (
+            cfg.UNIFIED_QSSM_SHARE_VQC if hasattr(cfg, "UNIFIED_QSSM_SHARE_VQC") else True
+        )
 
         # Shared VQC gate weights for Q-SSM integration
         if self._use_shared_gating:
@@ -1513,7 +1478,9 @@ class UnifiedQSSMBlock(QMambaBlock):
             )
 
         # S7: QASA prior support
-        self._use_qasa_prior = cfg.QMAMBA_USE_QASA_PRIOR if hasattr(cfg, 'QMAMBA_USE_QASA_PRIOR') else True
+        self._use_qasa_prior = (
+            cfg.QMAMBA_USE_QASA_PRIOR if hasattr(cfg, "QMAMBA_USE_QASA_PRIOR") else True
+        )
         self._qasa_attention = None
         if self._use_qasa_prior:
             self.prior_proj = tf.keras.layers.Dense(
@@ -1627,7 +1594,9 @@ class UnifiedQSSMBlock(QMambaBlock):
             # List of tensors: [K tensors of shape [batch, ...]]
             collapsed = tf.zeros_like(superposition_states[0])
             for k in range(len(superposition_states)):
-                weight = tf.reshape(probs[:, k], [-1] + [1] * (len(superposition_states[0].shape) - 1))
+                weight = tf.reshape(
+                    probs[:, k], [-1] + [1] * (len(superposition_states[0].shape) - 1)
+                )
                 collapsed = collapsed + weight * superposition_states[k]
         else:
             # Tensor: [batch, num_paths, ...]
@@ -1670,9 +1639,8 @@ class UnifiedQSSMBlock(QMambaBlock):
         init_amplitude = 1.0 / math.sqrt(self.num_paths)
         initial_state = tf.zeros([batch_size, self.d_inner, self.state_dim])
         states = [
-            initial_state + tf.random.normal(
-                tf.shape(initial_state), stddev=0.01, seed=42 + k
-            ) * init_amplitude
+            initial_state
+            + tf.random.normal(tf.shape(initial_state), stddev=0.01, seed=42 + k) * init_amplitude
             for k in range(self.num_paths)
         ]
 
@@ -1713,9 +1681,7 @@ class UnifiedQSSMBlock(QMambaBlock):
             path_scale = 1.0 + 0.1 * (k - self.num_paths / 2) / self.num_paths
             scaled_dt = dt * path_scale
 
-            ssm_out_k, hidden_k = selective_scan(
-                y, scaled_dt, self.A_log, B, C, self.D
-            )
+            ssm_out_k, hidden_k = selective_scan(y, scaled_dt, self.A_log, B, C, self.D)
 
             # Connect rotation_angles to output via state-based modulation
             # states[k] is [batch, d_inner, state_dim], reduce to [batch, 1, d_inner]
@@ -1754,21 +1720,25 @@ class UnifiedQSSMBlock(QMambaBlock):
         # Phase 130.1: Apply auto Neural QEM if enabled
         # Use training state from call() method for proper gradient flow
         if self._qmamba_qem_mitigator is not None:
-            is_training = getattr(self, '_is_training', False)
+            is_training = getattr(self, "_is_training", False)
             output = self._qmamba_qem_mitigator(output, training=is_training)
 
         return output
 
     def get_config(self) -> dict:
         config = super().get_config()
-        config.update({
-            "use_shared_gating": self._use_shared_gating,
-        })
+        config.update(
+            {
+                "use_shared_gating": self._use_shared_gating,
+            }
+        )
         return config
 
     def fused_metadata(self) -> dict[str, int]:
         metadata = super().fused_metadata()
-        metadata.update({
-            "use_shared_gating": 1 if self._use_shared_gating else 0,
-        })
+        metadata.update(
+            {
+                "use_shared_gating": 1 if self._use_shared_gating else 0,
+            }
+        )
         return metadata

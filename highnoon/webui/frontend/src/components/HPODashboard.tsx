@@ -26,6 +26,7 @@ import { LossChart } from './charts/LossChart';
 import { MetricGauge, ConfidenceGauge } from './charts/MetricGauge';
 import { TrialResultsTable } from './TrialResultsTable';
 import { TrainingConsole } from './TrainingConsole';
+import HPOImportanceChart from './HPOImportanceChart';
 import type { HPOSweepInfo, HPOTrialInfo, SmartTunerStatus, TunerMemoryStats } from '../api/types';
 import './HPODashboard.css';
 
@@ -389,6 +390,68 @@ export function HPODashboard({
                         {currentMetrics.bestComposite?.toFixed(4) ?? '—'}
                     </div>
                 </div>
+
+                {/* Best Architecture Card - shows winning configuration */}
+                {sweepStatus?.best_hyperparams && (
+                    <div className="hpo-dashboard__metric-card hpo-dashboard__metric-card--wide">
+                        <div className="hpo-dashboard__metric-header">
+                            <Cpu size={18} />
+                            <span>Best Architecture</span>
+                        </div>
+                        <div className="hpo-dashboard__architecture-grid">
+                            {sweepStatus.best_hyperparams.hidden_dim && (
+                                <div className="hpo-dashboard__arch-item">
+                                    <span className="hpo-dashboard__arch-label">Dim</span>
+                                    <span className="hpo-dashboard__arch-value">
+                                        {sweepStatus.best_hyperparams.hidden_dim}
+                                    </span>
+                                </div>
+                            )}
+                            {sweepStatus.best_hyperparams.num_reasoning_blocks && (
+                                <div className="hpo-dashboard__arch-item">
+                                    <span className="hpo-dashboard__arch-label">Blocks</span>
+                                    <span className="hpo-dashboard__arch-value">
+                                        {sweepStatus.best_hyperparams.num_reasoning_blocks}
+                                    </span>
+                                </div>
+                            )}
+                            {sweepStatus.best_hyperparams.num_moe_experts && (
+                                <div className="hpo-dashboard__arch-item">
+                                    <span className="hpo-dashboard__arch-label">Experts</span>
+                                    <span className="hpo-dashboard__arch-value">
+                                        {sweepStatus.best_hyperparams.num_moe_experts}
+                                    </span>
+                                </div>
+                            )}
+                            {sweepStatus.best_hyperparams.learning_rate && (
+                                <div className="hpo-dashboard__arch-item">
+                                    <span className="hpo-dashboard__arch-label">LR</span>
+                                    <span className="hpo-dashboard__arch-value">
+                                        {typeof sweepStatus.best_hyperparams.learning_rate === 'number'
+                                            ? sweepStatus.best_hyperparams.learning_rate.toExponential(2)
+                                            : sweepStatus.best_hyperparams.learning_rate}
+                                    </span>
+                                </div>
+                            )}
+                            {sweepStatus.best_hyperparams.optimizer && (
+                                <div className="hpo-dashboard__arch-item">
+                                    <span className="hpo-dashboard__arch-label">Optimizer</span>
+                                    <span className="hpo-dashboard__arch-value">
+                                        {sweepStatus.best_hyperparams.optimizer}
+                                    </span>
+                                </div>
+                            )}
+                            {sweepStatus.best_memory_mb && (
+                                <div className="hpo-dashboard__arch-item">
+                                    <span className="hpo-dashboard__arch-label">Memory</span>
+                                    <span className="hpo-dashboard__arch-value">
+                                        {sweepStatus.best_memory_mb.toFixed(0)}MB
+                                    </span>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                )}
             </div>
 
             {/* Smart Tuner Status Section */}
@@ -536,6 +599,15 @@ export function HPODashboard({
                     maxHeight={350}
                 />
             </div>
+
+            {/* Hyperparameter Importance Analysis */}
+            {sweepStatus?.sweep_id && (
+                <HPOImportanceChart
+                    sweepId={sweepStatus.sweep_id}
+                    isRunning={isRunning}
+                    completedTrials={sweepStatus.completed_trials}
+                />
+            )}
 
             {/* Training Console */}
             <div className={`hpo-dashboard__console ${consoleExpanded ? 'hpo-dashboard__console--expanded' : ''}`}>

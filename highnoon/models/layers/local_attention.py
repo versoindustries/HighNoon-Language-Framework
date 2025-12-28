@@ -31,7 +31,8 @@ from typing import Any
 import tensorflow as tf
 from tensorflow.keras import layers
 
-from highnoon.config import (
+# Phase 201.5: Native Sparse Attention for long sequences
+from highnoon.config import (  # Phase 119: QASA config; Phase 130: Quantum integration config
     LOCAL_ATTENTION_ALIBI_SLOPE_BASE,
     LOCAL_ATTENTION_BLOCK_SIZE,
     LOCAL_ATTENTION_BLOCK_SPARSE,
@@ -46,20 +47,46 @@ from highnoon.config import (
     LOCAL_ATTENTION_WINDOW,
     LOCAL_ATTENTION_WINDOW_MAX,
     LOCAL_ATTENTION_WINDOW_MIN,
-    # Phase 119: QASA config
-    USE_QASA_ATTENTION,
-    QASA_VQC_LAYERS,
+    NATIVE_SPARSE_BLOCK_SIZE,
+    NATIVE_SPARSE_MIN_SEQ_LEN,
+    NATIVE_SPARSE_SELECTED_BLOCKS,
+    NATIVE_SPARSE_SELECTED_TOKENS,
+    NATIVE_SPARSE_SLIDING_WINDOW,
     QASA_ENTANGLEMENT_STRENGTH,
-    # Phase 130: Quantum integration config
-    USE_AUTO_NEURAL_QEM,
-    QASA_MPS_GATING,
     QASA_MPS_ENTROPY_THRESHOLD,
+    QASA_MPS_GATING,
+    QASA_VQC_LAYERS,
+    USE_AUTO_NEURAL_QEM,
+    USE_NATIVE_SPARSE_ATTENTION,
+    USE_QASA_ATTENTION,
 )
 from highnoon.models.reasoning.fused_contract import FusedReasoningBlockMixin
 
 # Phase 119: QASA ops (lazy import for availability check)
 _qasa_ops = None
 _qasa_available = None
+
+# Phase 201.5: Native Sparse Attention (lazy import)
+_nsa_layer_cls = None
+_nsa_available = None
+
+
+def _load_native_sparse_attention() -> bool:
+    """Lazy load Native Sparse Attention layer."""
+    global _nsa_layer_cls, _nsa_available
+    if _nsa_available is not None:
+        return _nsa_available
+    try:
+        from highnoon._native.fused_native_sparse_attention_op import NativeSparseAttention
+
+        _nsa_layer_cls = NativeSparseAttention
+        _nsa_available = True
+        logger.info("Native Sparse Attention (NSA) available for long sequences")
+    except Exception as e:
+        logger.debug(f"Native Sparse Attention not available: {e}")
+        _nsa_available = False
+    return _nsa_available
+
 
 logger = logging.getLogger(__name__)
 
@@ -214,14 +241,30 @@ class LocalAttentionBlock(FusedReasoningBlockMixin, layers.Layer):
         self._qasa_qem_mitigator = None
         if USE_AUTO_NEURAL_QEM and use_qasa_attention:
             from highnoon.training.neural_zne import NeuralQuantumErrorMitigator
-            self._qasa_qem_mitigator = NeuralQuantumErrorMitigator(
-                name="qasa_qem"
-            )
+
+            self._qasa_qem_mitigator = NeuralQuantumErrorMitigator(name="qasa_qem")
 
         # Phase 130.6: MPS entropy gating for QASA
         self.use_mps_gating = QASA_MPS_GATING and use_qasa_attention
         self.mps_entropy_threshold = QASA_MPS_ENTROPY_THRESHOLD
         self._mps_layer = None
+
+        # Phase 201.5: Native Sparse Attention for long sequences
+        self.use_native_sparse = USE_NATIVE_SPARSE_ATTENTION
+        self.nsa_min_seq_len = NATIVE_SPARSE_MIN_SEQ_LEN
+        self._nsa_layer = None
+        if self.use_native_sparse and _load_native_sparse_attention():
+            self._nsa_layer = _nsa_layer_cls(
+                block_size=NATIVE_SPARSE_BLOCK_SIZE,
+                num_selected_blocks=NATIVE_SPARSE_SELECTED_BLOCKS,
+                num_selected_tokens=NATIVE_SPARSE_SELECTED_TOKENS,
+                sliding_window_size=NATIVE_SPARSE_SLIDING_WINDOW,
+                name="native_sparse_attention",
+            )
+            logger.info(
+                f"  - Phase 201.5: NSA enabled for seq_len >= {self.nsa_min_seq_len} "
+                f"(block={NATIVE_SPARSE_BLOCK_SIZE}, window={NATIVE_SPARSE_SLIDING_WINDOW})"
+            )
 
         # Q, K, V projections
         self.proj_q = layers.Dense(embedding_dim, name="proj_q")
@@ -324,6 +367,10 @@ class LocalAttentionBlock(FusedReasoningBlockMixin, layers.Layer):
         # Phase 119: QASA path - use VQC-based attention scoring
         if self.use_qasa_attention and self._is_qasa_available():
             attn_output = self._qasa_attention(q, k, v, training=training)
+        # Phase 201.5: NSA path for long sequences - O(n log n) vs O(n²)
+        elif self._nsa_layer is not None and seq_len >= self.nsa_min_seq_len:
+            # NSA expects [batch, heads, seq, dim] format
+            attn_output = self._nsa_layer(q, k, v, training=training)
         else:
             # Standard attention path
             # Compute attention scores
@@ -351,8 +398,6 @@ class LocalAttentionBlock(FusedReasoningBlockMixin, layers.Layer):
             # -> [batch, heads, seq_len, head_dim]
             attn_output = tf.matmul(attn_weights, v)
 
-
-
         # Reshape back: [batch, num_heads, seq_len, head_dim] -> [batch, seq_len, embedding_dim]
         attn_output = tf.transpose(attn_output, [0, 2, 1, 3])
         attn_output = tf.reshape(attn_output, [batch_size, seq_len, self.embedding_dim])
@@ -372,6 +417,7 @@ class LocalAttentionBlock(FusedReasoningBlockMixin, layers.Layer):
             return _qasa_available
         try:
             from highnoon._native.ops.qasa_ops import is_qasa_available
+
             _qasa_available = is_qasa_available()
         except ImportError:
             _qasa_available = False
@@ -394,6 +440,7 @@ class LocalAttentionBlock(FusedReasoningBlockMixin, layers.Layer):
         global _qasa_ops
         if _qasa_ops is None:
             from highnoon._native.ops import qasa_ops
+
             _qasa_ops = qasa_ops
 
         qasa_output = _qasa_ops.run_qasa_attention(
@@ -415,17 +462,13 @@ class LocalAttentionBlock(FusedReasoningBlockMixin, layers.Layer):
             # Reshape for QEM: [batch, heads, seq, dim] -> [batch, heads*seq, dim]
             batch_size = tf.shape(qasa_output)[0]
             orig_shape = tf.shape(qasa_output)
-            flat_output = tf.reshape(
-                qasa_output, [batch_size, -1, tf.shape(qasa_output)[-1]]
-            )
+            flat_output = tf.reshape(qasa_output, [batch_size, -1, tf.shape(qasa_output)[-1]])
             flat_output = self._qasa_qem_mitigator(flat_output, training=training)
             qasa_output = tf.reshape(flat_output, orig_shape)
 
         return qasa_output
 
-    def _apply_mps_gating(
-        self, qasa_output: tf.Tensor, q: tf.Tensor, v: tf.Tensor
-    ) -> tf.Tensor:
+    def _apply_mps_gating(self, qasa_output: tf.Tensor, q: tf.Tensor, v: tf.Tensor) -> tf.Tensor:
         """Apply MPS entropy-based gating to QASA output (Phase 130.6).
 
         High entanglement entropy -> stronger quantum contribution.
@@ -460,9 +503,7 @@ class LocalAttentionBlock(FusedReasoningBlockMixin, layers.Layer):
         normalized_entropy = entropy / (max_entropy + 1e-10)
 
         # Compute gate: sigmoid around threshold
-        gate = tf.nn.sigmoid(
-            10.0 * (normalized_entropy - self.mps_entropy_threshold)
-        )
+        gate = tf.nn.sigmoid(10.0 * (normalized_entropy - self.mps_entropy_threshold))
         gate = tf.reshape(gate, [-1, 1, 1, 1])  # [batch, 1, 1, 1]
 
         # Classical fallback: simple value averaging

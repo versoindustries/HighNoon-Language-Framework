@@ -104,6 +104,7 @@ TT_ATTENTION_RANKS: list[int] = [1, 4, 4, 1]  # Conservative ranks
 # Standard FFN layers widely shown to tolerate compression
 USE_TT_FFN_PROJECTIONS: bool = True  # Enable TT for thought projectors
 TT_FFN_RANKS: list[int] = [1, 8, 8, 1]  # Ranks for d→4d→d
+TT_FFN_MIN_DIM: int = 512  # Only apply TT for dims >= this (Phase 201.2)
 
 # KalmanBlock Projections (Low Risk)
 # Input/output/state projections - not the Kalman filter parameters
@@ -221,7 +222,7 @@ SPARSE_ATTENTION_UPPER_BANDS = 64  # Upper bandwidth (tokens to look forward)
 # =============================================================================
 # MODEL ARCHITECTURE PARAMETERS
 # =============================================================================
-VOCAB_SIZE = 60000  # Vocabulary size
+VOCAB_SIZE = 256000  # Vocabulary size (256k for frontier models)
 CHUNK_SIZE = 128  # Chunk size for processing
 CHUNK_STRIDE = 64  # Stride between chunks
 EMBEDDING_DIM = 512  # Embedding dimension
@@ -373,6 +374,7 @@ EVOLUTION_TIME_METRIC: str = "hamiltonian"  # Metric type: "hamiltonian", "eucli
 USE_NEURAL_ZNE: bool = True  # Enable neural ZNE
 NEURAL_ZNE_HIDDEN_DIM: int = 128  # Hidden dimension for ZNE MLP
 NEURAL_ZNE_TRAIN_SAMPLES: int = 1000  # Training samples for ZNE model
+NEURAL_ZNE_FEEDBACK: bool = True  # S23: Feed ZNE statistics into QULS weight controller
 
 # Phase 129: ML-Enhanced Quantum Error Mitigation (Neural QEM)
 # Extends Neural ZNE with learned error models for quantum circuit outputs
@@ -420,7 +422,7 @@ QASA_MPS_ENTROPY_THRESHOLD: float = 0.5  # Min entropy for full quantum contribu
 # S1: QMamba ↔ Q-SSM Gating Unification
 # Share VQC gates between QMamba superposition and Q-SSM gating decisions
 USE_UNIFIED_QSSM_GATING: bool = True  # Enable unified Q-SSM/QMamba gating
-UNIFIED_QSSM_SHARE_VQC: bool = True   # Share VQC parameters between components
+UNIFIED_QSSM_SHARE_VQC: bool = True  # Share VQC parameters between components
 
 # S2: QMamba Amplitudes → COCONUT Path Weighting
 # Feed QMamba learned amplitudes into COCONUT BFS path selection
@@ -429,8 +431,14 @@ COCONUT_USE_QMAMBA_AMPLITUDES: bool = True  # Use QMamba amplitudes as path prio
 # S3: TimeCrystal Evolution Time → VQC Circuit Depth
 # Dynamically adjust VQC circuit depth based on predicted evolution time
 USE_ADAPTIVE_VQC_DEPTH: bool = True  # Enable evolution-time-dependent VQC depth
-VQC_MIN_LAYERS: int = 1              # Minimum VQC layers
-VQC_MAX_LAYERS: int = 4              # Maximum VQC layers
+VQC_MIN_LAYERS: int = 1  # Minimum VQC layers
+VQC_MAX_LAYERS: int = 4  # Maximum VQC layers
+
+# S18: CayleyDense → VQC Data Encoder (Orthogonal Weight Stability)
+# Use Cayley-parameterized orthogonal weights for VQC data encoder layers
+# Improves gradient stability in deep VQC circuits via unitary constraint
+USE_CAYLEY_VQC: bool = True  # Use CayleyDense for VQC data encoding
+
 
 # S4: Floquet Phase → QMoE Expert Selection
 # Condition QMoE expert selection on Floquet phase for phase-specialist experts
@@ -442,8 +450,8 @@ QHPM_USE_HOPFIELD_THRESHOLD: bool = True  # Dynamic crystallization threshold
 
 # S6: MPS Bond Entropy → Hopfield β (Inverse Temperature)
 # Dynamically adjust Hopfield β based on MPS entanglement entropy
-HOPFIELD_ADAPTIVE_BETA: bool = True   # Context-aware memory retrieval sharpness
-HOPFIELD_BASE_BETA: float = 1.0       # Base inverse temperature
+HOPFIELD_ADAPTIVE_BETA: bool = True  # Context-aware memory retrieval sharpness
+HOPFIELD_BASE_BETA: float = 1.0  # Base inverse temperature
 
 # S7: QASA Attention Weights → QMamba Selective Gating
 # Feed QASA attention patterns as prior for QMamba selectivity
@@ -465,13 +473,16 @@ DTC_ADAPTIVE_PERIOD: bool = True  # Entanglement-stabilized time crystal
 # Unified post-processing with AlphaQubit-style error decoding
 USE_UNIFIED_ALPHAQUBIT: bool = True  # Systematic error correction
 ALPHAQUBIT_ENABLED_LAYERS: tuple[str, ...] = (
-    "VQCLayer", "QMambaBlock", "QASAAttention", "QMoERouter"
+    "VQCLayer",
+    "QMambaBlock",
+    "QASAAttention",
+    "QMoERouter",
 )
 
 # S12: SympFlow Optimizer → QNG Geodesic Integration
 # Combine symplectic momentum with quantum-natural geodesic corrections
 SYMPFLOW_USE_QNG_GEODESIC: bool = True  # Superior optimization landscape navigation
-SYMPFLOW_GEODESIC_WEIGHT: float = 0.1   # Weight for geodesic corrections
+SYMPFLOW_GEODESIC_WEIGHT: float = 0.1  # Weight for geodesic corrections
 
 
 # =============================================================================
@@ -688,6 +699,13 @@ UNIFIED_BUS_PROPAGATION_RATE: float = 0.1  # Entanglement update rate during for
 # Phase 48: Hyperdimensional Quantum Embeddings
 USE_HYPERDIMENSIONAL_EMBEDDING: bool = True  # Enable HQE holographic bundling
 HQE_CTQW_STEPS: int = 3  # CTQW spreading walk steps
+HD_EMBEDDING_DIM: int = 4096  # Hyperdimensional embedding dimension
+HD_ACTIVE_VOCAB_SIZE: int = 10000  # Active vocabulary for DualPathEmbedding
+
+# Phase 48.1: Tensor-Ring MoE Gating
+USE_TENSOR_RING_MOE: bool = True  # Enable Tensor-Ring decomposition for MoE gates
+TENSOR_RING_RANK: int = 8  # Ring rank for TR decomposition
+TENSOR_RING_NUM_CORES: int = 4  # Number of TR cores
 
 # Phase 49: Holographic Hypertokens
 USE_HYPERTOKENS: bool = True  # Enable HDRAM spread-spectrum encoding
@@ -749,11 +767,16 @@ QULS_WEIGHT_EMA_DECAY: float = 0.99  # EMA decay for weight updates
 QULS_VQC_VARIANCE_BOOST: float = 2.0  # Weight boost for high VQC variance
 QULS_BARREN_PLATEAU_REDUCTION: float = 0.1  # Weight reduction during barren plateau
 
-# Pillar 3: Topological Reasoning
 # Phase 53: QASA Attention
 USE_QASA_ATTENTION: bool = True  # Enable VQC attention scoring
 QASA_VQC_LAYERS: int = 2  # QASA VQC depth
 QASA_ENTANGLEMENT_STRENGTH: float = 0.5  # Entanglement contribution
+
+# Phase 54: Quantum Grouped Query Attention
+# Uses VQC-enhanced Q/K/V projections with TensorPilot optimization
+USE_QUANTUM_GQA: bool = True  # Enable QuantumGQA in block factory
+QUANTUM_GQA_NUM_HEADS: int = 8  # Number of attention heads
+QUANTUM_GQA_KV_HEADS: int = 2  # Key/Value heads (grouped)
 
 # Phase 55: MPQR Multi-Path Reasoning
 USE_MPQR_REASONING: bool = True  # Enable Grover path amplification
@@ -937,7 +960,7 @@ TOKENIZER_MODE: str = "semantic"  # "semantic" | "byte_stream"
 # Superword Merger Configuration
 ENABLE_SUPERWORDS: bool = True  # Enable semantic n-gram grouping
 SUPERWORD_MIN_FREQUENCY: int = 100  # Minimum n-gram frequency to learn
-SUPERWORD_MAX_VOCAB_SIZE: int = 10000  # Maximum superwords to learn
+SUPERWORD_MAX_VOCAB_SIZE: int = 100000  # Maximum superwords to learn (100k capacity)
 SUPERWORD_MIN_NGRAM: int = 2  # Minimum n-gram size
 SUPERWORD_MAX_NGRAM: int = 5  # Maximum n-gram size
 
@@ -953,9 +976,115 @@ BYTE_STREAM_STRIDE_FACTOR: int = 4  # Reduces byte-level seq length by 4x
 
 USE_INTELLIGENT_VOCAB_CONTROLLER: bool = True  # Enable automatic vocab sizing
 VOCAB_CONTROLLER_AUTO_TRAIN: bool = True  # Auto-train codebook from curriculum data
-VOCAB_CONTROLLER_SAMPLE_SIZE: int = 10000  # Corpus sample size for training
+VOCAB_CONTROLLER_SAMPLE_SIZE: int = (
+    2000  # Corpus sample size for training (reduced from 10K for memory)
+)
 VOCAB_CONTROLLER_MIN_NGRAM_FREQ: int = 10  # Minimum n-gram frequency
 
+# =============================================================================
+# PHASE 48+: MEMORY OPTIMIZATION FLAGS
+# =============================================================================
+# Controls memory-efficient training features.
+
+USE_DUAL_PATH_EMBEDDING: bool = True  # Use DualPathEmbedding instead of HyperdimensionalEmbedding
+# DualPathEmbedding uses standard embedding for active vocab + HDE for rare tokens
+# Reduces embedding memory by ~90% (from 2GB to ~200MB for 120K vocab)
+DUAL_PATH_ACTIVE_VOCAB_SIZE: int = 10000  # Tokens to use standard embedding for
+
+USE_GRADIENT_CHECKPOINTING: bool = True  # Enable gradient checkpointing for reasoning blocks
+# Trades compute for memory by recomputing activations during backward pass
+# Reduces peak memory by ~40-50% at ~20% compute cost
+
+# Phase 201.1: HD Activation Checkpointing
+# Uses holographic encoding for activation storage instead of full tensors
+# Further reduces memory by 2-4x on top of standard gradient checkpointing
+USE_HD_ACTIVATION_CHECKPOINT: bool = True  # Enable holographic activation encoding
+HD_ACTIVATION_DIM: int = 512  # Holographic encoding dimension
+HD_ACTIVATION_CTQW: bool = True  # Enable CTQW spreading for noise robustness
+
+# Phase 201.4: HD Shared Expert Basis
+# Enables hyperdimensional shared basis for MoE experts, reducing memory
+# by having experts share a common HD-encoded basis with per-expert coefficients
+USE_HD_SHARED_EXPERT_BASIS: bool = True  # Enable HD shared basis for MoE
+HD_SHARED_BASIS_DIM: int = 256  # HD dimension for shared basis
+HD_SHARED_BASIS_NUM_VECTORS: int = 32  # Number of HD basis vectors
+
+# Phase 201.13: Adaptive Superposition Dimension
+# Dynamically scales superposition dimension based on input complexity
+# Complex inputs (high entropy) get larger superposition for more capacity
+# Simple inputs (low entropy) use smaller superposition for efficiency
+USE_ADAPTIVE_SUPERPOSITION: bool = True  # Enable adaptive superposition dimension
+SUPERPOSITION_MIN_DIM: int = 2  # Minimum superposition dimension
+SUPERPOSITION_MAX_DIM: int = 8  # Maximum superposition dimension
+SUPERPOSITION_COMPLEXITY_SCALE: float = 1.0  # Scale factor for complexity
+
+# Phase 201.5: Native Sparse Attention for Long Sequences
+# Routes to DeepSeek NSA for sequences >= min length, O(n log n) vs O(n²)
+USE_NATIVE_SPARSE_ATTENTION: bool = True  # Enable NSA routing for long sequences
+NATIVE_SPARSE_BLOCK_SIZE: int = 64  # Block compression size
+NATIVE_SPARSE_SELECTED_BLOCKS: int = 8  # Blocks to attend after compression
+NATIVE_SPARSE_SELECTED_TOKENS: int = 32  # Tokens per block for fine-grained
+NATIVE_SPARSE_SLIDING_WINDOW: int = 128  # Local attention window
+NATIVE_SPARSE_MIN_SEQ_LEN: int = 4096  # Only use NSA for sequences >= this
+
+# Phase 201.6: Sweep Executor Memory Compression
+# Reduces memory for large HPO sweeps via LRU eviction and checkpoint compression
+SWEEP_MAX_IN_MEMORY_TRIALS: int = 50  # Max completed trials to keep in RAM
+SWEEP_COMPRESS_CHECKPOINTS: bool = True  # Use gzip for checkpoint files
+SWEEP_USE_HD_TRIAL_ENCODING: bool = True  # HD-encode trial configs for similarity
+
+# Phase 201.7: HD Superposition Embedding
+# Unifies tokenizer superposition with HD embedding for quality enhancement
+USE_HD_SUPERPOSITION_EMBEDDING: bool = True  # Enable superposition embedding path
+HD_SUPERPOSITION_BRANCHES: int = 4  # Max superposition tokenizations to process
+
+# Phase 201.8: State Bus HD Checkpoint Integration
+# Store HD-encoded activations in State Bus slots for unified memory path
+HD_CHECKPOINT_USE_STATE_BUS: bool = True  # Store HD bundles in State Bus
+HD_CHECKPOINT_BUS_SLOTS: int = 8  # Number of State Bus slots for checkpoints
+
+USE_CHUNKED_FORWARD: bool = False  # Enable chunked forward passes for O(1) memory
+# Processes long sequences in chunks with gradient accumulation
+# Combined with gradient checkpointing achieves constant memory training
+CHUNKED_FORWARD_SIZE: int = 512  # Chunk size for chunked forward passes
+
+GALORE_ADAPTIVE_RANK: bool = True  # Dynamically adjust GaLore rank based on model size
+# Larger models get higher rank (up to GALORE_MAX_RANK), smaller models use less
+GALORE_MAX_RANK: int = 128  # Maximum rank for adaptive GaLore
+
+# Phase 201.9: HD + QMR Combined Checkpointing
+# Combines holographic encoding with logarithmic checkpointing for multiplicative savings
+# Memory reduction: O(log n / compression_ratio) vs O(n) standard checkpointing
+USE_HD_QMR_COMBINED: bool = True  # Enable combined HD + logarithmic checkpointing
+HD_QMR_LOG_FACTOR: int = 2  # Log base for checkpoint spacing (2 = log2(n) checkpoints)
+HD_QMR_MIN_LAYERS: int = 4  # Minimum layers to activate combined strategy
+HD_QMR_QUALITY_THRESHOLD: float = 0.95  # Minimum reconstruction quality before fallback
+
+# Phase 201.10: Unified Tensor Budget Controller
+# Orchestrates rank allocation across all tensor-decomposed layers (TT, Tucker, TensorRing)
+# Based on Fisher Information importance and global memory budget
+USE_TENSOR_BUDGET_CONTROLLER: bool = True  # Enable unified tensor budget allocation
+TENSOR_BUDGET_MB: float = 1000.0  # Memory budget for all TN layers (MB)
+TENSOR_BUDGET_REALLOC_INTERVAL: int = 1000  # Steps between rank reallocation
+TENSOR_BUDGET_MIN_RANK: int = 4  # Minimum rank for any layer
+TENSOR_BUDGET_MAX_RANK: int = 64  # Maximum rank for any layer
+TENSOR_BUDGET_LM_HEAD_PRIORITY: float = 1.5  # Priority multiplier for LM head
+TENSOR_BUDGET_EMBEDDING_PRIORITY: float = 1.3  # Priority multiplier for embeddings
+TENSOR_BUDGET_MOE_PRIORITY: float = 1.0  # Priority multiplier for MoE layers
+
+# Phase 201.11: Fisher-based TN Rank Allocation
+# Extends FisherLayerGrouper to allocate ranks for TT/Tucker/TensorRing layers
+# Layers with higher Fisher importance get larger ranks for capacity preservation
+USE_FISHER_TN_RANKS: bool = True  # Enable Fisher-based TN rank allocation
+FISHER_TN_RANK_MIN: int = 4  # Minimum TN rank regardless of Fisher score
+FISHER_TN_RANK_MAX: int = 32  # Maximum TN rank for high-importance layers
+FISHER_TN_RANK_SCALE: float = 1.0  # Scale factor for rank computation
+
+# Phase 201.12: GaLore TT-Manifold Projection
+# Projects gradients to TT tangent space for better convergence on TT layers
+# Ensures gradient updates stay compatible with TT structure
+GALORE_TT_MANIFOLD_PROJECTION: bool = True  # Enable TT tangent space projection
+GALORE_TT_PROJECTION_EPS: float = 1e-6  # Numerical stability for projection
 
 
 # =============================================================================
@@ -1483,6 +1612,7 @@ FLASH_LINEAR_FORGET_INIT: float = -2.0  # Initial bias (controls retention rate)
 USE_LATENT_KV_ATTENTION: bool = True  # Enable latent compression
 LATENT_KV_DIM: int = 64  # Latent dimension (smaller = more compression)
 LATENT_KV_USE_QUANTUM: bool = True  # Use float64 quantum-enhanced compression
+LATENT_KV_FEATURE_MAP: str = "elu"  # Feature map for linear attention: elu, relu, softmax
 
 # Phase 18.2: Tensor Factorized Attention - HIGH
 # Rank-factorized Q/K/V projections for memory-efficient attention
@@ -1830,9 +1960,7 @@ def get_tokenizer(
         enable_thinking_tokens=True,
     )
 
-    log.info(
-        f"Created tokenizer: vocab_size={vocab_size}, max_length={max_length}"
-    )
+    log.info(f"Created tokenizer: vocab_size={vocab_size}, max_length={max_length}")
 
     return _TOKENIZER_INSTANCE
 

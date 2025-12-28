@@ -308,8 +308,10 @@ class LatentReasoningBlock(FusedReasoningBlockMixin, tf.keras.layers.Layer):
             self.continuous_thought_block.build(input_shape)
 
             # S2 Synergy: Apply deferred QMamba wiring if pending
-            if hasattr(self, '_pending_qmamba_source') and self._pending_qmamba_source is not None:
-                self.continuous_thought_block.set_qmamba_amplitude_provider(self._pending_qmamba_source)
+            if hasattr(self, "_pending_qmamba_source") and self._pending_qmamba_source is not None:
+                self.continuous_thought_block.set_qmamba_amplitude_provider(
+                    self._pending_qmamba_source
+                )
                 self._pending_qmamba_source = None  # Clear pending reference
 
         # Phase 25: Holographic Memory State
@@ -479,12 +481,12 @@ class LatentReasoningBlock(FusedReasoningBlockMixin, tf.keras.layers.Layer):
             dummy_out_norm = ct_block.output_norm(pooled)
             # Combine with zero weight
             passthrough = (
-                tf.reduce_mean(dummy_norm) +
-                tf.reduce_mean(dummy_agg) +
-                tf.reduce_mean(dummy_proj) +
-                tf.reduce_mean(dummy_broadcast) +
-                tf.reduce_mean(dummy_gate) +
-                tf.reduce_mean(dummy_out_norm)
+                tf.reduce_mean(dummy_norm)
+                + tf.reduce_mean(dummy_agg)
+                + tf.reduce_mean(dummy_proj)
+                + tf.reduce_mean(dummy_broadcast)
+                + tf.reduce_mean(dummy_gate)
+                + tf.reduce_mean(dummy_out_norm)
             )
             output = output + 0.0 * passthrough
 

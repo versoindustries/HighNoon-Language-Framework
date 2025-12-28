@@ -25,6 +25,7 @@ reasoning in latent space without generating intermediate tokens.
 from __future__ import annotations
 
 import logging
+
 import tensorflow as tf
 
 from highnoon._native import get_op
@@ -37,7 +38,6 @@ _fused_continuous_thought_op = getattr(_lib, "FusedContinuousThought", None) if 
 _fused_continuous_thought_grad_op = (
     getattr(_lib, "FusedContinuousThoughtGrad", None) if _lib else None
 )
-
 
 
 def fused_continuous_thought_available() -> bool:

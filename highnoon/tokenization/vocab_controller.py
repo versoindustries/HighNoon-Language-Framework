@@ -44,9 +44,10 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 from highnoon.tokenization.adaptive_qwt_tokenizer import AdaptiveQWTTokenizer
 
@@ -221,6 +222,7 @@ class IntelligentVocabController:
         # Sample if necessary
         if len(texts) > self.config.sample_size:
             import random
+
             texts = random.sample(list(texts), self.config.sample_size)
 
         logger.info(
@@ -267,10 +269,7 @@ class IntelligentVocabController:
         """
         if name not in PRETRAINED_CODEBOOKS:
             available = list(PRETRAINED_CODEBOOKS.keys())
-            raise ValueError(
-                f"Unknown pretrained codebook '{name}'. "
-                f"Available: {available}"
-            )
+            raise ValueError(f"Unknown pretrained codebook '{name}'. " f"Available: {available}")
 
         # Resolve path relative to project root
         codebook_path = Path(__file__).parent.parent.parent / PRETRAINED_CODEBOOKS[name]

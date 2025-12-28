@@ -66,7 +66,7 @@ def qssm_forward(
     vqc_layers: int = 2,
     use_born_rule: bool = True,
     measurement_temp: float = 1.0,
-) -> Tuple[tf.Tensor, tf.Tensor]:
+) -> tuple[tf.Tensor, tf.Tensor]:
     """Q-SSM forward pass with VQC-based selective gating.
 
     Implements the core Q-SSM equation:
@@ -103,8 +103,7 @@ def qssm_forward(
     """
     if _ops is None:
         raise RuntimeError(
-            "Q-SSM C++ operators not available. "
-            "Rebuild with: ./build_secure.sh --debug --lite"
+            "Q-SSM C++ operators not available. " "Rebuild with: ./build_secure.sh --debug --lite"
         )
 
     return _ops.qssm_forward(
@@ -149,8 +148,7 @@ def vqc_gate_expectation(
     """
     if _ops is None:
         raise RuntimeError(
-            "Q-SSM C++ operators not available. "
-            "Rebuild with: ./build_secure.sh --debug --lite"
+            "Q-SSM C++ operators not available. " "Rebuild with: ./build_secure.sh --debug --lite"
         )
 
     return _ops.vqc_gate_expectation(
@@ -193,8 +191,7 @@ def qssm_compute_gates(
     """
     if _ops is None:
         raise RuntimeError(
-            "Q-SSM C++ operators not available. "
-            "Rebuild with: ./build_secure.sh --debug --lite"
+            "Q-SSM C++ operators not available. " "Rebuild with: ./build_secure.sh --debug --lite"
         )
 
     return _ops.qssm_compute_gates(

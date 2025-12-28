@@ -58,29 +58,42 @@ logger = logging.getLogger(__name__)
 # Lazy load multi-path ops
 _multipath_ops_loaded = False
 _fused_coconut_bfs = None
+_fused_coconut_dfs = None
+_fused_coconut_crystallize = None
+_fused_coconut_retrieve = None
 
 
 def _load_multipath_ops() -> bool:
     """Lazy load Phase 87 multi-path CoCoNut ops.
-    
+
     Uses fused_coconut_bfs_with_grad which has @tf.custom_gradient
     for proper gradient flow during training.
+    Also loads DFS/Crystallize/Retrieve for S19 persistent reasoning.
     """
     global _multipath_ops_loaded, _fused_coconut_bfs
-    
+    global _fused_coconut_dfs, _fused_coconut_crystallize, _fused_coconut_retrieve
+
     if _multipath_ops_loaded:
         return _fused_coconut_bfs is not None
-    
+
     _multipath_ops_loaded = True
     try:
         from highnoon._native.ops.fused_coconut_ops import (
-            fused_coconut_bfs_with_grad,
             fused_coconut_bfs_available,
+            fused_coconut_bfs_with_grad,
+            fused_coconut_crystallize,
+            fused_coconut_dfs_collapse,
+            fused_coconut_retrieve,
         )
+
         if fused_coconut_bfs_available():
             # Use gradient-aware version for training support
             _fused_coconut_bfs = fused_coconut_bfs_with_grad
-            logger.debug("Phase 87 CoCoNut multi-path ops loaded (with gradient support)")
+            # S19: Load DFS/Crystallize/Retrieve for persistent reasoning memory
+            _fused_coconut_dfs = fused_coconut_dfs_collapse
+            _fused_coconut_crystallize = fused_coconut_crystallize
+            _fused_coconut_retrieve = fused_coconut_retrieve
+            logger.debug("Phase 87 CoCoNut multi-path ops loaded (with S19 crystallization)")
             return True
     except ImportError as e:
         logger.debug(f"Multi-path CoCoNut ops not available: {e}")
@@ -257,13 +270,13 @@ class ContinuousThoughtBlock(layers.Layer):
         self.num_thought_steps = num_thought_steps
         self.dropout_rate = dropout_rate
         self.use_gating = use_gating
-        
+
         # Phase 87: Multi-path BFS configuration
         # Default 2 paths; Lite edition limited to max 8 paths (enforced by C++ op)
         self.num_paths = num_paths
         self.collapse_threshold = collapse_threshold
         self.crystallize_threshold = crystallize_threshold
-        
+
         # Track if multi-path mode is available and requested
         self._use_multipath = self.num_paths > 1 and _load_multipath_ops()
 
@@ -340,12 +353,12 @@ class ContinuousThoughtBlock(layers.Layer):
             )
 
         hidden_states = tf.cast(hidden_states, tf.float32)
-        
+
         # Phase 87: Use multi-path BFS if num_paths > 1 and ops available
         if self._use_multipath and _fused_coconut_bfs is not None:
             # Extract context for amplitude scoring (mean pool last dim)
             context = tf.reduce_mean(hidden_states, axis=1)  # [batch, dim]
-            
+
             output, path_amplitudes = _fused_coconut_bfs(
                 hidden_states=hidden_states,
                 context=context,
@@ -369,10 +382,7 @@ class ContinuousThoughtBlock(layers.Layer):
             )
 
             # Phase 130.4: Use VQC amplitudes if provider is set and enabled
-            if (
-                self._use_vqc_amplitudes
-                and self._vqc_amplitude_provider is not None
-            ):
+            if self._use_vqc_amplitudes and self._vqc_amplitude_provider is not None:
                 try:
                     vqc_amplitudes = self._vqc_amplitude_provider(self.num_paths)
                     # Replace softmax path amplitudes with VQC Born rule amplitudes
@@ -461,24 +471,24 @@ class ContinuousThoughtBlock(layers.Layer):
                 amplitudes_real and amplitudes_imag weights.
         """
         from highnoon import config as cfg
-        
-        if not getattr(cfg, 'COCONUT_USE_QMAMBA_AMPLITUDES', True):
+
+        if not getattr(cfg, "COCONUT_USE_QMAMBA_AMPLITUDES", True):
             logger.debug("COCONUT_USE_QMAMBA_AMPLITUDES disabled, skipping")
             return
-        
+
         def qmamba_amplitude_provider(num_paths: int) -> tf.Tensor:
             """Extract Born rule probabilities from QMamba amplitudes."""
             try:
                 # Get complex amplitudes from QMamba block
                 alpha_real = qmamba_block.amplitudes_real
                 alpha_imag = qmamba_block.amplitudes_imag
-                
+
                 # Born rule: |α|² = α_real² + α_imag²
                 probs = alpha_real**2 + alpha_imag**2
-                
+
                 # Normalize
                 probs = probs / (tf.reduce_sum(probs) + 1e-10)
-                
+
                 # Resize to num_paths if needed
                 if tf.shape(probs)[0] != num_paths:
                     # Interpolate or pad
@@ -488,15 +498,15 @@ class ContinuousThoughtBlock(layers.Layer):
                         padding = tf.zeros([num_paths - tf.shape(probs)[0]])
                         probs = tf.concat([probs, padding], axis=0)
                     probs = probs / (tf.reduce_sum(probs) + 1e-10)
-                
+
                 return probs
             except Exception as e:
                 logger.debug(f"QMamba amplitude extraction failed: {e}")
                 return None
-        
+
         self._vqc_amplitude_provider = qmamba_amplitude_provider
         # Use object.__setattr__ to bypass Keras layer tracking
-        object.__setattr__(self, '_qmamba_block', qmamba_block)
+        object.__setattr__(self, "_qmamba_block", qmamba_block)
         logger.debug("QMamba amplitude provider set for COCONUT (S2)")
 
     def get_last_amplitudes(self) -> tf.Tensor | None:
@@ -505,7 +515,7 @@ class ContinuousThoughtBlock(layers.Layer):
         Returns:
             Last path amplitude tensor or None if not available.
         """
-        return getattr(self, '_last_amplitudes', None)
+        return getattr(self, "_last_amplitudes", None)
 
     def get_qmamba_block(self) -> object | None:
         """Get the connected QMamba block for S2 synergy.
@@ -513,7 +523,7 @@ class ContinuousThoughtBlock(layers.Layer):
         Returns:
             QMamba block reference or None if not set.
         """
-        return getattr(self, '_qmamba_block', None)
+        return getattr(self, "_qmamba_block", None)
 
     def set_hopfield_energy(self, energy: float) -> None:
         """S5: Receive Hopfield retrieval energy for dynamic crystallization threshold.
@@ -528,18 +538,18 @@ class ContinuousThoughtBlock(layers.Layer):
         """
         from highnoon import config as cfg
 
-        if not getattr(cfg, 'QHPM_USE_HOPFIELD_THRESHOLD', True):
+        if not getattr(cfg, "QHPM_USE_HOPFIELD_THRESHOLD", True):
             return
 
         # Store base threshold on first call
-        if not hasattr(self, '_base_crystallize_threshold'):
+        if not hasattr(self, "_base_crystallize_threshold"):
             self._base_crystallize_threshold = self.crystallize_threshold
 
         # Normalize energy to [0, 1] range using sigmoid
         # energy < 0 (strong match) -> normalized < 0.5
         # energy > 0 (weak match) -> normalized > 0.5
         normalized_energy = 1.0 / (1.0 + tf.exp(-energy))
-        if hasattr(normalized_energy, 'numpy'):
+        if hasattr(normalized_energy, "numpy"):
             normalized_energy = float(normalized_energy.numpy())
 
         # Adjust threshold: strong match -> higher threshold, weak match -> lower
@@ -550,7 +560,8 @@ class ContinuousThoughtBlock(layers.Layer):
 
         logger.debug(
             "[COCONUT-S5] Hopfield energy=%.3f -> crystallize_threshold=%.3f",
-            energy, self.crystallize_threshold
+            energy,
+            self.crystallize_threshold,
         )
 
     def get_crystallize_threshold(self) -> float:

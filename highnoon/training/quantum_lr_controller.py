@@ -135,9 +135,7 @@ class QuantumAdaptiveLRController:
             f"tunneling_prob={self.tunneling_probability}"
         )
 
-    def compute_gradient_entropy(
-        self, gradients: list[tf.Tensor | None]
-    ) -> float:
+    def compute_gradient_entropy(self, gradients: list[tf.Tensor | None]) -> float:
         """Compute entropy of gradient magnitude distribution.
 
         Higher entropy indicates a more "rough" or uncertain gradient landscape,
@@ -264,6 +262,8 @@ class QuantumAdaptiveLRController:
         total_steps: int,
         gradients: list[tf.Tensor | None] | None = None,
         current_loss: float | None = None,
+        barren_plateau_active: bool = False,
+        zne_error_estimate: float | None = None,
     ) -> float:
         """Compute adaptive learning rate for current step.
 
@@ -275,6 +275,8 @@ class QuantumAdaptiveLRController:
             total_steps: Total number of training steps.
             gradients: Optional list of gradient tensors for entropy computation.
             current_loss: Optional current loss value for trend detection.
+            barren_plateau_active: S22 synergy - if True, increase LR to escape BP.
+            zne_error_estimate: S23 synergy - ZNE error estimate for noise-aware LR.
 
         Returns:
             Adaptive learning rate value.
@@ -316,6 +318,23 @@ class QuantumAdaptiveLRController:
         # Compute current LR
         current_lr = base_lr * entropy_factor * temp_factor
 
+        # S22: Barren plateau escape boost - increase LR to escape BP
+        if barren_plateau_active:
+            bp_escape_boost = 1.3  # Increase LR by 30% during BP recovery
+            current_lr *= bp_escape_boost
+            logger.debug(f"[QALRC-S22] BP escape mode: LR boosted to {current_lr:.2e}")
+
+        # S23: Neural ZNE noise-aware scaling - reduce LR when noise is high
+        if zne_error_estimate is not None and zne_error_estimate > 0:
+            # High ZNE error → reduce LR to avoid amplifying noise
+            # Clamp to [0.5, 1.0] range: 50% reduction at max noise
+            noise_dampening = max(0.5, 1.0 - zne_error_estimate * 0.5)
+            current_lr *= noise_dampening
+            if zne_error_estimate > 0.1:  # Log only significant noise
+                logger.debug(
+                    f"[QALRC-S23] ZNE noise={zne_error_estimate:.3f} → LR scaled to {current_lr:.2e}"
+                )
+
         # 6. Quantum tunneling check
         loss_trend = self.compute_loss_trend()
         if self.should_tunnel(loss_trend):
@@ -325,8 +344,7 @@ class QuantumAdaptiveLRController:
             current_lr *= tunnel_jump
             self._state.tunneling_events += 1
             logger.debug(
-                f"[QALRC] Quantum tunneling at step {step}: "
-                f"LR jump by {tunnel_jump:.3f}x"
+                f"[QALRC] Quantum tunneling at step {step}: " f"LR jump by {tunnel_jump:.3f}x"
             )
 
         # Clamp to bounds
@@ -357,6 +375,14 @@ class QuantumAdaptiveLRController:
             "lr_mean": np.mean(self._state.lr_history) if self._state.lr_history else 0,
             "lr_std": np.std(self._state.lr_history) if self._state.lr_history else 0,
         }
+
+    def get_gradient_entropy(self) -> float:
+        """Get current gradient entropy for S21 QALRC→QULS synergy.
+
+        Returns:
+            Smoothed gradient entropy value in [0, 1].
+        """
+        return self._state.gradient_entropy
 
     def reset(self) -> None:
         """Reset controller state for a new trial."""

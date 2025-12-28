@@ -50,6 +50,19 @@ import tensorflow as tf
 
 from highnoon import config
 
+try:
+    from highnoon._native.ops.alphaqubit_ops import (
+        alphaqubit_correct,
+        create_alphaqubit_correct_weights,
+    )
+    from highnoon._native.ops.alphaqubit_ops import ops_available as alphaqubit_ops_available
+
+    _ALPHAQUBIT_NATIVE_AVAILABLE = alphaqubit_ops_available()
+except ImportError:
+    _ALPHAQUBIT_NATIVE_AVAILABLE = False
+    alphaqubit_correct = None
+    create_alphaqubit_correct_weights = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -139,7 +152,9 @@ class NeuralZNE:
     buffer_size: int = field(default_factory=lambda: config.NEURAL_ZNE_TRAIN_SAMPLES)
     train_every_n_steps: int = 100
     enabled: bool = field(default_factory=lambda: config.USE_NEURAL_ZNE)
-    use_qssm_stats: bool = field(default_factory=lambda: getattr(config, 'NEURAL_ZNE_USE_QSSM_STATS', True))
+    use_qssm_stats: bool = field(
+        default_factory=lambda: getattr(config, "NEURAL_ZNE_USE_QSSM_STATS", True)
+    )
 
     # Internal state
     _mitigators: dict[str, ZNEMitigator] = field(default_factory=dict)
@@ -368,8 +383,11 @@ class NeuralZNE:
         logger.debug(
             "[ZNE-S8] Q-SSM stats for '%s': mean=%.3f, std=%.3f, "
             "selectivity=%.3f -> noise_scale=%.3f",
-            layer_name, gate_mean, gate_std, selectivity,
-            self._noise_scale_adjustments[layer_name]
+            layer_name,
+            gate_mean,
+            gate_std,
+            selectivity,
+            self._noise_scale_adjustments[layer_name],
         )
 
     def get_noise_scale(self, layer_name: str) -> float:
@@ -450,9 +468,7 @@ class NeuralQuantumErrorMitigator(tf.keras.layers.Layer):
         self.noise_levels = tuple(
             noise_levels if noise_levels is not None else config.NEURAL_QEM_NOISE_LEVELS
         )
-        self.hidden_dim = (
-            hidden_dim if hidden_dim is not None else config.NEURAL_QEM_HIDDEN_DIM
-        )
+        self.hidden_dim = hidden_dim if hidden_dim is not None else config.NEURAL_QEM_HIDDEN_DIM
 
         if len(self.noise_levels) == 0:
             raise ValueError("noise_levels must not be empty")
@@ -540,10 +556,10 @@ class NeuralQuantumErrorMitigator(tf.keras.layers.Layer):
 
     def _apply_inference_correction(self, quantum_output: tf.Tensor) -> tf.Tensor:
         """Apply mild correction during inference.
-        
+
         Args:
             quantum_output: Output tensor from quantum layer.
-            
+
         Returns:
             Corrected output tensor (less aggressive than training).
         """
@@ -586,7 +602,7 @@ class NeuralQuantumErrorMitigator(tf.keras.layers.Layer):
             training_tensor,
             # During training: learn error model via extrapolation
             true_fn=lambda: self.extrapolate_to_zero_noise(quantum_output),
-            # During inference: apply learned correction directly  
+            # During inference: apply learned correction directly
             false_fn=lambda: self._apply_inference_correction(quantum_output),
         )
 
@@ -607,17 +623,22 @@ class NeuralQuantumErrorMitigator(tf.keras.layers.Layer):
 
 
 class QuantumErrorMitigationWrapper(tf.keras.layers.Layer):
-    """Wrapper layer that applies Neural QEM to any quantum layer output.
+    """Wrapper layer that applies error mitigation to any quantum layer output.
 
     This wrapper can be applied to outputs from VQC layers, quantum attention,
     Q-SSM gates, or any other quantum-enhanced layer to automatically apply
-    ML-enhanced error mitigation.
+    error mitigation.
+
+    Supports two mitigation backends:
+    1. VQEM C++ op (preferred when USE_VQEM=True and native ops available)
+    2. NeuralQuantumErrorMitigator Python fallback
 
     Compatible with USE_QUANTUM_FIDELITY_LOSS for training.
 
     Attributes:
         inner_layer: The wrapped quantum layer (optional).
-        mitigator: The NeuralQuantumErrorMitigator instance.
+        mitigator: The NeuralQuantumErrorMitigator instance (fallback).
+        use_vqem: Whether VQEM C++ ops are being used.
 
     Example:
         >>> vqc_layer = HybridVQCLayer(num_qubits=2)
@@ -645,6 +666,28 @@ class QuantumErrorMitigationWrapper(tf.keras.layers.Layer):
         """
         super().__init__(name=name, **kwargs)
         self.inner_layer = inner_layer
+
+        # Check if VQEM C++ ops are available
+        self._use_vqem = False
+        self._vqem_params: tf.Variable | None = None
+
+        if config.USE_VQEM:
+            try:
+                from highnoon._native.ops.vqem_ops import create_vqem_params
+                from highnoon._native.ops.vqem_ops import ops_available as vqem_ops_available
+                from highnoon._native.ops.vqem_ops import vqem_forward as _vqem_forward
+
+                if vqem_ops_available():
+                    self._use_vqem = True
+                    self._vqem_forward = _vqem_forward
+                    self._vqem_params = create_vqem_params()
+                    logger.info(
+                        "[QEM] VQEM C++ ops available (inference only - Python fallback for training)"
+                    )
+            except (ImportError, RuntimeError) as e:
+                logger.info(f"[QEM] VQEM C++ ops not available, using Python fallback: {e}")
+
+        # Always create Python mitigator for training (VQEM C++ lacks gradient support)
         self.mitigator = NeuralQuantumErrorMitigator(
             noise_levels=noise_levels,
             hidden_dim=hidden_dim,
@@ -672,7 +715,13 @@ class QuantumErrorMitigationWrapper(tf.keras.layers.Layer):
         else:
             quantum_output = inputs
 
-        return self.mitigator(quantum_output, training=training)
+        # Use Python mitigator during training (C++ ops lack gradient support)
+        # Use VQEM C++ for inference only
+        if training or not self._use_vqem or self._vqem_params is None:
+            return self.mitigator(quantum_output, training=training)
+
+        # Inference with VQEM C++ op
+        return self._vqem_forward(quantum_output, self._vqem_params)
 
     def get_config(self) -> dict[str, Any]:
         """Get layer configuration for serialization.
@@ -683,10 +732,16 @@ class QuantumErrorMitigationWrapper(tf.keras.layers.Layer):
         config_dict = super().get_config()
         config_dict.update(
             {
-                "noise_levels": self.mitigator.noise_levels,
-                "hidden_dim": self.mitigator.hidden_dim,
+                "use_vqem": self._use_vqem,
             }
         )
+        if self.mitigator is not None:
+            config_dict.update(
+                {
+                    "noise_levels": self.mitigator.noise_levels,
+                    "hidden_dim": self.mitigator.hidden_dim,
+                }
+            )
         if self.inner_layer is not None:
             config_dict["inner_layer"] = tf.keras.layers.serialize(self.inner_layer)
         return config_dict
@@ -776,9 +831,7 @@ class UnifiedAlphaQubitDecoder(tf.keras.layers.Layer):
         )
         self.attention_heads = attention_heads
         self.hidden_dim = (
-            hidden_dim
-            if hidden_dim is not None
-            else getattr(config, "NEURAL_QEM_HIDDEN_DIM", 64)
+            hidden_dim if hidden_dim is not None else getattr(config, "NEURAL_QEM_HIDDEN_DIM", 64)
         )
         self.enabled_layers = (
             enabled_layers
@@ -792,6 +845,13 @@ class UnifiedAlphaQubitDecoder(tf.keras.layers.Layer):
 
         # Check if enabled globally
         self._enabled = getattr(config, "USE_UNIFIED_ALPHAQUBIT", True)
+
+        # Use C++ ops if available
+        self._use_native_ops = _ALPHAQUBIT_NATIVE_AVAILABLE and self._enabled
+        if self._use_native_ops:
+            logger.info("[AlphaQubit] S11 using C++ native ops")
+        else:
+            logger.info("[AlphaQubit] S11 using Python fallback")
 
         # Syndrome attention layers (built dynamically)
         self.syndrome_attention_layers: list[tf.keras.layers.MultiHeadAttention] = []
@@ -808,6 +868,9 @@ class UnifiedAlphaQubitDecoder(tf.keras.layers.Layer):
 
         # Built flag
         self._built_for_dim: int | None = None
+
+        # C++ op weights (created in build)
+        self._native_weights: dict[str, tf.Variable] | None = None
 
     def build(self, input_shape: tf.TensorShape) -> None:
         """Build decoder layers based on input shape.
@@ -867,6 +930,17 @@ class UnifiedAlphaQubitDecoder(tf.keras.layers.Layer):
                 trainable=True,
             )
 
+        # Create C++ op weights if using native implementation
+        if self._use_native_ops and create_alphaqubit_correct_weights is not None:
+            self._native_weights = create_alphaqubit_correct_weights(
+                feature_dim=feature_dim,
+                hidden_dim=self.hidden_dim,
+                num_attn_layers=self.num_attention_layers,
+            )
+            # Register weights as layer weights for training
+            for name, weight in self._native_weights.items():
+                setattr(self, f"_native_{name}", weight)
+
         super().build(input_shape)
 
     def _apply_syndrome_detection(
@@ -895,17 +969,17 @@ class UnifiedAlphaQubitDecoder(tf.keras.layers.Layer):
         # Apply syndrome attention layers
         for i in range(self.num_attention_layers):
             # Self-attention for syndrome detection
-            attn_out = self.syndrome_attention_layers[i](
-                query=x, value=x, key=x, training=training
-            )
+            attn_out = self.syndrome_attention_layers[i](query=x, value=x, key=x, training=training)
             x = self.layer_norms[i](x + attn_out)
 
             # FFN for syndrome processing
             ffn_out = self.syndrome_ffn_layers[i](x)
             # Project back to feature dim
-            ffn_out = tf.keras.layers.Dense(
-                self._built_for_dim, name=f"proj_{i}"
-            )(ffn_out) if ffn_out.shape[-1] != self._built_for_dim else ffn_out
+            ffn_out = (
+                tf.keras.layers.Dense(self._built_for_dim, name=f"proj_{i}")(ffn_out)
+                if ffn_out.shape[-1] != self._built_for_dim
+                else ffn_out
+            )
             x = x + ffn_out
 
         # Restore original shape if needed
@@ -941,7 +1015,27 @@ class UnifiedAlphaQubitDecoder(tf.keras.layers.Layer):
         if layer_type in self.layer_type_embedding and self._built_for_dim is not None:
             quantum_output = quantum_output + self.layer_type_embedding[layer_type]
 
-        # Detect error syndromes
+        # Use C++ native ops if available
+        if (
+            self._use_native_ops
+            and self._native_weights is not None
+            and alphaqubit_correct is not None
+        ):
+            return alphaqubit_correct(
+                quantum_output,
+                self._native_weights["qkv_weights"],
+                self._native_weights["proj_weights"],
+                self._native_weights["corr_w1"],
+                self._native_weights["corr_w2"],
+                self._native_weights["gate_w"],
+                self._native_weights["gate_b"],
+                feature_dim=self._built_for_dim,
+                hidden_dim=self.hidden_dim,
+                num_attn_layers=self.num_attention_layers,
+                num_heads=self.attention_heads,
+            )
+
+        # Python fallback: Detect error syndromes
         syndrome_features = self._apply_syndrome_detection(quantum_output, training)
 
         # Compute correction
@@ -961,12 +1055,14 @@ class UnifiedAlphaQubitDecoder(tf.keras.layers.Layer):
             Configuration dictionary.
         """
         config_dict = super().get_config()
-        config_dict.update({
-            "num_attention_layers": self.num_attention_layers,
-            "attention_heads": self.attention_heads,
-            "hidden_dim": self.hidden_dim,
-            "enabled_layers": self.enabled_layers,
-        })
+        config_dict.update(
+            {
+                "num_attention_layers": self.num_attention_layers,
+                "attention_heads": self.attention_heads,
+                "hidden_dim": self.hidden_dim,
+                "enabled_layers": self.enabled_layers,
+            }
+        )
         return config_dict
 
 
@@ -988,5 +1084,3 @@ def create_unified_alphaqubit_decoder(
         return None
 
     return UnifiedAlphaQubitDecoder(**kwargs)
-
-

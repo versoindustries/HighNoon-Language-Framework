@@ -52,10 +52,10 @@ _csla_grad_warning_issued = False
 def learnable_filter_bank_dwt(
     x: tf.Tensor,
     low_pass: tf.Tensor,
-    high_pass: Optional[tf.Tensor] = None,
+    high_pass: tf.Tensor | None = None,
     kernel_size: int = 5,
     enforce_qmf: bool = True,
-) -> Tuple[tf.Tensor, tf.Tensor]:
+) -> tuple[tf.Tensor, tf.Tensor]:
     """Learnable Filter Bank DWT decomposition.
 
     Applies learnable convolution filters for wavelet decomposition with
@@ -148,12 +148,10 @@ def learnable_filter_bank_dwt(
 
             # Stack and reshape for upsampling: [batch, half_len, 2, dim] -> [batch, seq_len, dim]
             upsampled_low = tf.reshape(
-                tf.stack([grad_low, zeros_low], axis=2),
-                [batch_size, half_len * 2, dim]
+                tf.stack([grad_low, zeros_low], axis=2), [batch_size, half_len * 2, dim]
             )
             upsampled_high = tf.reshape(
-                tf.stack([grad_high, zeros_high], axis=2),
-                [batch_size, half_len * 2, dim]
+                tf.stack([grad_high, zeros_high], axis=2), [batch_size, half_len * 2, dim]
             )
 
             # Reverse filters for gradient
@@ -199,7 +197,7 @@ def learnable_filter_bank_iwt(
     low: tf.Tensor,
     high: tf.Tensor,
     synth_low: tf.Tensor,
-    synth_high: Optional[tf.Tensor] = None,
+    synth_high: tf.Tensor | None = None,
     kernel_size: int = 5,
     enforce_qmf: bool = True,
 ) -> tf.Tensor:

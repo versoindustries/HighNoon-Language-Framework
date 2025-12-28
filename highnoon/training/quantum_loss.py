@@ -167,9 +167,7 @@ class QULSConfig:
     entropy_weight: float = field(
         default_factory=lambda: getattr(hn_config, "ENTROPY_REG_WEIGHT", 0.01)
     )
-    target_entropy: float = field(
-        default_factory=lambda: getattr(hn_config, "TARGET_ENTROPY", 0.5)
-    )
+    target_entropy: float = field(default_factory=lambda: getattr(hn_config, "TARGET_ENTROPY", 0.5))
     spectral_weight: float = field(
         default_factory=lambda: getattr(hn_config, "SPECTRAL_REG_WEIGHT", 0.01)
     )
@@ -188,9 +186,7 @@ class QULSConfig:
         default_factory=lambda: getattr(hn_config, "QULS_COHERENCE_WEIGHT", 0.01)
     )
     coherence_threshold: float = field(
-        default_factory=lambda: getattr(
-            hn_config, "UNIFIED_BUS_COHERENCE_THRESHOLD", 0.85
-        )
+        default_factory=lambda: getattr(hn_config, "UNIFIED_BUS_COHERENCE_THRESHOLD", 0.85)
     )
 
     # Symplectic Conservation
@@ -223,9 +219,7 @@ class QULSConfig:
         default_factory=lambda: getattr(hn_config, "QULS_VQC_VARIANCE_BOOST", 2.0)
     )
     barren_plateau_reduction: float = field(
-        default_factory=lambda: getattr(
-            hn_config, "QULS_BARREN_PLATEAU_REDUCTION", 0.1
-        )
+        default_factory=lambda: getattr(hn_config, "QULS_BARREN_PLATEAU_REDUCTION", 0.1)
     )
 
 
@@ -234,9 +228,7 @@ class QULSConfig:
 # =============================================================================
 
 
-def trace_fidelity(
-    p: tf.Tensor, q: tf.Tensor, epsilon: float = 1e-8
-) -> tf.Tensor:
+def trace_fidelity(p: tf.Tensor, q: tf.Tensor, epsilon: float = 1e-8) -> tf.Tensor:
     """Compute trace fidelity between two probability distributions.
 
     The trace fidelity (also called Bhattacharyya coefficient) between
@@ -760,9 +752,7 @@ class AdaptiveWeightController:
             "spectral": config.spectral_weight if config.entropy_enabled else 0.0,
             "coherence": config.coherence_weight if config.coherence_enabled else 0.0,
             "symplectic": config.symplectic_weight if config.symplectic_enabled else 0.0,
-            "entanglement": config.entanglement_weight
-            if config.entanglement_enabled
-            else 0.0,
+            "entanglement": config.entanglement_weight if config.entanglement_enabled else 0.0,
         }
 
         self.current_weights = dict(self.base_weights)
@@ -978,7 +968,9 @@ class QuantumUnifiedLoss:
                     vocab_size = tf.shape(predictions)[-1]
                     one_hot = tf.one_hot(labels, depth=vocab_size)
                     # Apply label smoothing
-                    smoothed = one_hot * (1 - label_smoothing) + label_smoothing / tf.cast(vocab_size, tf.float32)
+                    smoothed = one_hot * (1 - label_smoothing) + label_smoothing / tf.cast(
+                        vocab_size, tf.float32
+                    )
                     loss = tf.keras.losses.categorical_crossentropy(
                         smoothed, predictions, from_logits=True
                     )
@@ -986,6 +978,7 @@ class QuantumUnifiedLoss:
 
                 return loss_fn
             else:
+
                 def loss_fn(labels, predictions):
                     loss = tf.keras.losses.sparse_categorical_crossentropy(
                         labels, predictions, from_logits=True
@@ -995,6 +988,7 @@ class QuantumUnifiedLoss:
                 return loss_fn
 
         elif loss_type == "categorical_crossentropy":
+
             def loss_fn(labels, predictions):
                 loss = tf.keras.losses.categorical_crossentropy(
                     labels, predictions, from_logits=True, label_smoothing=label_smoothing
@@ -1004,12 +998,14 @@ class QuantumUnifiedLoss:
             return loss_fn
 
         elif loss_type == "mse":
+
             def loss_fn(labels, predictions):
                 return tf.reduce_mean(tf.square(predictions - labels))
 
             return loss_fn
 
         elif loss_type == "mae":
+
             def loss_fn(labels, predictions):
                 return tf.reduce_mean(tf.abs(predictions - labels))
 
@@ -1050,6 +1046,7 @@ class QuantumUnifiedLoss:
         vqc_gradient_variance: float | None = None,
         gradient_entropy: float | None = None,
         in_barren_plateau: bool = False,
+        zne_statistics: dict | None = None,  # S23: Neural ZNE feedback
     ) -> tuple[tf.Tensor, dict[str, float]]:
         """Compute total QULS loss with all components.
 
@@ -1089,7 +1086,23 @@ class QuantumUnifiedLoss:
             ),
         )
 
+        # S23: Neural ZNE feedback - adjust weights based on ZNE effectiveness
         components: dict[str, float] = {}
+        zne_scale = 1.0
+        if zne_statistics is not None and zne_statistics.get("enabled", False):
+            num_mitigators = zne_statistics.get("num_mitigators", 0)
+            if num_mitigators > 0:
+                # When ZNE is actively mitigating errors, boost quantum terms
+                # More mitigators = more quantum layers = higher quantum contribution
+                zne_scale = 1.0 + 0.1 * min(num_mitigators, 5)
+                # Record in components
+                components["zne_mitigators"] = float(num_mitigators)
+                components["zne_scale"] = zne_scale
+                # Apply scale to quantum terms
+                for key in ["fidelity", "born_rule", "coherence", "entanglement"]:
+                    if key in weights:
+                        weights[key] *= zne_scale
+
         total_loss = tf.constant(0.0, dtype=tf.float32)
 
         # 1. Primary task loss (always computed)
@@ -1107,22 +1120,14 @@ class QuantumUnifiedLoss:
             components["fidelity_weight"] = weights["fidelity"]
 
         # 3. Born Rule Loss
-        if (
-            self.config.born_rule_enabled
-            and weights["born_rule"] > 0
-            and vqc_outputs is not None
-        ):
+        if self.config.born_rule_enabled and weights["born_rule"] > 0 and vqc_outputs is not None:
             born_loss = born_rule_amplitude_loss(vqc_outputs)
             total_loss = total_loss + weights["born_rule"] * born_loss
             components["born_rule"] = float(born_loss.numpy())
             components["born_rule_weight"] = weights["born_rule"]
 
         # 4. Entropy Regularization
-        if (
-            self.config.entropy_enabled
-            and weights["entropy"] > 0
-            and hidden_states is not None
-        ):
+        if self.config.entropy_enabled and weights["entropy"] > 0 and hidden_states is not None:
             entropy_loss = entropy_regularization_loss(
                 hidden_states,
                 target_entropy=self.config.target_entropy,
@@ -1134,11 +1139,7 @@ class QuantumUnifiedLoss:
             components["entropy_weight"] = weights["entropy"]
 
         # 5. Spectral Flatness
-        if (
-            self.config.entropy_enabled
-            and weights["spectral"] > 0
-            and hidden_states is not None
-        ):
+        if self.config.entropy_enabled and weights["spectral"] > 0 and hidden_states is not None:
             spectral_loss = spectral_flatness_loss(
                 hidden_states,
                 target_flatness=self.config.spectral_target,

@@ -400,8 +400,33 @@ def create_reasoning_stack(
     from ..layers.wlam import WLAMBlock
     from ..moe import MoELayer
     from ..spatial.kalman import KalmanBlock
-    from ..spatial.mamba import ReasoningMamba2Block, SpatialBlock, QMambaBlock
+    from ..spatial.mamba import QMambaBlock, ReasoningMamba2Block, SpatialBlock
     from .latent_reasoning import LatentReasoningBlock
+
+    # Phase 11: Optional layer integrations
+    QuantumGQA = None
+    LocalAttentionBlock = None
+    LatentKVAttention = None
+    if config.USE_QUANTUM_GQA:
+        try:
+            from ..layers.quantum_gqa import QuantumGQA
+        except ImportError:
+            logger.warning("[block_factory] QuantumGQA unavailable, using SpatialBlock fallback")
+    if config.USE_LOCAL_ATTENTION:
+        try:
+            from ..layers.local_attention import LocalAttentionBlock
+        except ImportError:
+            logger.warning(
+                "[block_factory] LocalAttentionBlock unavailable, using SpatialBlock fallback"
+            )
+    # Phase 201.3: LatentKVAttention for memory-efficient KV cache
+    if config.USE_LATENT_KV_ATTENTION:
+        try:
+            from ..layers.latent_kv_attention import LatentKVAttention
+        except ImportError:
+            logger.warning(
+                "[block_factory] LatentKVAttention unavailable, using QuantumGQA fallback"
+            )
 
     reasoning_blocks = []
     blocks_tensors = []
@@ -470,7 +495,7 @@ def create_reasoning_stack(
             if config.USE_QMAMBA:
                 block = QMambaBlock(
                     embedding_dim=embedding_dim,
-                    num_superposition_paths=kwargs.get('qmamba_superposition_states', 4),
+                    num_superposition_paths=kwargs.get("qmamba_superposition_states", 4),
                     state_dim=mamba_state_dim,
                     conv_dim=mamba_conv_dim,
                     expand_factor=mamba_expand_factor,
@@ -559,7 +584,7 @@ def create_reasoning_stack(
             )
 
             # S2 Synergy: Wire QMamba amplitudes to COCONUT path selection
-            if last_qmamba_block is not None and hasattr(block, 'set_qmamba_source'):
+            if last_qmamba_block is not None and hasattr(block, "set_qmamba_source"):
                 block.set_qmamba_source(last_qmamba_block)
                 logger.debug(f"[S2 Synergy] Wired QMamba to LatentReasoning block {i}")
 
@@ -602,13 +627,42 @@ def create_reasoning_stack(
                 reasoning_blocks.append(verifier)
                 block = None  # Already added, skip the generic append
         elif block_type == 3:
-            block = SpatialBlock(  # Second spatial block for more spatial reasoning
-                embedding_dim=embedding_dim,
-                state_dim=mamba_state_dim,
-                conv_dim=mamba_conv_dim,
-                expand_factor=mamba_expand_factor,
-                name=f"spatial_block_{i}_alt",
-            )
+            # Phase 11 + Phase 201.3: Attention block selection
+            # Priority: LatentKVAttention > QuantumGQA > LocalAttention > SpatialBlock
+            if LatentKVAttention is not None:
+                # Phase 201.3: Use LatentKVAttention for 10-28x KV cache compression
+                latent_kv_dim = kwargs.get("latent_kv_dim", config.LATENT_KV_DIM)
+                block = LatentKVAttention(
+                    embedding_dim=embedding_dim,
+                    num_heads=kwargs.get("quantum_gqa_num_heads", config.QUANTUM_GQA_NUM_HEADS),
+                    latent_dim=latent_kv_dim,
+                    name=f"latent_kv_attention_{i}",
+                )
+            elif QuantumGQA is not None:
+                # Use QuantumGQA for VQC-enhanced grouped query attention
+                block = QuantumGQA(
+                    embedding_dim=embedding_dim,
+                    num_heads=kwargs.get("quantum_gqa_num_heads", config.QUANTUM_GQA_NUM_HEADS),
+                    num_kv_heads=kwargs.get("quantum_gqa_kv_heads", config.QUANTUM_GQA_KV_HEADS),
+                    name=f"quantum_gqa_{i}",
+                )
+            elif LocalAttentionBlock is not None:
+                # Use LocalAttentionBlock for Griffin-style local attention
+                block = LocalAttentionBlock(
+                    embedding_dim=embedding_dim,
+                    window_size=kwargs.get("local_attention_window", config.LOCAL_ATTENTION_WINDOW),
+                    num_heads=wlam_num_heads,
+                    name=f"local_attention_{i}",
+                )
+            else:
+                # Fallback: Second spatial block for more spatial reasoning
+                block = SpatialBlock(
+                    embedding_dim=embedding_dim,
+                    state_dim=mamba_state_dim,
+                    conv_dim=mamba_conv_dim,
+                    expand_factor=mamba_expand_factor,
+                    name=f"spatial_block_{i}_alt",
+                )
         elif block_type == 4:
             wlam_num_levels = kwargs.get("wlam_num_levels", config.WLAM_NUM_LEVELS)
             wlam_use_lifting = kwargs.get("wlam_use_lifting", config.WLAM_USE_LIFTING)
@@ -747,7 +801,7 @@ class QuantumLMHead(tf.keras.layers.Layer):
         self.use_dense_fallback = use_dense_fallback
 
         # VQC intermediate dimension
-        self._vqc_dim = 2 ** vqc_qubits  # 256 for 8 qubits
+        self._vqc_dim = 2**vqc_qubits  # 256 for 8 qubits
 
         logger.info(
             "[QuantumLMHead] Initializing: vocab=%d, hidden=%d, vqc_layers=%d, vqc_qubits=%d",
@@ -904,12 +958,13 @@ class QuantumLMHead(tf.keras.layers.Layer):
     def get_config(self) -> dict:
         """Get layer configuration."""
         config = super().get_config()
-        config.update({
-            "vocab_size": self.vocab_size,
-            "hidden_dim": self.hidden_dim,
-            "vqc_layers": self.vqc_layers,
-            "vqc_qubits": self.vqc_qubits,
-            "use_dense_fallback": self.use_dense_fallback,
-        })
+        config.update(
+            {
+                "vocab_size": self.vocab_size,
+                "hidden_dim": self.hidden_dim,
+                "vqc_layers": self.vqc_layers,
+                "vqc_qubits": self.vqc_qubits,
+                "use_dense_fallback": self.use_dense_fallback,
+            }
+        )
         return config
-

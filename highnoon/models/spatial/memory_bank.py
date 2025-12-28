@@ -1774,6 +1774,7 @@ class HopfieldMemory(tf.keras.layers.Layer):
 
         # S6: Adaptive beta from MPS entropy
         from highnoon.config import HOPFIELD_ADAPTIVE_BETA
+
         self.adaptive_beta = adaptive_beta if adaptive_beta is not None else HOPFIELD_ADAPTIVE_BETA
         self.beta_min = beta_min
         self.beta_max = beta_max
@@ -1790,6 +1791,7 @@ class HopfieldMemory(tf.keras.layers.Layer):
         if use_cpp:
             try:
                 from highnoon._native.ops.hopfield_memory_op import hopfield_ops_available
+
                 self._cpp_available = hopfield_ops_available()
             except ImportError:
                 self._cpp_available = False
@@ -1859,6 +1861,7 @@ class HopfieldMemory(tf.keras.layers.Layer):
                 "Run ./build_secure.sh to compile. NO PYTHON FALLBACK IS PROVIDED."
             )
         from highnoon._native.ops.hopfield_memory_op import hopfield_memory_retrieve
+
         return hopfield_memory_retrieve(query, patterns, beta=self.beta)
 
     def read(

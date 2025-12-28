@@ -38,8 +38,8 @@ from typing import Tuple
 
 import tensorflow as tf
 
-from highnoon._native.ops.lib_loader import resolve_op_library
 from highnoon import config
+from highnoon._native.ops.lib_loader import resolve_op_library
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +52,7 @@ def _load_ops():
     global _module, _available
     if _module is not None:
         return _available
-        
+
     try:
         lib_path = resolve_op_library(__file__, "_highnoon_core.so")
         if lib_path is None:
@@ -64,8 +64,7 @@ def _load_ops():
         _available = False
         logger.warning(f"Failed to load Quantum Coherence Bus ops: {e}")
         raise RuntimeError(
-            "Quantum Coherence Bus native ops not available. "
-            "Run ./build_secure.sh to compile."
+            "Quantum Coherence Bus native ops not available. " "Run ./build_secure.sh to compile."
         ) from e
     return _available
 
@@ -91,7 +90,7 @@ def qcb_initialize(
     bidirectional: bool = True,
     coherence_threshold: float | None = None,
     seed: int = 42,
-) -> Tuple[tf.Tensor, tf.Tensor]:
+) -> tuple[tf.Tensor, tf.Tensor]:
     """Initialize Quantum Coherence Bus with GHZ-like entanglement.
 
     Creates a maximally entangled state spanning all blocks in the
@@ -115,7 +114,7 @@ def qcb_initialize(
     _load_ops()
     num_blocks = num_blocks or config.QCB_NUM_NODES
     coherence_threshold = coherence_threshold or config.QCB_FIDELITY_THRESHOLD
-    
+
     return _module.qcb_initialize(
         num_blocks=num_blocks,
         entanglement_dim=entanglement_dim,
@@ -155,7 +154,7 @@ def qcb_coherent_transfer(
     """
     _load_ops()
     num_blocks = num_blocks or config.QCB_NUM_NODES
-    
+
     return _module.qcb_coherent_transfer(
         source_state,
         entangled_state,
@@ -192,7 +191,7 @@ def qcb_teleport_gradient(
     """
     _load_ops()
     num_blocks = num_blocks or config.QCB_NUM_NODES
-    
+
     return _module.qcb_teleport_gradient(
         block_gradients,
         entangled_state,
@@ -205,7 +204,7 @@ def qcb_synchronize_phase(
     entangled_state: tf.Tensor,
     num_blocks: int | None = None,
     entanglement_dim: int = 64,
-) -> Tuple[tf.Tensor, tf.Tensor]:
+) -> tuple[tf.Tensor, tf.Tensor]:
     """Synchronize quantum phase across all blocks in QCB.
 
     Performs global phase alignment to maintain coherent evolution
@@ -225,7 +224,7 @@ def qcb_synchronize_phase(
     """
     _load_ops()
     num_blocks = num_blocks or config.QCB_NUM_NODES
-    
+
     return _module.qcb_synchronize_phase(
         entangled_state,
         num_blocks=num_blocks,
@@ -260,7 +259,7 @@ def qcb_update_mesh(
     """
     _load_ops()
     num_blocks = num_blocks or config.QCB_NUM_NODES
-    
+
     return _module.qcb_update_mesh(
         entangled_state,
         block_states,
@@ -284,7 +283,7 @@ def unified_bus_propagate_entanglement(
     coherence_threshold: float | None = None,
     propagation_rate: float = 0.1,
     use_adaptive: bool = True,
-) -> Tuple[tf.Tensor, tf.Tensor]:
+) -> tuple[tf.Tensor, tf.Tensor]:
     """Unified Quantum Bus - Propagate entanglement across blocks.
 
     Propagates quantum correlations across blocks with O(n·d) complexity
@@ -313,12 +312,12 @@ def unified_bus_propagate_entanglement(
         nb = block_states.shape[1] or num_blocks or config.QCB_NUM_NODES
         coherence = tf.eye(nb, dtype=tf.float32)
         return block_states, coherence
-    
+
     _load_ops()
     num_blocks = num_blocks or config.QCB_NUM_NODES
     mps_bond_dim = mps_bond_dim or config.UNIFIED_BUS_MPS_BOND_DIM
     coherence_threshold = coherence_threshold or config.UNIFIED_BUS_COHERENCE_THRESHOLD
-    
+
     return _module.unified_quantum_bus_propagate_entanglement(
         block_states,
         entanglement_strength,
@@ -361,7 +360,7 @@ def unified_bus_update_strength(
     _load_ops()
     num_blocks = num_blocks or config.QCB_NUM_NODES
     coherence_threshold = coherence_threshold or config.UNIFIED_BUS_COHERENCE_THRESHOLD
-    
+
     return _module.unified_quantum_bus_update_strength(
         entanglement_strength,
         coherence,

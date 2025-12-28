@@ -86,7 +86,7 @@ class TrialRecord:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict) -> "TrialRecord":
+    def from_dict(cls, data: dict) -> TrialRecord:
         """Create from dictionary."""
         return cls(**data)
 
@@ -143,7 +143,7 @@ class TunerMemory:
         # Load trials from JSONL file
         if self._trials_file.exists():
             try:
-                with open(self._trials_file, "r") as f:
+                with open(self._trials_file) as f:
                     for line in f:
                         line = line.strip()
                         if line:
@@ -160,7 +160,7 @@ class TunerMemory:
         # Load index
         if self._index_file.exists():
             try:
-                with open(self._index_file, "r") as f:
+                with open(self._index_file) as f:
                     self._index = json.load(f)
             except Exception as e:
                 logger.warning("[TunerMemory] Failed to load index: %s", e)
@@ -343,9 +343,7 @@ class TunerMemory:
         similar_trials = self._find_similar_trials(architecture_config)
 
         if not similar_trials:
-            logger.info(
-                "[TunerMemory] No similar trials found, using defaults"
-            )
+            logger.info("[TunerMemory] No similar trials found, using defaults")
             return {}
 
         # Find the best trial among similar ones
@@ -354,9 +352,7 @@ class TunerMemory:
         # Extract initial parameters from best trajectory
         trajectory = best_trial.tuner_trajectory
         if not trajectory:
-            logger.info(
-                "[TunerMemory] Best similar trial has no trajectory, using hyperparameters"
-            )
+            logger.info("[TunerMemory] Best similar trial has no trajectory, using hyperparameters")
             return {
                 "initial_lr": best_trial.hyperparameters.get("learning_rate"),
                 "exploration_factor": 0.8,  # Start with less exploration
@@ -464,9 +460,7 @@ class TunerMemory:
             "trial_count": len(self._trials),
             "best_loss": self._index.get("best_loss"),
             "best_trial_id": self._index.get("best_trial_id"),
-            "unique_architectures": len(
-                self._index.get("architecture_hashes", {})
-            ),
+            "unique_architectures": len(self._index.get("architecture_hashes", {})),
             "mean_loss": np.mean(losses),
             "std_loss": np.std(losses),
             "converged_count": sum(1 for t in self._trials if t.converged),

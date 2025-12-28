@@ -125,13 +125,35 @@ class HybridVQCLayer(ControlVarMixin, tf.keras.layers.Layer):
 
         self.device_manager = QuantumDeviceManager.global_instance()
 
-        self.data_encoder = tf.keras.layers.Dense(
-            self.num_qubits,
-            activation=None,
-            use_bias=True,
-            dtype="float32",
-            name=f"{self.name or 'hybrid_vqc'}_data_encoder",
-        )
+        # S18: CayleyDense for VQC data encoding (orthogonal weight stability)
+        from highnoon.config import USE_CAYLEY_VQC
+
+        if USE_CAYLEY_VQC:
+            try:
+                from highnoon.models.layers.cayley_weights import CayleyDense
+
+                self.data_encoder = CayleyDense(
+                    units=self.num_qubits,
+                    use_bias=True,
+                    name=f"{self.name or 'hybrid_vqc'}_data_encoder",
+                )
+            except ImportError:
+                # Fallback to standard Dense if CayleyDense not available
+                self.data_encoder = tf.keras.layers.Dense(
+                    self.num_qubits,
+                    activation=None,
+                    use_bias=True,
+                    dtype="float32",
+                    name=f"{self.name or 'hybrid_vqc'}_data_encoder",
+                )
+        else:
+            self.data_encoder = tf.keras.layers.Dense(
+                self.num_qubits,
+                activation=None,
+                use_bias=True,
+                dtype="float32",
+                name=f"{self.name or 'hybrid_vqc'}_data_encoder",
+            )
         self.theta: tf.Variable | None = None
         self.registered_control_vars = False
         self._expectation_tracker: tf.keras.metrics.Mean | None = None
@@ -147,6 +169,7 @@ class HybridVQCLayer(ControlVarMixin, tf.keras.layers.Layer):
         if USE_AUTO_NEURAL_QEM:
             # Lazy import to avoid circular dependency
             from highnoon.training.neural_zne import NeuralQuantumErrorMitigator
+
             self._auto_qem_mitigator = NeuralQuantumErrorMitigator(
                 name=f"{name or 'hybrid_vqc'}_qem"
             )
@@ -474,9 +497,7 @@ class HybridVQCLayer(ControlVarMixin, tf.keras.layers.Layer):
 
         # Phase 130.1: Apply auto Neural QEM if enabled
         if self._auto_qem_mitigator is not None:
-            reshaped_output = self._auto_qem_mitigator(
-                reshaped_output, training=training
-            )
+            reshaped_output = self._auto_qem_mitigator(reshaped_output, training=training)
 
         return reshaped_output
 
@@ -758,9 +779,9 @@ class AdaptiveDepthVQCLayer(EvolutionTimeVQCLayer):
         # Import config for defaults
         from highnoon import config as cfg
 
-        self._min_layers = min_layers or getattr(cfg, 'VQC_MIN_LAYERS', 1)
-        self._max_layers = max_layers or getattr(cfg, 'VQC_MAX_LAYERS', 4)
-        self._use_adaptive = getattr(cfg, 'USE_ADAPTIVE_VQC_DEPTH', True)
+        self._min_layers = min_layers or getattr(cfg, "VQC_MIN_LAYERS", 1)
+        self._max_layers = max_layers or getattr(cfg, "VQC_MAX_LAYERS", 4)
+        self._use_adaptive = getattr(cfg, "USE_ADAPTIVE_VQC_DEPTH", True)
 
         # Initialize with max layers
         kwargs.setdefault("num_layers", self._max_layers)
@@ -793,9 +814,7 @@ class AdaptiveDepthVQCLayer(EvolutionTimeVQCLayer):
 
         # Map to layer count
         layer_range = self._max_layers - self._min_layers
-        effective_layers = self._min_layers + tf.cast(
-            tf.round(layer_range * depth_ratio), tf.int32
-        )
+        effective_layers = self._min_layers + tf.cast(tf.round(layer_range * depth_ratio), tf.int32)
 
         # Store for tracking
         self._last_depth_ratio = float(depth_ratio.numpy()) if tf.executing_eagerly() else 0.5
@@ -829,10 +848,12 @@ class AdaptiveDepthVQCLayer(EvolutionTimeVQCLayer):
     def get_config(self):
         """Get layer configuration."""
         config = super().get_config()
-        config.update({
-            "min_layers": self._min_layers,
-            "max_layers": self._max_layers,
-        })
+        config.update(
+            {
+                "min_layers": self._min_layers,
+                "max_layers": self._max_layers,
+            }
+        )
         return config
 
 
@@ -875,7 +896,7 @@ class CoherenceAwareVQC(HybridVQCLayer):
 
         self._coherence_bus = coherence_bus
         self._base_entanglement = base_entanglement
-        self._use_coherence = getattr(cfg, 'VQC_USE_COHERENCE_BUS', True)
+        self._use_coherence = getattr(cfg, "VQC_USE_COHERENCE_BUS", True)
         self._current_entanglement = base_entanglement
         self._last_coherence = 1.0
 
@@ -898,11 +919,11 @@ class CoherenceAwareVQC(HybridVQCLayer):
 
         try:
             # Try to get coherence from bus
-            if hasattr(self._coherence_bus, 'get_average_coherence'):
+            if hasattr(self._coherence_bus, "get_average_coherence"):
                 coherence = self._coherence_bus.get_average_coherence()
-            elif hasattr(self._coherence_bus, 'last_coherence'):
+            elif hasattr(self._coherence_bus, "last_coherence"):
                 coherence = self._coherence_bus.last_coherence
-            elif hasattr(self._coherence_bus, '_global_coherence'):
+            elif hasattr(self._coherence_bus, "_global_coherence"):
                 coherence = self._coherence_bus._global_coherence
             else:
                 return 1.0
@@ -971,7 +992,9 @@ class CoherenceAwareVQC(HybridVQCLayer):
     def get_config(self):
         """Get layer configuration."""
         config = super().get_config()
-        config.update({
-            "base_entanglement": self._base_entanglement,
-        })
+        config.update(
+            {
+                "base_entanglement": self._base_entanglement,
+            }
+        )
         return config

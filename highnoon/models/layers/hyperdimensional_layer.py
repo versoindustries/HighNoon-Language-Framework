@@ -56,8 +56,8 @@ from typing import Any
 import tensorflow as tf
 
 from highnoon._native.ops.hyperdimensional_embedding import (
-    holographic_bundle,
     ctqw_spread,
+    holographic_bundle,
     hyperdimensional_embedding_available,
 )
 
@@ -69,7 +69,7 @@ class HyperdimensionalEmbedding(tf.keras.layers.Layer):
 
     Replaces Embedding(vocab_size, dim) with holographic representation:
     - Base vectors: [vocab_size, hd_dim] random initialized
-    - Position keys: [max_seq_len, hd_dim] random initialized  
+    - Position keys: [max_seq_len, hd_dim] random initialized
     - FFT circular convolution for token-position binding
     - CTQW spreading for semantic diffusion
     - Linear projection to model_dim
@@ -129,10 +129,8 @@ class HyperdimensionalEmbedding(tf.keras.layers.Layer):
 
         # Validate model_dim divides hd_dim FIRST (before any rounding)
         if hd_dim % model_dim != 0:
-            raise ValueError(
-                f"hd_dim ({hd_dim}) must be divisible by model_dim ({model_dim})"
-            )
-        
+            raise ValueError(f"hd_dim ({hd_dim}) must be divisible by model_dim ({model_dim})")
+
         # Check if hd_dim is power of 2 for efficient FFT
         # If not, we can still use TensorFlow's FFT (which handles arbitrary sizes)
         # but may be slower. Issue a warning but don't fail.
@@ -285,16 +283,18 @@ class HyperdimensionalEmbedding(tf.keras.layers.Layer):
     def get_config(self) -> dict[str, Any]:
         """Get layer configuration for serialization."""
         config = super().get_config()
-        config.update({
-            "vocab_size": self.vocab_size,
-            "model_dim": self.model_dim,
-            "hd_dim": self.hd_dim,
-            "num_bundles": self.num_bundles,
-            "use_ctqw": self.use_ctqw,
-            "ctqw_steps": self.ctqw_steps,
-            "max_seq_len": self.max_seq_len,
-            "initializer": self._initializer,
-        })
+        config.update(
+            {
+                "vocab_size": self.vocab_size,
+                "model_dim": self.model_dim,
+                "hd_dim": self.hd_dim,
+                "num_bundles": self.num_bundles,
+                "use_ctqw": self.use_ctqw,
+                "ctqw_steps": self.ctqw_steps,
+                "max_seq_len": self.max_seq_len,
+                "initializer": self._initializer,
+            }
+        )
         return config
 
 
@@ -386,14 +386,16 @@ class DualPathEmbedding(tf.keras.layers.Layer):
 
     def get_config(self) -> dict[str, Any]:
         config = super().get_config()
-        config.update({
-            "vocab_size": self.vocab_size,
-            "model_dim": self.model_dim,
-            "active_vocab_size": self.active_vocab_size,
-            "hd_dim": self.hd_dim,
-            "use_ctqw": self.use_ctqw,
-            "ctqw_steps": self.ctqw_steps,
-        })
+        config.update(
+            {
+                "vocab_size": self.vocab_size,
+                "model_dim": self.model_dim,
+                "active_vocab_size": self.active_vocab_size,
+                "hd_dim": self.hd_dim,
+                "use_ctqw": self.use_ctqw,
+                "ctqw_steps": self.ctqw_steps,
+            }
+        )
         return config
 
 

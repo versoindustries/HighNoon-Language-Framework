@@ -47,7 +47,7 @@ from highnoon._native.ops.fused_superposition_slots_op import (
     superposition_write,
     superposition_write_available,
 )
-from highnoon.config import (
+from highnoon.config import (  # Phase 127: Unified Quantum Bus config
     STATE_BUS_ADAPTIVE,
     STATE_BUS_BOND_DIM,
     STATE_BUS_DIM,
@@ -59,13 +59,12 @@ from highnoon.config import (
     STATE_BUS_SLOTS,
     STATE_BUS_SUPERPOSITION,
     STATE_BUS_TYPED,
-    USE_FUSED_STATE_BUS,
-    # Phase 127: Unified Quantum Bus config
     UNIFIED_BUS_ADAPTIVE,
     UNIFIED_BUS_COHERENCE_THRESHOLD,
     UNIFIED_BUS_ENTANGLEMENT_INIT,
     UNIFIED_BUS_MPS_BOND_DIM,
     UNIFIED_BUS_PROPAGATION_RATE,
+    USE_FUSED_STATE_BUS,
 )
 
 logger = logging.getLogger(__name__)
@@ -1133,9 +1132,7 @@ class UnifiedQuantumBus(tf.keras.layers.Layer):
             - coherence: Coherence matrix [num_blocks, num_blocks]
         """
         # Propagate entanglement
-        entangled_states, coherence = self.propagate_entanglement(
-            block_states, training=training
-        )
+        entangled_states, coherence = self.propagate_entanglement(block_states, training=training)
 
         # Apply output projection first
         entangled_states = self.output_proj(entangled_states)
@@ -1181,14 +1178,12 @@ class UnifiedQuantumBus(tf.keras.layers.Layer):
             scale = 0.5 + 0.5 * coherence  # Map [0,1] -> [0.5, 1.0]
 
             # Update using propagation rate for smooth adaptation
-            current[block_index, :] = (
-                (1 - self.propagation_rate) * current[block_index, :] +
-                self.propagation_rate * scale * current[block_index, :]
-            )
-            current[:, block_index] = (
-                (1 - self.propagation_rate) * current[:, block_index] +
-                self.propagation_rate * scale * current[:, block_index]
-            )
+            current[block_index, :] = (1 - self.propagation_rate) * current[
+                block_index, :
+            ] + self.propagation_rate * scale * current[block_index, :]
+            current[:, block_index] = (1 - self.propagation_rate) * current[
+                :, block_index
+            ] + self.propagation_rate * scale * current[:, block_index]
             self._entanglement_strength.assign(current)
 
     def receive_hopfield_energy(
@@ -1213,9 +1208,7 @@ class UnifiedQuantumBus(tf.keras.layers.Layer):
         # Adjust coherence threshold based on energy
         # High energy -> lower threshold for easier propagation
         energy_adjustment = 0.1 * (mean_energy - 0.5)  # [-0.05, 0.05]
-        adjusted_threshold = max(0.5, min(0.95,
-            self.coherence_threshold - energy_adjustment
-        ))
+        adjusted_threshold = max(0.5, min(0.95, self.coherence_threshold - energy_adjustment))
 
         # Store for use in next propagate_entanglement call
         self._energy_adjusted_threshold = adjusted_threshold

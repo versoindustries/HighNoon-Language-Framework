@@ -82,11 +82,70 @@ def create_scheduler(
     Returns:
         Configured QAHPO scheduler instance
     """
-    from highnoon.services.quantum_hpo_scheduler import QuantumAdaptiveHPOScheduler, QAHPOConfig
+    from highnoon.services.hpo_manager import HPOSearchSpace
+    from highnoon.services.quantum_hpo_scheduler import QAHPOConfig, QuantumAdaptiveHPOScheduler
 
-    # Default search space sampler
-    def default_sampler(trial_id: int) -> dict[str, Any]:
-        return sample_search_space(search_space, trial_id)
+    # Get model_config from sweep config (contains optimizer info for LR clamping)
+    model_config = getattr(config, "model_config", None) or {}
+
+    # Extract user-defined constraints from config
+    param_budget = getattr(config, "param_budget", None) or model_config.get("param_budget")
+    vocab_size = model_config.get("vocab_size")
+    context_window = model_config.get("sequence_length") or model_config.get("context_window")
+
+    # Extract optimizer from model_config to set in search space
+    # This ensures HPOSearchSpace.sample() uses the user-selected optimizer(s)
+    user_optimizer = model_config.get("optimizer")
+    optimizer_list = [user_optimizer] if user_optimizer else None
+
+    # Create HPOSearchSpace with user's budget constraint for proper enforcement
+    # This ensures sampled configs respect param_budget, vocab_size, context_window, and optimizer
+    hpo_search_space = HPOSearchSpace(
+        vocab_size=vocab_size,
+        context_window=context_window,
+        param_budget=param_budget,
+    )
+
+    # Override optimizer list if user specified one
+    if optimizer_list:
+        hpo_search_space.optimizer = optimizer_list
+        logger.info(f"[HPO] Using user-specified optimizer: {optimizer_list}")
+
+    if param_budget:
+        logger.info(
+            f"[HPO] Scheduler using HPOSearchSpace with param_budget={param_budget / 1e6:.0f}M"
+        )
+    if context_window:
+        logger.info(f"[HPO] Scheduler using context_window={context_window}")
+
+    # Budget-aware sampler that uses HPOSearchSpace.sample() for proper constraint enforcement
+    def budget_aware_sampler(trial_id: int) -> dict[str, Any]:
+        # Start with model_config as base (includes optimizer, hidden_dim, dataset info, etc.)
+        base_config = dict(model_config)
+
+        # Preserve critical user-set parameters that should NOT be overwritten by sampling
+        preserved_params = {
+            k: v
+            for k, v in base_config.items()
+            if k in ("optimizer", "hf_dataset_name", "curriculum_id", "sweep_id") and v is not None
+        }
+
+        # Use HPOSearchSpace.sample() which enforces param_budget constraints
+        # This will resample if initial config exceeds budget
+        sampled = hpo_search_space.sample(trial_id)
+
+        # Merge: sampled hyperparams override base config
+        base_config.update(sampled)
+
+        # Restore preserved user-set parameters after sampling (they take priority)
+        base_config.update(preserved_params)
+
+        # Overlay any custom search space params (these take highest priority)
+        if search_space:
+            custom_sampled = sample_search_space(search_space, trial_id)
+            base_config.update(custom_sampled)
+
+        return base_config
 
     max_budget = getattr(config, "max_epochs", 100)
     min_budget = getattr(config, "min_epochs", 10)
@@ -123,165 +182,6 @@ def create_scheduler(
     return QuantumAdaptiveHPOScheduler(
         max_budget=max_budget,
         min_budget=min_budget,
-        search_space_sampler=default_sampler,
+        search_space_sampler=budget_aware_sampler,
         config=qahpo_config,
     )
-
-
-
-
-def _create_random_scheduler(
-    max_budget: int,
-    sampler: Callable[[int], dict[str, Any]],
-) -> HPOSchedulerBase:
-    """Create a simple random sampling scheduler.
-
-    Args:
-        max_budget: Maximum epochs per trial
-        sampler: Hyperparameter sampling function
-
-    Returns:
-        Random scheduler instance
-    """
-    from highnoon.services.hpo_schedulers import HPOSchedulerBase, TrialConfig, TrialResult
-
-    class RandomScheduler(HPOSchedulerBase):
-        """Simple random sampling scheduler."""
-
-        def __init__(
-            self,
-            max_budget: int,
-            search_space_sampler: Callable[[int], dict[str, Any]],
-        ):
-            super().__init__(
-                max_budget=max_budget,
-                min_budget=1,
-                search_space_sampler=search_space_sampler,
-            )
-            self._trial_counter = 0
-
-        def get_trial_budget(self, trial_id: str) -> int:
-            """Return max budget for all trials."""
-            return self.max_budget
-
-        def should_stop_trial(self, trial_id: str, current_loss: float) -> bool:
-            """Never stop early for random scheduler."""
-            return False
-
-        def report_intermediate(self, result: TrialResult) -> None:
-            """Record intermediate result (no-op for random)."""
-            if result.trial_id not in self.results:
-                self.results[result.trial_id] = []
-            self.results[result.trial_id].append(result)
-
-        def get_next_trials(self, n_trials: int) -> list[TrialConfig]:
-            """Generate random trial configurations."""
-            configs = []
-            for _ in range(n_trials):
-                trial_id = f"trial_{self._trial_counter}"
-                hyperparams = self.search_space_sampler(self._trial_counter)
-                configs.append(
-                    TrialConfig(
-                        trial_id=trial_id,
-                        hyperparams=hyperparams,
-                        budget=self.max_budget,
-                    )
-                )
-                self._trial_counter += 1
-            return configs
-
-    logger.info(f"[HPO] Creating Random scheduler (max_budget={max_budget})")
-    return RandomScheduler(max_budget=max_budget, search_space_sampler=sampler)
-
-
-def _create_optuna_scheduler(
-    config: Any,
-    search_space: dict[str, Any] | None,
-    default_sampler: Callable[[int], dict[str, Any]],
-) -> HPOSchedulerBase:
-    """Create Optuna-based Bayesian scheduler.
-
-    Args:
-        config: SweepConfig instance
-        search_space: Custom search space
-        default_sampler: Fallback sampler function
-
-    Returns:
-        Optuna-integrated scheduler
-    """
-    from highnoon.services.hpo_optuna_sampler import OptunaHPOSampler
-    from highnoon.services.hpo_schedulers import HPOSchedulerBase, TrialConfig
-
-    # Get parameters from config
-    sweep_id = getattr(config, "sweep_id", "hpo_sweep")
-    vocab_size = (
-        config.model_config.get("vocab_size", 32000) if hasattr(config, "model_config") else 32000
-    )
-    param_budget = getattr(config, "param_budget", None)
-
-    # Create Optuna sampler
-    optuna_sampler = OptunaHPOSampler(
-        search_space=search_space,
-        sampler_type="tpe",
-        param_budget=param_budget,
-        vocab_size=vocab_size,
-        study_name=f"hpo_{sweep_id}",
-    )
-
-    class OptunaBayesianScheduler(HPOSchedulerBase):
-        """Optuna-powered Bayesian optimization scheduler."""
-
-        def __init__(
-            self,
-            optuna_sampler: OptunaHPOSampler,
-            max_budget: int,
-        ):
-            super().__init__(max_budget=max_budget)
-            self.optuna_sampler = optuna_sampler
-            self._trial_counter = 0
-
-        def get_trial_budget(self, trial_id: str) -> int:
-            """Return max budget for all trials."""
-            return self.max_budget
-
-        def should_stop_trial(self, trial_id: str, current_loss: float) -> bool:
-            """Check if Optuna recommends pruning."""
-            try:
-                trial_num = int(trial_id.split("_")[-1])
-                return self.optuna_sampler.report(trial_num, 0, current_loss)
-            except (ValueError, AttributeError):
-                return False
-
-        def get_next_trials(self, n_trials: int) -> list[TrialConfig]:
-            """Generate trials using Optuna TPE sampling."""
-            configs = []
-            for _ in range(n_trials):
-                # Sample from Optuna
-                hyperparams = self.optuna_sampler.sample(self._trial_counter)
-                trial_id = f"trial_{self._trial_counter}"
-                configs.append(
-                    TrialConfig(
-                        trial_id=trial_id,
-                        hyperparams=hyperparams,
-                        budget=self.max_budget,
-                    )
-                )
-                self._trial_counter += 1
-            return configs
-
-        def report_intermediate(self, result: Any) -> None:
-            """Report result to Optuna for adaptive sampling."""
-            if result.trial_id not in self.results:
-                self.results[result.trial_id] = []
-            self.results[result.trial_id].append(result)
-            try:
-                trial_num = int(result.trial_id.split("_")[-1])
-                if result.is_complete:
-                    self.optuna_sampler.complete(trial_num, result.loss, {})
-                else:
-                    self.optuna_sampler.report(trial_num, result.step, result.loss)
-            except (ValueError, AttributeError):
-                pass
-
-    max_budget = getattr(config, "max_epochs", 100)
-    return OptunaBayesianScheduler(optuna_sampler, max_budget)

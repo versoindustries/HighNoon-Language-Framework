@@ -103,8 +103,7 @@ def hopfield_memory_retrieve(
     """
     if not _hopfield_ops_available:
         raise RuntimeError(
-            "Hopfield memory ops not available. "
-            "Rebuild with build_secure.sh --lite --debug"
+            "Hopfield memory ops not available. " "Rebuild with build_secure.sh --lite --debug"
         )
     return _hopfield_memory_retrieve(queries, patterns, beta=beta)
 

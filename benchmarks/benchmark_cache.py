@@ -356,7 +356,7 @@ class PerfRunner:
         # Create temporary file with the code
         with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
             # Wrap code with timing
-            wrapped_code = f'''
+            wrapped_code = f"""
 import time
 import json
 
@@ -368,7 +368,7 @@ for _ in range({iterations}):
     times.append((end - start) * 1000)
 
 print("TIMES:" + json.dumps(times))
-'''
+"""
             f.write(wrapped_code)
             f.flush()
             temp_path = f.name
@@ -450,7 +450,9 @@ print("TIMES:" + json.dumps(times))
                 continue
 
             try:
-                value_str = parts[0].strip().replace("<not counted>", "0").replace("<not supported>", "0")
+                value_str = (
+                    parts[0].strip().replace("<not counted>", "0").replace("<not supported>", "0")
+                )
                 if not value_str:
                     continue
                 value = int(value_str)
@@ -505,7 +507,7 @@ class KernelBenchmarks:
 
         Tests expert routing and dispatch cache patterns.
         """
-        return f'''
+        return f"""
 import tensorflow as tf
 import numpy as np
 
@@ -533,14 +535,14 @@ for e in range(num_experts):
     expert_mask = dispatch_mask[:, :, e:e+1]
     expert_input = hidden * expert_mask
     _ = tf.matmul(expert_input, tf.random.normal([hidden_dim, hidden_dim * 4]))
-'''
+"""
 
     def _generate_ssm_benchmark_code(self, size: int, batch: int) -> str:
         """Generate SSM state update benchmark code.
 
         Tests sequential state update cache patterns.
         """
-        return f'''
+        return f"""
 import tensorflow as tf
 import numpy as np
 
@@ -570,14 +572,14 @@ for t in range({size}):
     outputs.append(y)
 
 output = tf.stack(outputs, axis=1)
-'''
+"""
 
     def _generate_galore_benchmark_code(self, size: int, batch: int) -> str:
         """Generate Quantum GaLore projection benchmark code.
 
         Tests random projection matrix cache patterns.
         """
-        return f'''
+        return f"""
 import tensorflow as tf
 import numpy as np
 
@@ -603,14 +605,14 @@ for b in range({batch}):
     projected.append(features)
 
 output = tf.stack(projected, axis=0)
-'''
+"""
 
     def _generate_attention_benchmark_code(self, size: int, batch: int) -> str:
         """Generate attention benchmark code.
 
         Tests QK^T and attention weight cache patterns.
         """
-        return f'''
+        return f"""
 import tensorflow as tf
 import numpy as np
 
@@ -650,14 +652,14 @@ scores = scores * mask - 1e9 * (1 - mask)
 # Softmax and output
 attn_weights = tf.nn.softmax(scores, axis=-1)
 output = tf.matmul(attn_weights, V)
-'''
+"""
 
     def _generate_embedding_benchmark_code(self, size: int, batch: int) -> str:
         """Generate embedding lookup benchmark code.
 
         Tests scattered memory access patterns.
         """
-        return f'''
+        return f"""
 import tensorflow as tf
 import numpy as np
 
@@ -680,7 +682,7 @@ pos_table = tf.random.normal([{size * 4}, embedding_dim])  # Larger for random a
 pos_embeddings = tf.nn.embedding_lookup(pos_table, positions)
 
 output = embeddings + pos_embeddings
-'''
+"""
 
     def run_kernel_benchmark(
         self,
@@ -818,9 +820,7 @@ class CacheBenchmark:
 
         return result
 
-    def _generate_recommendations(
-        self, kernel_results: list[dict[str, Any]]
-    ) -> list[str]:
+    def _generate_recommendations(self, kernel_results: list[dict[str, Any]]) -> list[str]:
         """Generate optimization recommendations based on results.
 
         Args:
@@ -1062,7 +1062,7 @@ def main() -> int:
 
     config = CacheBenchmarkConfig.from_cli(args)
 
-    print(f"🔬 HSMN Cache Benchmark")
+    print("🔬 HSMN Cache Benchmark")
     print(f"   Operations: {config.ops}")
     print(f"   Sizes: {config.sizes}")
     print(f"   Perf enabled: {config.use_perf}")

@@ -33,8 +33,8 @@ import logging
 
 import tensorflow as tf
 
-from highnoon._native.ops.lib_loader import resolve_op_library
 from highnoon import config
+from highnoon._native.ops.lib_loader import resolve_op_library
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +47,7 @@ def _load_ops():
     global _module, _available
     if _module is not None:
         return _available
-        
+
     try:
         lib_path = resolve_op_library(__file__, "_highnoon_core.so")
         if lib_path is None:
@@ -59,8 +59,7 @@ def _load_ops():
         _available = False
         logger.warning(f"Failed to load intrinsic plasticity ops: {e}")
         raise RuntimeError(
-            "Intrinsic plasticity native ops not available. "
-            "Run ./build_secure.sh to compile."
+            "Intrinsic plasticity native ops not available. " "Run ./build_secure.sh to compile."
         ) from e
     return _available
 
@@ -130,7 +129,7 @@ def enforce_unitary_constraint(
     """
     if not config.USE_INTRINSIC_PLASTICITY:
         return weights
-    
+
     _load_ops()
     return _module.enforce_unitary_constraint(weights)
 

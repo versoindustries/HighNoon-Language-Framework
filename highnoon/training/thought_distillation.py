@@ -46,11 +46,7 @@ from typing import Any
 import tensorflow as tf
 from tensorflow.keras import layers
 
-from highnoon.config import (
-    COCONUT_CRYSTALLIZE_THRESHOLD,
-    COCONUT_NUM_PATHS,
-    USE_CONTINUOUS_THOUGHT,
-)
+from highnoon.config import COCONUT_CRYSTALLIZE_THRESHOLD, COCONUT_NUM_PATHS, USE_CONTINUOUS_THOUGHT
 
 logger = logging.getLogger(__name__)
 
@@ -276,8 +272,10 @@ class ThoughtDistillationLoss(tf.keras.losses.Loss):
         student_soft = tf.nn.log_softmax(student_logits / self.temperature, axis=-1)
 
         # KL divergence: D_KL(teacher || student)
-        kl_loss = tf.reduce_sum(teacher_soft * (tf.math.log(teacher_soft + 1e-8) - student_soft), axis=-1)
-        kl_loss = tf.reduce_mean(kl_loss) * (self.temperature ** 2)
+        kl_loss = tf.reduce_sum(
+            teacher_soft * (tf.math.log(teacher_soft + 1e-8) - student_soft), axis=-1
+        )
+        kl_loss = tf.reduce_mean(kl_loss) * (self.temperature**2)
 
         total_loss = kl_loss
 
@@ -398,7 +396,7 @@ class ThoughtDistillationCallback(tf.keras.callbacks.Callback):
         # Log periodically
         if self._current_step % self.log_frequency == 0:
             avg_distill = (
-                sum(self._distillation_losses[-self.log_frequency:])
+                sum(self._distillation_losses[-self.log_frequency :])
                 / min(len(self._distillation_losses), self.log_frequency)
                 if self._distillation_losses
                 else 0.0

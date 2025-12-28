@@ -210,9 +210,7 @@ class BarrenPlateauMonitor:
 
         # Validate arguments
         if (gradients is None) != (variables is None):
-            raise ValueError(
-                "Both gradients and variables must be provided together, or neither."
-            )
+            raise ValueError("Both gradients and variables must be provided together, or neither.")
 
         self._step_counter += 1
 
@@ -286,7 +284,9 @@ class BarrenPlateauMonitor:
 
                 # Check for new barren plateau detection in this layer
                 if layer_ema_norm < self.threshold:
-                    self._detection_counts[layer_name] = self._detection_counts.get(layer_name, 0) + 1
+                    self._detection_counts[layer_name] = (
+                        self._detection_counts.get(layer_name, 0) + 1
+                    )
 
                     # Require consecutive detections to reduce false positives
                     if self._detection_counts[layer_name] >= 3:
@@ -382,9 +382,9 @@ class BarrenPlateauMonitor:
 
         # Aggregate norms per layer (RMS of individual norms)
         import numpy as np
+
         return {
-            layer: np.sqrt(np.mean([n**2 for n in norms]))
-            for layer, norms in layer_norms.items()
+            layer: np.sqrt(np.mean([n**2 for n in norms])) for layer, norms in layer_norms.items()
         }
 
     def get_active_mitigations(self) -> dict[str, LayerMitigation]:

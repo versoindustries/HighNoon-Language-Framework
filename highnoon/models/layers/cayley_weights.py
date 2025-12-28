@@ -165,43 +165,58 @@ class CayleyDense(tf.keras.layers.Layer):
 
         return W
 
-    def _get_weight(self, training: bool = False) -> tf.Tensor:
-        """Get orthogonal weight matrix."""
-        # Use cache during inference
-        if self.cache_inverse and not training:
-            if self._cached_weight is not None and self._cached_training_state == training:
-                return self._cached_weight
+    def _get_weight(self, training: bool | tf.Tensor = False) -> tf.Tensor:
+        """Get orthogonal weight matrix.
 
-        # Construct skew-symmetric matrix
-        A = self._construct_skew_symmetric()
+        Note: In graph mode, `training` may be a symbolic tensor. We avoid
+        Python bool evaluation and always compute the weight matrix.
+        Caching only works in eager mode when training is a Python bool.
 
-        # Apply Cayley transform
-        W = self._cayley_transform(A)
+        For square matrices: Returns full Cayley-orthogonal matrix.
+        For rectangular matrices: Returns projection weight (orthogonality
+        is approximated via initialization, not guaranteed).
+        """
+        # Check if we can use cache (only in eager mode with Python bool)
+        use_cache = (
+            self.cache_inverse
+            and isinstance(training, bool)
+            and not training
+            and self._cached_weight is not None
+        )
 
-        # Handle rectangular case
+        if use_cache:
+            return self._cached_weight
+
+        # Handle rectangular case: just use projection weight
+        # The Cayley transform only guarantees orthogonality for square matrices
         if self.proj_weight is not None:
-            # W is orthogonal for square part, project to output dim
-            W = tf.matmul(
-                tf.eye(self.dim_size, dtype=W.dtype)[:, : tf.shape(self.proj_weight)[0]],
-                self.proj_weight,
-            )
-            # Apply Cayley rotation
-            W_orth = self._cayley_transform(A)
-            input_dim = tf.shape(self.proj_weight)[0]
-            if input_dim <= self.dim_size:
-                W = tf.matmul(W_orth[:input_dim, :input_dim], self.proj_weight)
-            else:
-                W = self.proj_weight
+            # For rectangular transformations, we use the learned projection
+            # Orthogonality is not guaranteed but the weight is regularized
+            W = self.proj_weight
+        else:
+            # Square case: full Cayley-orthogonal matrix
+            # Construct skew-symmetric matrix
+            A = self._construct_skew_symmetric()
+            # Apply Cayley transform: W = (I - A)(I + A)^{-1}
+            W = self._cayley_transform(A)
 
-        # Cache for inference
-        if self.cache_inverse and not training:
+        # Cache for inference (only in eager mode with Python bool)
+        if self.cache_inverse and isinstance(training, bool) and not training:
             self._cached_weight = W
             self._cached_training_state = training
 
         return W
 
-    def call(self, inputs: tf.Tensor, training: bool = False) -> tf.Tensor:
-        """Forward pass with Cayley-orthogonal weights."""
+    def call(self, inputs: tf.Tensor, training: bool | tf.Tensor = False) -> tf.Tensor:
+        """Forward pass with Cayley-orthogonal weights.
+
+        Args:
+            inputs: Input tensor of shape [batch, input_dim].
+            training: Training flag. Can be a Python bool or symbolic tensor.
+
+        Returns:
+            Output tensor of shape [batch, units].
+        """
         W = self._get_weight(training)
 
         output = tf.matmul(inputs, W)

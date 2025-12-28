@@ -11,8 +11,9 @@ import logging
 from typing import Tuple
 
 import tensorflow as tf
-from highnoon._native.ops.lib_loader import resolve_op_library
+
 from highnoon import config
+from highnoon._native.ops.lib_loader import resolve_op_library
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +77,7 @@ def spiking_quantum_neuron(
     membrane_potential: tf.Tensor,
     threshold: float = 1.0,
     tau: float | None = None,
-) -> Tuple[tf.Tensor, tf.Tensor]:
+) -> tuple[tf.Tensor, tf.Tensor]:
     """Phase 68: Spiking quantum neuron with leaky integrate-and-fire.
 
     Args:
@@ -251,7 +252,7 @@ def spini_optimizer(
     gradients: tf.Tensor,
     velocity: tf.Tensor,
     friction: float | None = None,
-) -> Tuple[tf.Tensor, tf.Tensor]:
+) -> tuple[tf.Tensor, tf.Tensor]:
     """Phase 78: SPINI symplectic integrator optimizer.
 
     Args:
@@ -295,9 +296,7 @@ def multi_stage_hamiltonian(
         return state
     _load_ops()
     num_stages = num_stages or config.HAMILTONIAN_NUM_STAGES
-    return _module.multi_stage_hamiltonian(
-        state, hamiltonian_params, num_stages=num_stages
-    )
+    return _module.multi_stage_hamiltonian(state, hamiltonian_params, num_stages=num_stages)
 
 
 # =============================================================================

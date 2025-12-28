@@ -147,17 +147,50 @@ class SuperwordMerger:
             self.config.max_ngram_size,
         )
 
-        # Count n-gram frequencies
+        # Count n-gram frequencies using batch processing for interrupt safety.
+        # By collecting n-grams in batches before updating the Counter,
+        # we reduce the time spent in C extension code and create safe
+        # interrupt points between batches.
         ngram_counts: Counter[tuple[int, ...]] = Counter()
+        batch_size = 100  # Process sequences in batches for interrupt safety
+        interrupted = False
 
-        for seq_idx, sequence in enumerate(token_sequences):
-            if progress_callback and seq_idx % 1000 == 0:
-                progress_callback(seq_idx, len(token_sequences))
+        total_sequences = len(token_sequences)
+        for batch_start in range(0, total_sequences, batch_size):
+            # Check for interrupts at batch boundaries (safe point)
+            try:
+                # Collect n-grams for this batch
+                batch_ngrams: list[tuple[int, ...]] = []
+                batch_end = min(batch_start + batch_size, total_sequences)
 
-            seq_list = list(sequence)
-            for n in range(self.config.min_ngram_size, self.config.max_ngram_size + 1):
-                for ngram in self._extract_ngrams(seq_list, n):
-                    ngram_counts[ngram] += 1
+                for seq_idx in range(batch_start, batch_end):
+                    sequence = token_sequences[seq_idx]
+                    seq_list = list(sequence)
+                    for n in range(self.config.min_ngram_size, self.config.max_ngram_size + 1):
+                        batch_ngrams.extend(self._extract_ngrams(seq_list, n))
+
+                # Batch update the counter (single C extension call)
+                ngram_counts.update(batch_ngrams)
+
+                # Progress callback at batch boundaries
+                if progress_callback and batch_start % 1000 == 0:
+                    progress_callback(batch_start, total_sequences)
+
+            except KeyboardInterrupt:
+                logger.warning(
+                    "SuperwordMerger training interrupted at sequence %d/%d. "
+                    "Using partial n-gram counts.",
+                    batch_start,
+                    total_sequences,
+                )
+                interrupted = True
+                break
+
+        if interrupted:
+            logger.info(
+                "Continuing with %d n-grams collected before interrupt",
+                len(ngram_counts),
+            )
 
         # Filter by minimum frequency and sort by frequency
         qualified = [
@@ -183,8 +216,10 @@ class SuperwordMerger:
             self._superword_table[ngram] = entry
             self._id_to_entry[superword_id] = entry
 
+        status = "interrupted" if interrupted else "complete"
         logger.info(
-            "SuperwordMerger training complete: %d superwords learned",
+            "SuperwordMerger training %s: %d superwords learned",
+            status,
             len(self._superword_table),
         )
         return len(self._superword_table)

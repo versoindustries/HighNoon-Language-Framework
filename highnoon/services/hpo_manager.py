@@ -108,11 +108,13 @@ def estimate_model_params(config: dict[str, Any]) -> int:
         >>> params = estimate_model_params(config)
         >>> print(f"{params / 1e6:.1f}M parameters")
     """
-    vocab_size = config.get("vocab_size", 32000)
-    embedding_dim = config.get("embedding_dim", config.get("hidden_dim", 512))
-    num_blocks = config.get("num_reasoning_blocks", 8)
-    num_experts = config.get("num_moe_experts", 8)
-    mamba_state = config.get("mamba_state_dim", 64)
+    # Use larger default for more conservative estimation
+    # Real tokenizers often learn 50K-128K vocabulary from curricula
+    vocab_size = config.get("vocab_size") or 65536
+    embedding_dim = config.get("embedding_dim") or config.get("hidden_dim") or 512
+    num_blocks = config.get("num_reasoning_blocks") or 8
+    num_experts = config.get("num_moe_experts") or 8
+    mamba_state = config.get("mamba_state_dim") or 64
 
     # Embedding: vocab × embedding_dim
     embed_params = vocab_size * embedding_dim

@@ -368,13 +368,22 @@ class QuantumAdaptiveHPOScheduler(HPOSchedulerBase):
         Uses quantum superposition-inspired sampling where each
         configuration starts with equal amplitude. Learning rate is
         clamped to optimizer-specific bounds after sampling.
+
+        Budget-aware: Uses spread trial IDs (0, 5, 10, 15...) to ensure
+        HPOSearchSpace.sample() produces a range of config sizes from
+        the progressive budget logic (10-70% of param_budget).
         """
         logger.info("[QAHPO] Initializing population of %d configs", self.config.population_size)
 
         self.population = []
         for i in range(self.config.population_size):
             if self.search_space_sampler:
-                config = self.search_space_sampler(i)
+                # Use spread trial IDs to get budget-aware configs
+                # Early IDs (0-7 at step 5 = 0,5,10,15,20,25,30,35) → diverse budget targets
+                # This ensures population has a mix of small and medium configs
+                trial_id = i * 5  # Spread across progressive budget tiers
+                config = self.search_space_sampler(trial_id)
+                logger.debug(f"[QAHPO] Population[{i}] sampled with trial_id={trial_id}")
             else:
                 config = {}
 
@@ -590,6 +599,16 @@ class QuantumAdaptiveHPOScheduler(HPOSchedulerBase):
 
         return mutated
 
+    def get_reduction_guidance(self) -> dict[str, float]:
+        """Get guidance on which parameters to reduce based on fANOVA importance.
+
+        Returns:
+            Dictionary mapping parameter names to importance scores.
+        """
+        if self._fanova and self._importance_scores:
+            return self._importance_scores
+        return {}
+
     def _de_rand_1_mutation(self, config: dict[str, Any]) -> dict[str, Any]:
         """DE/rand/1/bin mutation operator.
 
@@ -802,7 +821,6 @@ class QuantumAdaptiveHPOScheduler(HPOSchedulerBase):
             return
 
         logger.info("[QAHPO] Evolving population (generation %d)", self.generation)
-        temperature = self._get_temperature()
 
         # Sort by amplitude (which reflects performance)
         self.population.sort(key=lambda s: s.amplitude, reverse=True)
@@ -1027,6 +1045,75 @@ class QuantumAdaptiveHPOScheduler(HPOSchedulerBase):
         # Evolve population periodically
         if self.total_trials % self.config.population_size == 0:
             self._evolve_population()
+
+    def report_budget_violation(
+        self,
+        config: dict[str, Any],
+        estimated_params: int,
+    ) -> None:
+        """Report that a config exceeded param_budget for c-TPE learning.
+
+        This enables the constrained acquisition function to learn from
+        real budget violations, not just estimates at selection time.
+        Also penalizes matching configs in the population by reducing
+        their amplitude.
+
+        Args:
+            config: The hyperparameter configuration that violated budget.
+            estimated_params: Actual parameter count that exceeded budget.
+        """
+        if self._constrained_acq is not None and self.config.param_budget is not None:
+            violated = estimated_params > self.config.param_budget
+            self._constrained_acq.record_constraint_violation(
+                config,
+                estimated_params,
+                violated=violated,
+            )
+            logger.info(
+                f"[QAHPO] Recorded budget violation: {estimated_params / 1e6:.1f}M > "
+                f"{self.config.param_budget / 1e6:.1f}M"
+            )
+        elif self.config.param_budget is not None:
+            logger.warning(
+                f"[QAHPO] Budget violation not recorded (c-TPE not enabled): "
+                f"{estimated_params / 1e6:.1f}M > {self.config.param_budget / 1e6:.1f}M"
+            )
+
+        # Reduce amplitude for oversized configs in population to avoid re-selection
+        for state in self.population:
+            if self._configs_similar(state.config, config):
+                old_amplitude = state.amplitude
+                state.amplitude *= 0.3  # Heavy penalty for budget violation
+                logger.debug(
+                    f"[QAHPO] Reduced amplitude for oversized config: "
+                    f"{old_amplitude:.3f} → {state.amplitude:.3f}"
+                )
+                break
+
+    def _configs_similar(self, config1: dict[str, Any], config2: dict[str, Any]) -> bool:
+        """Check if two configs are similar in architecture parameters.
+
+        Compares key architecture parameters that affect model size.
+
+        Args:
+            config1: First configuration.
+            config2: Second configuration.
+
+        Returns:
+            True if architectures are similar.
+        """
+        arch_keys = [
+            "num_reasoning_blocks",
+            "num_moe_experts",
+            "hidden_dim",
+            "embedding_dim",
+        ]
+        for key in arch_keys:
+            v1 = config1.get(key)
+            v2 = config2.get(key)
+            if v1 is not None and v2 is not None and v1 != v2:
+                return False
+        return True
 
     def _refit_fanova(self) -> None:
         """Refit fANOVA importance analyzer on completed trials.

@@ -1609,14 +1609,19 @@ def main():
         # NaN is used as a sentinel for budget-exceeded trials
         # Inf is used as a sentinel for failed training
         # Both are invalid JSON and must be converted to None
-        status = {
-            "trial_id": args.trial_id,
-            "loss": best_loss if math.isfinite(best_loss) else None,
-            "epochs_completed": args.epochs,
-            "status": "completed",
-        }
-        with open(status_file, "w") as f:
-            json.dump(status, f, indent=2)
+        if math.isfinite(best_loss):
+            status = {
+                "trial_id": args.trial_id,
+                "loss": best_loss,
+                "epochs_completed": args.epochs,
+                "status": "completed",
+            }
+            with open(status_file, "w") as f:
+                json.dump(status, f, indent=2)
+        else:
+            logger.info(
+                f"[HPO] Trial {args.trial_id} finished with non-finite loss {best_loss}, status.json preserved"
+            )
 
         sys.exit(0)
 

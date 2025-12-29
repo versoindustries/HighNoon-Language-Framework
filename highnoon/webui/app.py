@@ -2526,20 +2526,100 @@ def create_app(debug: bool = False) -> FastAPI:
             "hf_dataset_name": hf_dataset_name,
             "curriculum_id": payload.curriculum_id,
             "curriculum_datasets": curriculum_datasets,
-            # Quantum Enhancement Parameters
+            # =====================================================================
+            # Quantum Enhancement Parameters (Phases 26-36)
+            # =====================================================================
             "use_quantum_embedding": payload.use_quantum_embedding,
+            "quantum_embedding_num_qubits": payload.quantum_embedding_num_qubits,
             "use_floquet_position": payload.use_floquet_position,
+            "floquet_num_layers": payload.floquet_num_layers,
             "use_quantum_feature_maps": payload.use_quantum_feature_maps,
+            "quantum_feature_rotation_depth": payload.quantum_feature_rotation_depth,
             "use_unitary_expert": payload.use_unitary_expert,
             "neumann_cayley_terms": payload.neumann_cayley_terms,
             "use_quantum_norm": payload.use_quantum_norm,
             "use_superposition_bpe": payload.use_superposition_bpe,
+            "sbpe_max_superposition": payload.sbpe_max_superposition,
             "use_grover_qsg": payload.use_grover_qsg,
             "qsg_quality_threshold": payload.qsg_quality_threshold,
             "use_quantum_lm_head": payload.use_quantum_lm_head,
+            "quantum_lm_head_layers": payload.quantum_lm_head_layers,
             "use_unitary_residual": payload.use_unitary_residual,
             "unitary_residual_init_angle": payload.unitary_residual_init_angle,
             "use_quantum_state_bus": payload.use_quantum_state_bus,
+            # =====================================================================
+            # Quantum Training Loop Optimization (Phases T1-T6)
+            # =====================================================================
+            "use_quantum_natural_gradient": payload.use_quantum_natural_gradient,
+            "qng_damping": payload.qng_damping,
+            "use_tensor_galore": payload.use_tensor_galore,
+            "galore_rank": payload.galore_rank,
+            "barren_plateau_monitor": payload.barren_plateau_monitor,
+            "barren_plateau_threshold": payload.barren_plateau_threshold,
+            # =====================================================================
+            # Quantum Constant-Memory Training (Phases 1-7)
+            # =====================================================================
+            "use_unitary_mamba_gates": payload.use_unitary_mamba_gates,
+            "neumann_series_terms": payload.neumann_series_terms,
+            "use_sprk_timecrystal": payload.use_sprk_timecrystal,
+            "sprk_order": payload.sprk_order,
+            "use_qng_geodesic": payload.use_qng_geodesic,
+            "qng_geodesic_order": payload.qng_geodesic_order,
+            "entanglement_regularization": payload.entanglement_regularization,
+            # =====================================================================
+            # Phase 17: Hamiltonian Enhancements
+            # =====================================================================
+            "hamiltonian_basis_size": payload.hamiltonian_basis_size,
+            "hamiltonian_enable_superposition": payload.hamiltonian_enable_superposition,
+            "hamiltonian_integrator": payload.hamiltonian_integrator,
+            "hamiltonian_enable_nqs": payload.hamiltonian_enable_nqs,
+            "hamiltonian_nqs_hidden_dim": payload.hamiltonian_nqs_hidden_dim,
+            # =====================================================================
+            # Quantum Superposition Generation (QSG) Parameters
+            # =====================================================================
+            "qsg_bond_dim": payload.qsg_bond_dim,
+            "qsg_grover_iterations": payload.qsg_grover_iterations,
+            "qsg_jacobi_iterations": payload.qsg_jacobi_iterations,
+            "qsg_hopfield_beta": payload.qsg_hopfield_beta,
+            # =====================================================================
+            # Quantum Control Parameters (Phase 2.1)
+            # =====================================================================
+            "use_rls_sysid": payload.use_rls_sysid,
+            "rls_forgetting_factor": payload.rls_forgetting_factor,
+            "use_hybrid_pid": payload.use_hybrid_pid,
+            "pid_learning_rate": payload.pid_learning_rate,
+            "use_tensor_network_kalman": payload.use_tensor_network_kalman,
+            "tnkf_max_rank": payload.tnkf_max_rank,
+            # =====================================================================
+            # Anti-Forgetting: QHPM Crystallization
+            # =====================================================================
+            "use_qhpm_crystallization": payload.use_qhpm_crystallization,
+            "qhpm_crystallization_threshold": payload.qhpm_crystallization_threshold,
+            "qhpm_max_directions": payload.qhpm_max_directions,
+            "qhpm_crystallization_decay": payload.qhpm_crystallization_decay,
+            # =====================================================================
+            # Quantum Enhancements v5.0 (Phases 47-84)
+            # =====================================================================
+            # Phase 47: Quantum Measurement Dropout
+            "use_quantum_measurement_dropout": payload.use_quantum_measurement_dropout,
+            "qmd_drop_rate": payload.qmd_drop_rate,
+            "qmd_softening_temp": payload.qmd_softening_temp,
+            # Phase 69: Q-SSM Gating
+            "use_q_ssm_gating": payload.use_q_ssm_gating,
+            "q_ssm_vqc_layers": payload.q_ssm_vqc_layers,
+            "q_ssm_num_qubits": payload.q_ssm_num_qubits,
+            # Phase 71: Intrinsic Plasticity
+            "use_intrinsic_plasticity": payload.use_intrinsic_plasticity,
+            "plasticity_learning_rate": payload.plasticity_learning_rate,
+            # Phase 76: Quantum Coherence Bus
+            "use_quantum_coherence_bus": payload.use_quantum_coherence_bus,
+            "qcb_num_nodes": payload.qcb_num_nodes,
+            "qcb_fidelity_threshold": payload.qcb_fidelity_threshold,
+            # =====================================================================
+            # Quantum Tokenization Pipeline (Phase 48)
+            # =====================================================================
+            "use_hyperdimensional_embedding": payload.use_hyperdimensional_embedding,
+            "use_quantum_tokenizer": payload.use_quantum_tokenizer,
         }
 
         # Save config for reference

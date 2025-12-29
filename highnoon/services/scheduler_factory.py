@@ -168,7 +168,7 @@ def create_scheduler(
     else:
         logger.info(f"[HPO] Strategy '{strategy}' → Using Quantum Adaptive HPO (QAHPO)")
 
-    # Configure QAHPO
+    # Configure QAHPO with param_budget for c-TPE constraint enforcement
     qahpo_config = QAHPOConfig(
         population_size=population_size,
         initial_temperature=2.0,
@@ -177,6 +177,7 @@ def create_scheduler(
         mutation_strength=0.3,
         crossover_rate=0.4,
         elite_fraction=0.25,
+        param_budget=param_budget,  # Enable c-TPE constraint enforcement
     )
 
     return QuantumAdaptiveHPOScheduler(

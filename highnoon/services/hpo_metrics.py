@@ -67,6 +67,8 @@ def compute_efficiency_score(
 DEFAULT_ALPHA_LOSS = 0.5  # Training loss weight
 DEFAULT_BETA_PERPLEXITY = 0.3  # Perplexity weight
 DEFAULT_GAMMA_CALIBRATION = 0.2  # Calibration (ECE) weight
+DEFAULT_DELTA_CONFIDENCE = 0.1  # NEW: Confidence weight (higher is better)
+DEFAULT_MU_MEMORY = 0.1  # NEW: Memory efficiency weight (lower is better)
 
 
 def compute_composite_score(
@@ -79,16 +81,19 @@ def compute_composite_score(
     beta_perplexity: float = DEFAULT_BETA_PERPLEXITY,
     gamma_calibration: float = DEFAULT_GAMMA_CALIBRATION,
     lambda_efficiency: float = DEFAULT_LAMBDA_EFFICIENCY,
+    mean_confidence: float | None = None,
+    memory_peak_mb: float | None = None,
+    memory_budget_mb: float = 16000.0,  # 16GB default
 ) -> float:
     """Compute multi-objective composite score for trial ranking.
 
     The composite score combines:
-    1. Training loss (lower is better)
-    2. Perplexity on validation set (lower is better)
+    1. Training loss (lower is better, normalized)
+    2. Perplexity on validation set (lower is better, log-norm)
     3. Calibration quality via ECE (lower is better)
-    4. Efficiency penalty for model size
-
-    Formula: α×loss + β×norm_ppl + γ×ece + efficiency_multiplier
+    4. Prediction confidence (higher is better, inverted for minimization)
+    5. Memory efficiency (lower is better, normalized)
+    6. Efficiency penalty for model size (multiplier)
 
     Args:
         loss: Best training loss achieved
@@ -100,6 +105,9 @@ def compute_composite_score(
         beta_perplexity: Weight for perplexity component
         gamma_calibration: Weight for calibration component
         lambda_efficiency: Weight for efficiency penalty
+        mean_confidence: Mean prediction confidence (0-1, None = skip)
+        memory_peak_mb: Peak memory usage in MB (None = skip)
+        memory_budget_mb: Memory budget in MB for normalization
 
     Returns:
         Composite score (lower is better)
@@ -108,7 +116,9 @@ def compute_composite_score(
         >>> compute_composite_score(0.5, perplexity=50.0, ece=0.05)
         0.4597...
     """
-    score = alpha_loss * loss
+    # Normalize loss to [0, 1] range (assuming loss < 10)
+    loss_norm = min(loss / 10.0, 1.0) if not math.isinf(loss) else 1.0
+    score = alpha_loss * loss_norm
 
     if perplexity is not None:
         # Normalize perplexity (log scale, capped at 1000)
@@ -118,6 +128,15 @@ def compute_composite_score(
     if ece is not None:
         # ECE is already 0-1 scale (0 = perfect calibration)
         score += gamma_calibration * ece
+
+    if mean_confidence is not None:
+        # Confidence: higher is better, so we minimize (1 - conf)
+        score += DEFAULT_DELTA_CONFIDENCE * (1.0 - mean_confidence)
+
+    if memory_peak_mb:
+        # Memory: lower is better, normalize to [0, 1]
+        norm_memory = min(memory_peak_mb / memory_budget_mb, 1.0)
+        score += DEFAULT_MU_MEMORY * norm_memory
 
     # Efficiency penalty as multiplier
     if param_count and param_budget and param_budget > 0:

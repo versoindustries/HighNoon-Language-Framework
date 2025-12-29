@@ -280,6 +280,7 @@ class RetryStrategy:
         config: dict[str, Any],
         failure_type: str,
         retry_count: int,
+        guidance: dict[str, float] | None = None,
     ) -> dict[str, Any]:
         """Modify hyperparameters based on failure type.
 
@@ -287,6 +288,7 @@ class RetryStrategy:
             config: Original hyperparameter configuration
             failure_type: Type of failure (nan_loss, oom, swap_spike, etc.)
             retry_count: Current retry attempt number
+            guidance: Optional fANOVA importance guidance
 
         Returns:
             Modified configuration with adjusted hyperparameters
@@ -332,18 +334,32 @@ class RetryStrategy:
 
         elif failure_type == "budget_exceeded":
             # Model exceeds parameter budget - aggressively reduce architecture
+            # Use exponential decay: 0.4^n gives faster reduction than halving
+            reduction_factor = 0.4**retry_count  # 0.4, 0.16, 0.064...
             logger.warning(
-                f"[HPO] Budget exceeded on retry {retry_count}, reducing architecture size"
+                f"[HPO] Budget exceeded on retry {retry_count}, "
+                f"reducing architecture by factor {reduction_factor:.2f}"
             )
-            # Always halve reasoning blocks and experts
+            # Reduce all architecture parameters aggressively
             if "num_reasoning_blocks" in modified:
-                modified["num_reasoning_blocks"] = max(4, modified["num_reasoning_blocks"] // 2)
+                new_blocks = max(4, int(modified["num_reasoning_blocks"] * reduction_factor))
+                logger.info(f"  blocks: {modified['num_reasoning_blocks']} → {new_blocks}")
+                modified["num_reasoning_blocks"] = new_blocks
             if "num_moe_experts" in modified:
-                modified["num_moe_experts"] = max(4, modified["num_moe_experts"] // 2)
-            # On subsequent retries, also reduce hidden dimension
-            if retry_count > 1 and "hidden_dim" in modified:
-                modified["hidden_dim"] = max(256, int(modified["hidden_dim"] * 0.75))
-                modified["embedding_dim"] = modified["hidden_dim"]
+                new_experts = max(4, int(modified["num_moe_experts"] * reduction_factor))
+                logger.info(f"  experts: {modified['num_moe_experts']} → {new_experts}")
+                modified["num_moe_experts"] = new_experts
+            if "hidden_dim" in modified:
+                # Use guidance to decide how much to reduce
+                dim_reduction = 0.7
+                if guidance and "hidden_dim" in guidance:
+                    # If hidden_dim is very important for performance, reduce less aggressively
+                    dim_reduction = 0.8 if guidance["hidden_dim"] > 0.1 else 0.6
+
+                new_dim = max(256, int(modified["hidden_dim"] * (dim_reduction**retry_count)))
+                logger.info(f"  hidden_dim: {modified['hidden_dim']} → {new_dim}")
+                modified["hidden_dim"] = new_dim
+                modified["embedding_dim"] = new_dim
 
         logger.info(
             f"[HPO] Modified config for retry {retry_count}: "
@@ -374,16 +390,14 @@ class RetryStrategy:
             if "memory" in error_lower:
                 return "memory_critical"
 
-        # Handle None loss (trial crashed before producing a loss)
-        if loss is None:
-            return "crash"
+        # S15: Improved classification for non-finite loss without error message
+        if loss is not None:
+            if math.isnan(loss):
+                return "budget_exceeded" if not error_message else "nan_loss"
+            if math.isinf(loss):
+                return "gradient_explosion"
 
-        if math.isnan(loss):
-            return "nan_loss"
-        if math.isinf(loss):
-            return "gradient_explosion"
-
-        return "unknown"
+        return "unknown" if error_message else "crash"
 
 
 # =============================================================================
@@ -500,6 +514,7 @@ class MultiObjectiveScorer:
             "ece": gamma_calibration,
             "efficiency": lambda_efficiency,
             "memory": mu_memory,
+            "confidence": 0.1,  # NEW: Confidence weight (fixed for now, can be made configurable)
         }
         self.param_budget = param_budget
         self.memory_budget_mb = memory_budget_mb
@@ -534,12 +549,16 @@ class MultiObjectiveScorer:
             else 0.5  # Default if not tracked
         )
 
+        # Confidence: higher is better, so we use (1 - conf) to minimize
+        conf_norm = 1.0 - (result.mean_confidence or 0.5)
+
         return (
             self.weights["loss"] * loss_norm
             + self.weights["perplexity"] * ppl_norm
             + self.weights["ece"] * ece
             + self.weights["efficiency"] * efficiency
             + self.weights["memory"] * memory_norm
+            + self.weights["confidence"] * conf_norm
         )
 
     def update_pareto_frontier(self, result: TrialResult) -> bool:
@@ -866,8 +885,13 @@ class SweepExecutor:
                         old_experts = current_config.get("num_moe_experts")
                         old_dim = current_config.get("hidden_dim")
 
+                        guidance = (
+                            self.scheduler.get_reduction_guidance()
+                            if hasattr(self.scheduler, "get_reduction_guidance")
+                            else None
+                        )
                         current_config = self.retry_strategy.modify_config_for_retry(
-                            current_config, failure_type, retries + 1
+                            current_config, failure_type, retries + 1, guidance=guidance
                         )
                         retries += 1
 
@@ -1156,8 +1180,20 @@ class SweepExecutor:
             if result.error and result.error.startswith("BUDGET_EXCEEDED:"):
                 self._log(
                     "INFO",
-                    f"Trial {result.trial_id} skipped (budget exceeded), requesting replacement trial",
+                    f"Trial {result.trial_id} skipped (budget exceeded), "
+                    f"param_count={result.param_count}, notifying scheduler",
                 )
+                # CRITICAL: Inform scheduler of budget violation so c-TPE can learn
+                # This enables the constrained acquisition to penalize oversized configs
+                if hasattr(self.scheduler, "report_budget_violation"):
+                    try:
+                        self.scheduler.report_budget_violation(
+                            config=result.hyperparams,
+                            estimated_params=result.param_count,
+                        )
+                        self._log("INFO", "Scheduler notified of budget violation")
+                    except Exception as e:
+                        self._log("WARNING", f"Failed to report budget violation: {e}")
                 # Request a replacement trial from the scheduler
                 try:
                     queued = await self._queue_next_trials(1)

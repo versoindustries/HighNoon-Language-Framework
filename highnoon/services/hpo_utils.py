@@ -44,3 +44,32 @@ def convert_numpy_types(obj: Any) -> Any:
         return bool(obj)
     else:
         return obj
+
+
+def snap_to_multiple(val: float | int, multiple: int, min_val: int = 8) -> int:
+    """Snap a value to the nearest multiple of another value.
+
+    Args:
+        val: The value to snap.
+        multiple: The multiple to snap to.
+        min_val: The minimum allowed value (default 8).
+
+    Returns:
+        The snapped integer value.
+    """
+    if val <= min_val:
+        return int(min_val)
+    snapped = round(float(val) / multiple) * multiple
+    return int(max(min_val, snapped))
+
+
+def is_power_of_2(n: int) -> bool:
+    """Check if a number is a power of 2."""
+    return (n > 0) and (n & (n - 1) == 0)
+
+
+def next_power_of_2(n: int) -> int:
+    """Return the next power of 2 for a number."""
+    if n <= 1:
+        return 1
+    return 2 ** (n - 1).bit_length()

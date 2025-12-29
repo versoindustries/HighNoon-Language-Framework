@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any
 
 # Phase 201.6: Sweep compression config
 from highnoon.config import SWEEP_COMPRESS_CHECKPOINTS, SWEEP_MAX_IN_MEMORY_TRIALS
+from highnoon.services.hpo_utils import convert_numpy_types, next_power_of_2, snap_to_multiple
 
 # Note: Using synchronous file I/O for checkpoints (small files)
 
@@ -317,9 +318,10 @@ class RetryStrategy:
                         int(modified["num_moe_experts"] * self.scale_factors["num_moe_experts"]),
                     )
                 if "hidden_dim" in modified:
-                    modified["hidden_dim"] = max(
-                        128,
-                        int(modified["hidden_dim"] * self.scale_factors["hidden_dim"]),
+                    modified["hidden_dim"] = snap_to_multiple(
+                        modified["hidden_dim"] * self.scale_factors["hidden_dim"],
+                        8,
+                        min_val=128,
                     )
 
         elif failure_type == "crash":
@@ -356,10 +358,18 @@ class RetryStrategy:
                     # If hidden_dim is very important for performance, reduce less aggressively
                     dim_reduction = 0.8 if guidance["hidden_dim"] > 0.1 else 0.6
 
-                new_dim = max(256, int(modified["hidden_dim"] * (dim_reduction**retry_count)))
+                new_dim = snap_to_multiple(
+                    modified["hidden_dim"] * (dim_reduction**retry_count), 8, min_val=256
+                )
                 logger.info(f"  hidden_dim: {modified['hidden_dim']} → {new_dim}")
                 modified["hidden_dim"] = new_dim
                 modified["embedding_dim"] = new_dim
+
+            # Ensure any other architectural params remain valid
+            if "latent_kv_dim" in modified:
+                modified["latent_kv_dim"] = snap_to_multiple(modified["latent_kv_dim"], 8)
+            if "num_heads" in modified:
+                modified["num_heads"] = next_power_of_2(modified["num_heads"])
 
         logger.info(
             f"[HPO] Modified config for retry {retry_count}: "

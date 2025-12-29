@@ -69,7 +69,9 @@ from highnoon.services.hpo_manager import (
     OPTIMIZER_LR_RANGES,
     estimate_model_params,
 )
+from highnoon.services.hpo_metrics import HPOMetricsCollector, TrialStatus
 from highnoon.services.hpo_schedulers import HPOSchedulerBase, TrialConfig, TrialResult
+from highnoon.services.hpo_utils import convert_numpy_types, next_power_of_2, snap_to_multiple
 
 # Import new enhancement modules
 try:
@@ -390,6 +392,9 @@ class QuantumAdaptiveHPOScheduler(HPOSchedulerBase):
             # Clamp LR to optimizer-specific bounds after sampling
             config = self._clamp_learning_rate(config)
 
+            # Enforce architecture constraints (multiples of 8, powers of 2)
+            config = self._enforce_architecture_constraints(config)
+
             # Add slight random phase for interference
             phase = random.uniform(0, 2 * math.pi)
 
@@ -522,6 +527,43 @@ class QuantumAdaptiveHPOScheduler(HPOSchedulerBase):
         config["learning_rate"] = clamped_lr
         return config
 
+    def _enforce_architecture_constraints(self, config: dict[str, Any]) -> dict[str, Any]:
+        """Enforce divisibility and power-of-2 constraints on architecture.
+
+        This ensures that embedding_dim % num_heads == 0 and other
+        constraints are met, preventing ValueError in model layers.
+
+        Args:
+            config: Configuration dictionary to validate/adjust.
+
+        Returns:
+            Configuration with snapped architecture parameters.
+        """
+        # 1. Snap embedding and hidden dimensions to multiples of 8
+        for key in ["embedding_dim", "hidden_dim", "compressed_dim", "latent_kv_dim"]:
+            if key in config:
+                config[key] = snap_to_multiple(config[key], 8, min_val=32)
+
+        # 2. Ensure num_heads is a power of 2 (if it's being tuned)
+        for key in ["num_heads", "quantum_gqa_num_heads", "wlam_num_heads"]:
+            if key in config:
+                config[key] = next_power_of_2(config[key])
+
+        # 3. Special case: QuantumGQA requires num_heads % num_kv_heads == 0
+        if "quantum_gqa_num_heads" in config and "num_kv_heads" in config:
+            kv_heads = config["num_kv_heads"]
+            if config["quantum_gqa_num_heads"] % kv_heads != 0:
+                # Snap to next multiple of kv_heads
+                config["quantum_gqa_num_heads"] = snap_to_multiple(
+                    config["quantum_gqa_num_heads"], kv_heads, min_val=kv_heads
+                )
+
+        # 4. HD Superposition/Embedding dimensions usually expect power of 2
+        if "hde_hd_dim" in config:
+            config["hde_hd_dim"] = next_power_of_2(config["hde_hd_dim"])
+
+        return config
+
     def _mutate_config(self, config: dict[str, Any], strength: float) -> dict[str, Any]:
         """Apply mutation to a configuration based on strategy.
 
@@ -549,6 +591,9 @@ class QuantumAdaptiveHPOScheduler(HPOSchedulerBase):
 
         # Clamp learning_rate to optimizer-specific safe bounds
         mutated = self._clamp_learning_rate(mutated)
+
+        # Enforce architecture constraints
+        mutated = self._enforce_architecture_constraints(mutated)
 
         return mutated
 

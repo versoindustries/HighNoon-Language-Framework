@@ -1,0 +1,576 @@
+[
+  {
+    "id": "34980ee1-b05f-48e6-9d3f-becfb9e9a89d",
+    "name": "Verso Baseline Curriculum",
+    "stages": [
+      {
+        "name": "foundation_pretraining",
+        "display_name": "Foundation Pretraining",
+        "module": "language_modeling",
+        "datasets": [
+          {
+            "dataset_id": "HuggingFaceFW/fineweb",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "HuggingFaceFW/fineweb-edu",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "HuggingFaceFW/fineweb-2",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "allenai/dolma",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "cerebras/SlimPajama-627B",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "togethercomputer/RedPajama-Data-V2",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "HuggingFaceTB/cosmopedia",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "EleutherAI/pile",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "tiiuae/falcon-refinedweb",
+            "weight": 1.0
+          }
+        ],
+        "epochs": 1,
+        "learning_rate": "1e-4",
+        "batch_size": 4,
+        "weight": 1.0
+      },
+      {
+        "name": "code_pretraining",
+        "display_name": "Code Pretraining",
+        "module": "code_generation",
+        "datasets": [
+          {
+            "dataset_id": "bigcode/the-stack",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "bigcode/the-stack-v2",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "bigcode/the-stack-dedup",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "bigcode/the-stack-v2-dedup",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "bigcode/starcoderdata",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "codeparrot/github-code",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "nvidia/Nemotron-Pretraining-Code-v2",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "nampdn-ai/tiny-codes",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "code-search-net/code_search_net",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "mikex86/stackoverflow-posts",
+            "weight": 1.0
+          }
+        ],
+        "epochs": 2,
+        "learning_rate": "8e-5",
+        "batch_size": 4,
+        "weight": 0.9
+      },
+      {
+        "name": "code_quality",
+        "display_name": "Code Quality",
+        "module": "code_generation",
+        "datasets": [
+          {
+            "dataset_id": "code-rag-bench/humaneval",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "code-rag-bench/mbpp",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "code-rag-bench/ds1000",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "code-rag-bench/odex",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "TokenBender/code_instructions_122k_alpaca_style",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "jon-tow/starcoderdata-python-edu",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "codefuse-ai/Evol-instruction-66k",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "ise-uiuc/Magicoder-Evol-Instruct-110K",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "rombodawg/LosslessMegaCodeTrainingV3_1.6m_Evol",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "bigcode/bigcodebench",
+            "weight": 1.0
+          }
+        ],
+        "epochs": 2,
+        "learning_rate": "5e-5",
+        "batch_size": 4,
+        "weight": 0.8
+      },
+      {
+        "name": "instruction_tuning",
+        "display_name": "Instruction Tuning",
+        "module": "instruction_tuning",
+        "datasets": [
+          {
+            "dataset_id": "databricks/dolly-15k",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "HuggingFaceH4/no_robots",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "MBZUAI/LaMini-instruction",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "tatsu-lab/alpaca",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "yahma/alpaca-cleaned",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "BAAI/Infinity-Instruct",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "alespalla/chatbot_instruction_prompts",
+            "weight": 1.0
+          }
+        ],
+        "epochs": 2,
+        "learning_rate": "5e-5",
+        "batch_size": 4,
+        "weight": 0.7
+      },
+      {
+        "name": "chat_dialogue",
+        "display_name": "Chat Dialogue",
+        "module": "chat",
+        "datasets": [
+          {
+            "dataset_id": "OpenAssistant/oasst1",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "OpenAssistant/oasst2",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "teknium/OpenHermes-2.5",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "lmsys/lmsys-chat-1m",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "lmsys/chatbot_arena_conversations",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "HuggingFaceH4/ultrachat_200k",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "stingning/ultrachat",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "WizardLMTeam/WizardLM_evol_instruct_V2_196k",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "WizardLMTeam/WizardLM_evol_instruct_70k",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "openchat/openchat_sharegpt4_dataset",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "anon8231489123/ShareGPT_Vicuna_unfiltered",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "berkeley-nest/Nectar",
+            "weight": 1.0
+          }
+        ],
+        "epochs": 2,
+        "learning_rate": "5e-5",
+        "batch_size": 4,
+        "weight": 0.6
+      },
+      {
+        "name": "reasoning_logic",
+        "display_name": "Reasoning Logic",
+        "module": "reasoning",
+        "datasets": [
+          {
+            "dataset_id": "argilla/distilabel-reasoning-prompts",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "nvidia/OpenCodeReasoning",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "nvidia/OpenMathReasoning",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "glaiveai/reasoning-v1-20m",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "allenai/ai2_arc",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "Rowan/hellaswag",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "cais/mmlu",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "TIGER-Lab/MMLU-Pro",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "allenai/winogrande",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "wenhu/LogiCoT",
+            "weight": 1.0
+          }
+        ],
+        "epochs": 3,
+        "learning_rate": "3e-5",
+        "batch_size": 4,
+        "weight": 0.5
+      },
+      {
+        "name": "mathematics",
+        "display_name": "Mathematics",
+        "module": "reasoning",
+        "datasets": [
+          {
+            "dataset_id": "openai/gsm8k",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "meta-math/MetaMathQA",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "nvidia/OpenMathInstruct-2",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "microsoft/orca-math-word-problems-200k",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "qwedsacf/grade-school-math-instructions",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "abacusai/MetaMathFewshot",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "math-ai/StackMathQA",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "zwhe99/DeepMath-103K",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "HuggingFaceTB/finemath",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "camel-ai/math",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "hendrycks/competition_math",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "MathLLMs/MathCodeInstruct",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "AI-MO/NuminaMath-CoT",
+            "weight": 1.0
+          }
+        ],
+        "epochs": 3,
+        "learning_rate": "3e-5",
+        "batch_size": 4,
+        "weight": 0.3999999999999999
+      },
+      {
+        "name": "science_training",
+        "display_name": "Science Training",
+        "module": "reasoning",
+        "datasets": [
+          {
+            "dataset_id": "VDR_Quantum",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "QuantumLLMInstruct",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "camel-ai/physics",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "ajibawa-2023/Physics-QA",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "camel-ai/chemistry",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "camel-ai/biology",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "allenai/sciq",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "allenai/openbookqa",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "allenai/piqa",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "allenai/cosmos_qa",
+            "weight": 1.0
+          }
+        ],
+        "epochs": 2,
+        "learning_rate": "3e-5",
+        "batch_size": 4,
+        "weight": 0.29999999999999993
+      },
+      {
+        "name": "agentic_training",
+        "display_name": "Agentic Training",
+        "module": "tool_calling",
+        "datasets": [
+          {
+            "dataset_id": "Salesforce/xlam-function-calling-60k",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "glaiveai/glaive-function-calling-v2",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "gorilla-llm/gorilla-openfunctions-v1",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "NousResearch/hermes-function-calling-v1",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "Trelis/function_calling_extended",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "Nexusflow/Function_Call_Definitions",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "Nexusflow/VT_MultiAPIs",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "Nexusflow/VirusTotalMultiple",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "nvidia/Nemotron-Agentic-v1",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "open-thoughts/OpenThoughts-Agent-v1-SFT",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "open-thoughts/OpenThoughts-Agent-v1-RL",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "open-r1/codeforces-cots",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "rizerphe/glaive-function-calling-v2-zephyr",
+            "weight": 1.0
+          }
+        ],
+        "epochs": 3,
+        "learning_rate": "2e-5",
+        "batch_size": 4,
+        "weight": 0.19999999999999996
+      },
+      {
+        "name": "knowledge_benchmarks",
+        "display_name": "Knowledge Benchmarks",
+        "module": "instruction_tuning",
+        "datasets": [
+          {
+            "dataset_id": "cais/mmlu",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "TIGER-Lab/MMLU-Pro",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "openai/MMMLU",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "CohereForAI/Global-MMLU",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "allenai/social_i_qa",
+            "weight": 1.0
+          }
+        ],
+        "epochs": 1,
+        "learning_rate": "2e-5",
+        "batch_size": 4,
+        "weight": 0.09999999999999998
+      },
+      {
+        "name": "advanced_code_instruction",
+        "display_name": "Advanced Code Instruction",
+        "module": "instruction_tuning",
+        "datasets": [
+          {
+            "dataset_id": "TokenBender/code_instructions_122k_alpaca_style",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "nvidia/Nemotron-Pretraining-Code-v2",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "MathLLMs/MathCodeInstruct",
+            "weight": 1.0
+          }
+        ],
+        "epochs": 1,
+        "learning_rate": "2e-5",
+        "batch_size": 4,
+        "weight": 0.0
+      },
+      {
+        "name": "alignment",
+        "display_name": "Alignment",
+        "module": "alignment",
+        "datasets": [
+          {
+            "dataset_id": "Anthropic/hh-rlhf",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "Open-Orca/SlimOrca-Dedup",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "HuggingFaceH4/ultrafeedback_binarized",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "allenai/ultrafeedback_binarized_cleaned",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "Skywork/Skywork-Reward-Preference-80K-v0.2",
+            "weight": 1.0
+          },
+          {
+            "dataset_id": "argilla/dpo-mix-7k",
+            "weight": 1.0
+          }
+        ],
+        "epochs": 1,
+        "learning_rate": "1e-5",
+        "batch_size": 4,
+        "weight": -0.10000000000000009
+      }
+    ],
+    "vocab_size": 32000,
+    "context_window": 4096,
+    "created_at": "2025-12-27T07:40:40.583Z",
+    "updated_at": "2025-12-27T07:40:40.595920"
+  }
+]

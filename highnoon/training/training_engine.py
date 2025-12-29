@@ -1419,18 +1419,19 @@ class TrainingEngine:
         """
         if self._smart_tuner is not None:
             # Get status from unified smart tuner
+            # Sanitize values to ensure Pydantic validation passes (no None strings)
+            current_phase = getattr(self._smart_tuner, "current_phase", None) or "unknown"
+            coord_mode = getattr(self.config, "smart_tuner_coordination_mode", None) or "balanced"
             return {
                 "enabled": True,
-                "current_phase": getattr(self._smart_tuner, "current_phase", "unknown"),
-                "exploration_factor": getattr(self._smart_tuner, "exploration_factor", 1.0),
-                "emergency_mode": getattr(self._smart_tuner, "emergency_mode", False),
+                "current_phase": current_phase,
+                "exploration_factor": getattr(self._smart_tuner, "exploration_factor", 1.0) or 1.0,
+                "emergency_mode": bool(getattr(self._smart_tuner, "emergency_mode", False)),
                 "global_step": self._global_step,
-                "coordination_mode": getattr(
-                    self.config, "smart_tuner_coordination_mode", "balanced"
-                ),
-                "lr_controller_stats": self._get_qalrc_stats(),
-                "bp_monitor_stats": self._get_bp_monitor_stats(),
-                "galore_stats": self._get_galore_stats(),
+                "coordination_mode": coord_mode,
+                "lr_controller_stats": self._get_qalrc_stats() or {},
+                "bp_monitor_stats": self._get_bp_monitor_stats() or {},
+                "galore_stats": self._get_galore_stats() or {},
             }
         else:
             # Build status from individual components
@@ -1441,17 +1442,46 @@ class TrainingEngine:
                 "emergency_mode": False,
                 "global_step": self._global_step,
                 "coordination_mode": "none",
-                "lr_controller_stats": self._get_qalrc_stats(),
-                "bp_monitor_stats": self._get_bp_monitor_stats(),
-                "galore_stats": self._get_galore_stats(),
+                "lr_controller_stats": self._get_qalrc_stats() or {},
+                "bp_monitor_stats": self._get_bp_monitor_stats() or {},
+                "galore_stats": self._get_galore_stats() or {},
             }
+
+    def _sanitize_for_json(self, value: Any) -> Any:
+        """Convert TensorFlow/numpy types to JSON-serializable primitives.
+
+        This prevents JSON serialization errors when POSTing to WebUI.
+
+        Args:
+            value: Any value that might be a TensorFlow or numpy type.
+
+        Returns:
+            JSON-serializable primitive (int, float, bool, str, None).
+        """
+        if value is None:
+            return None
+        # Handle TensorFlow tensors
+        if hasattr(value, "numpy"):
+            value = value.numpy()
+        # Handle numpy arrays/scalars
+        if hasattr(value, "item"):
+            value = value.item()
+        # Handle numpy types
+        if hasattr(value, "tolist"):
+            value = value.tolist()
+        # Final type coercion
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value
+        return value
 
     def _get_qalrc_stats(self) -> dict:
         """Get QALRC statistics for WebUI."""
         if self._qalrc is not None:
             return {
-                "current_lr": self._current_lr,
-                "gradient_entropy": (
+                "current_lr": self._sanitize_for_json(self._current_lr),
+                "gradient_entropy": self._sanitize_for_json(
                     self._qalrc.get_gradient_entropy()
                     if hasattr(self._qalrc, "get_gradient_entropy")
                     else 0.0
@@ -1463,9 +1493,9 @@ class TrainingEngine:
         """Get barren plateau monitor statistics for WebUI."""
         if self._barren_detector is not None:
             return {
-                "active": self._barren_plateau_active,
-                "recovery_steps_remaining": self._barren_plateau_recovery_steps,
-                "lr_scale_factor": (
+                "active": bool(self._barren_plateau_active),
+                "recovery_steps_remaining": int(self._barren_plateau_recovery_steps),
+                "lr_scale_factor": self._sanitize_for_json(
                     self._barren_detector.get_lr_scale_factor()
                     if hasattr(self._barren_detector, "get_lr_scale_factor")
                     else 1.0
@@ -1477,8 +1507,10 @@ class TrainingEngine:
         """Get GaLore statistics for WebUI."""
         if self._galore is not None:
             return {
-                "rank": self._galore.rank,
-                "compression_ratio": getattr(self._galore, "last_compression_ratio", 1.0),
+                "rank": self._sanitize_for_json(self._galore.rank),
+                "compression_ratio": self._sanitize_for_json(
+                    getattr(self._galore, "last_compression_ratio", 1.0)
+                ),
             }
         return {}
 
@@ -1515,9 +1547,11 @@ class TrainingEngine:
                 )
                 with urllib.request.urlopen(req, timeout=2) as resp:
                     resp.read()  # Consume response
-            except Exception:
-                # Silently ignore WebUI reporting failures
-                pass
+            except Exception as e:
+                # Log WebUI reporting failures at debug level for troubleshooting
+                logger.debug(
+                    f"[SmartTuner] WebUI status POST failed (sweep_id={self._sweep_id}): {e}"
+                )
 
         # Fire and forget
         thread = threading.Thread(target=post_status, daemon=True)

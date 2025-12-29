@@ -166,6 +166,7 @@ class HolographicCorpus:
         self.bundles: list[np.ndarray] = []
         self.amplitudes: list[float] = []  # Reservoir sampling keys
         self.original_lengths: list[int] = []  # For reconstruction
+        self.target_tokens: list[int] = []  # Last token of each sequence for LM prediction
 
         # Statistics
         self._total_samples_seen = 0
@@ -319,11 +320,16 @@ class HolographicCorpus:
 
         seq_len = len(token_ids)
 
+        # Store last token as target for LM prediction (for cross-entropy loss)
+        # We use the last token of the sequence as the prediction target
+        target_token = int(token_ids[-1]) if len(token_ids) > 0 else 0
+
         if len(self.bundles) < self.config.reservoir_size:
             # Reservoir not full yet - add sample
             self.bundles.append(bundle)
             self.amplitudes.append(key)
             self.original_lengths.append(seq_len)
+            self.target_tokens.append(target_token)
             self._samples_accepted += 1
             return True
         else:
@@ -333,6 +339,7 @@ class HolographicCorpus:
                 self.bundles[min_idx] = bundle
                 self.amplitudes[min_idx] = key
                 self.original_lengths[min_idx] = seq_len
+                self.target_tokens[min_idx] = target_token
                 self._samples_replaced += 1
                 return True
 
@@ -347,7 +354,10 @@ class HolographicCorpus:
         """Create TensorFlow dataset from compressed bundles.
 
         The dataset yields (inputs, labels) pairs for language modeling.
-        Bundles are used directly as "soft" token representations.
+        - inputs: HD bundles (float32) - compressed sequence representations
+        - labels: Target token IDs (int32) - last token of each sequence
+
+        This allows standard cross-entropy loss to work with HD streaming.
 
         Args:
             batch_size: Batch size.
@@ -362,7 +372,7 @@ class HolographicCorpus:
 
         # Stack bundles into array [n_samples, hd_dim]
         bundles_array = np.stack(self.bundles).astype(np.float32)
-        lengths_array = np.array(self.original_lengths, dtype=np.int32)
+        targets_array = np.array(self.target_tokens, dtype=np.int32)
 
         n_samples = len(bundles_array)
         hd_dim = self.config.hd_dim
@@ -375,7 +385,7 @@ class HolographicCorpus:
         )
 
         def data_generator() -> Generator[tuple[np.ndarray, np.ndarray], None, None]:
-            """Generate batches from holographic bundles."""
+            """Generate batches from holographic bundles with integer labels."""
             indices = list(range(n_samples))
 
             while True:
@@ -385,19 +395,19 @@ class HolographicCorpus:
                 for start in range(0, n_samples - batch_size + 1, batch_size):
                     batch_indices = indices[start : start + batch_size]
                     batch_bundles = bundles_array[batch_indices]
+                    batch_targets = targets_array[batch_indices]
 
-                    # For language modeling, use bundle as both input and target
-                    # The model learns to reconstruct/predict from compressed repr
-                    # Shape: [batch, hd_dim]
-                    inputs = batch_bundles
-                    labels = batch_bundles  # Self-supervised reconstruction
-
-                    yield inputs, labels
+                    # For language modeling with HD streaming:
+                    # - inputs: HD bundle (compressed context representation)
+                    # - labels: Target token ID (last token of original sequence)
+                    # Shape: inputs=[batch, hd_dim], labels=[batch]
+                    yield batch_bundles, batch_targets
 
         # Create dataset with proper signature
+        # Labels are int32 for compatibility with sparse_categorical_crossentropy
         output_signature = (
             tf.TensorSpec(shape=(batch_size, hd_dim), dtype=tf.float32),
-            tf.TensorSpec(shape=(batch_size, hd_dim), dtype=tf.float32),
+            tf.TensorSpec(shape=(batch_size,), dtype=tf.int32),
         )
 
         dataset = tf.data.Dataset.from_generator(
@@ -444,9 +454,7 @@ class HolographicCorpus:
         n_samples = len(bundles_array)
         target_vocab = vocab_size or self.config.vocab_size
 
-        # Pre-compute unbinding matrices for efficiency
-        # For each position, compute inverse binding key (conjugate in freq domain)
-        pos_keys_np = self.position_keys[:seq_len].numpy()
+        # Unbinding is done per-position in the loop below using self.position_keys[pos]
 
         def data_generator():
             indices = list(range(n_samples))

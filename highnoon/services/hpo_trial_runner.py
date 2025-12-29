@@ -93,7 +93,9 @@ EnterpriseTrainingConfig = None
 TrainingResult = None
 try:
     from highnoon.training.training_engine import (
+        BaseCallback,
         EnterpriseTrainingConfig,
+        StepResult,
         TrainingEngine,
         TrainingResult,
     )
@@ -158,7 +160,7 @@ class EnterpriseMemoryManager:
 
     def __init__(
         self,
-        warning_threshold_pct: float = 0.95,
+        warning_threshold_pct: float = 0.90,
         grace_steps: int = 10,
         trend_window: int = 5,
     ):
@@ -432,6 +434,62 @@ class EnterpriseMemoryManager:
 MemoryTracker = EnterpriseMemoryManager
 
 
+class HPOReporterCallback(BaseCallback):
+    """Callback that reports per-batch metrics to WebUI via HPOReporter.
+
+    This bridges TrainingEngine's step results to the WebUI Training Console
+    by calling HPOReporter.report() for each valid batch, enabling real-time
+    loss visibility in the HPO dashboard.
+    """
+
+    def __init__(
+        self,
+        reporter: HPOReporter,
+        memory_manager: "EnterpriseMemoryManager",
+        epoch_tracker: dict | None = None,
+    ):
+        """Initialize HPO reporter callback.
+
+        Args:
+            reporter: HPOReporter instance for WebUI logging.
+            memory_manager: EnterpriseMemoryManager for memory stats.
+            epoch_tracker: Optional dict to track current epoch (mutated externally).
+        """
+        self.reporter = reporter
+        self.memory_manager = memory_manager
+        self.epoch_tracker = epoch_tracker or {"epoch": 0}
+        self._step_count = 0
+
+    def on_batch_end(self, step: int, result: "StepResult") -> bool:
+        """Report batch metrics to WebUI if valid.
+
+        Args:
+            step: Current training step.
+            result: StepResult from TrainingEngine.train_step().
+
+        Returns:
+            True to continue training.
+        """
+        self._step_count += 1
+        if result.is_valid and self.reporter.should_report():
+            mem_stats = self.memory_manager.get_stats()
+            self.reporter.report(
+                step=step,
+                loss=result.loss,
+                gradient_norm=result.gradient_norm,
+                learning_rate=result.effective_learning_rate,
+                epoch=self.epoch_tracker.get("epoch", 0),
+                memory_mb=mem_stats.get("current_mb"),
+                peak_memory_mb=mem_stats.get("peak_mb"),
+            )
+        return True
+
+    def on_epoch_start(self, epoch: int) -> bool:
+        """Track current epoch for logging."""
+        self.epoch_tracker["epoch"] = epoch
+        return True
+
+
 def evaluate_qsg_generation(
     model: tf.keras.Model,
     tokenizer,
@@ -632,6 +690,8 @@ def build_hsmn_model(
     config: dict[str, Any],
     vocab_size: int,
     hidden_dim_override: int | None = None,
+    is_hd_mode: bool = False,
+    hd_dim: int = 1024,
 ) -> tf.keras.Model:
     """
     Build HSMN model from hyperparameter configuration.
@@ -640,6 +700,8 @@ def build_hsmn_model(
         config: Hyperparameter configuration dictionary
         vocab_size: Vocabulary size for embedding and output layers
         hidden_dim_override: Optional override for hidden dimension
+        is_hd_mode: If True, build model for HD streaming (float32 bundle inputs)
+        hd_dim: HD bundle dimension (only used when is_hd_mode=True)
 
     Returns:
         Compiled tf.keras.Model ready for language modeling
@@ -763,11 +825,34 @@ def build_hsmn_model(
         hidden_dim = hidden_dim_override
 
     # Build model using Keras Functional API with full ReasoningModule
-    # Input: token IDs (integers)
-    input_layer = tf.keras.layers.Input(shape=(None,), dtype=tf.int32, name="token_ids")
+    if is_hd_mode:
+        # HD Streaming Mode: float32 bundle inputs from HolographicCorpus
+        # Use C++ HDStreamingAdapter op for projection
+        logger.info(
+            f"[HPO] Building HD-mode HSMN model: hd_dim={hd_dim} -> hidden_dim={hidden_dim}"
+        )
+        input_layer = tf.keras.layers.Input(shape=(hd_dim,), dtype=tf.float32, name="hd_bundle")
+
+        # Project HD bundle to hidden dim using C++ op
+        from highnoon._native.ops.hd_streaming_adapter import HDStreamingAdapter
+
+        x = HDStreamingAdapter(
+            hidden_dim=hidden_dim,
+            hd_dim=hd_dim,
+            use_bias=True,
+            name="hd_streaming_adapter",
+        )(input_layer)
+        # x is now (batch, 1, hidden_dim) - ready for ReasoningModule
+    else:
+        # Standard mode: int32 token IDs
+        input_layer = tf.keras.layers.Input(shape=(None,), dtype=tf.int32, name="token_ids")
 
     # Use HyperdimensionalEmbedding for quantum-enhanced embedding (matching debug script)
-    if use_hqe:
+    # Skip embedding in HD mode - HDStreamingAdapter already provides (batch, 1, hidden_dim)
+    if is_hd_mode:
+        # x is already set from HDStreamingAdapter above
+        logger.info("[HPO] Skipping embedding layer in HD mode (HD bundles are pre-embedded)")
+    elif use_hqe:
         try:
             # Check if we should use memory-efficient DualPathEmbedding
             use_dual_path = getattr(hn_config, "USE_DUAL_PATH_EMBEDDING", True)
@@ -777,34 +862,34 @@ def build_hsmn_model(
                 from highnoon.models.layers.hyperdimensional_layer import DualPathEmbedding
 
                 # hd_dim must be divisible by hidden_dim
-                hd_dim = hidden_dim * 8  # Ensures divisibility
+                embed_hd_dim = hidden_dim * 8  # Ensures divisibility
                 x = DualPathEmbedding(
                     vocab_size=vocab_size,
                     model_dim=hidden_dim,
                     active_vocab_size=min(active_vocab_size, vocab_size),  # Don't exceed vocab
-                    hd_dim=hd_dim,
+                    hd_dim=embed_hd_dim,
                     use_ctqw=True,
                     ctqw_steps=3,
                     name="dual_path_embedding",
                 )(input_layer)
                 logger.info(
-                    f"[HPO] Using DualPathEmbedding: vocab={vocab_size}, active={min(active_vocab_size, vocab_size)}, hd_dim={hd_dim}"
+                    f"[HPO] Using DualPathEmbedding: vocab={vocab_size}, active={min(active_vocab_size, vocab_size)}, hd_dim={embed_hd_dim}"
                 )
             else:
                 from highnoon.models.layers.hyperdimensional_layer import HyperdimensionalEmbedding
 
                 # hd_dim must be divisible by hidden_dim - compute dynamically
-                hd_dim = hidden_dim * 8  # Ensures divisibility (e.g., 768*8=6144, 512*8=4096)
+                embed_hd_dim = hidden_dim * 8  # Ensures divisibility (e.g., 768*8=6144, 512*8=4096)
                 x = HyperdimensionalEmbedding(
                     vocab_size=vocab_size,
                     model_dim=hidden_dim,
-                    hd_dim=hd_dim,
+                    hd_dim=embed_hd_dim,
                     use_ctqw=True,
                     ctqw_steps=3,
                     name="hde_embedding",
                 )(input_layer)
                 logger.info(
-                    f"[HPO] Using HyperdimensionalEmbedding: vocab={vocab_size}, hd_dim={hd_dim}"
+                    f"[HPO] Using HyperdimensionalEmbedding: vocab={vocab_size}, hd_dim={embed_hd_dim}"
                 )
         except (ImportError, Exception) as e:
             logger.warning(
@@ -825,7 +910,7 @@ def build_hsmn_model(
 
     # Build the full HSMN reasoning module with hybrid block pattern
     # Note: Quantum parameters are read from global config by ReasoningModule
-    # To override per-trial, set config flags before building
+    # CRITICAL: Pass hd_dim so HD Activation Checkpointing uses trial-specific value
     reasoning_module = ReasoningModule(
         num_layers=num_reasoning_blocks,
         embedding_dim=hidden_dim,
@@ -834,6 +919,7 @@ def build_hsmn_model(
         num_experts=moe_num_experts,
         wlam_num_heads=wlam_num_heads,
         wlam_kernel_size=wlam_kernel_size,
+        hd_activation_dim=hd_dim if is_hd_mode else None,  # Pass trial's hd_dim
     )
 
     x = reasoning_module(x)
@@ -1233,8 +1319,8 @@ def train_trial(
     # Get dimensions from config
     batch_size = trial_config.get("batch_size", 8)
     sequence_length = trial_config.get("sequence_length", 256)
-    # vocab_size is NOT set here - it's determined by tokenizer.vocab_size after training
-    # The tokenizer learns the vocabulary from the curriculum dataset
+    # vocab_size can be tuned by HPO
+    vocab_size_override = trial_config.get("vocab_size")
     hidden_dim = trial_config.get("hidden_dim") or 256  # Default if None or missing
 
     # Get optional HuggingFace dataset name (set from curriculum or manually)
@@ -1286,7 +1372,7 @@ def train_trial(
         train_dataset, tokenizer, merger = load_training_dataset(
             batch_size=batch_size,
             sequence_length=sequence_length,
-            # vocab_size is NOT passed - tokenizer learns from curriculum and sets its own vocab_size
+            vocab_size=vocab_size_override,  # Pass override if provided by HPO
             hf_dataset_name=hf_dataset_name,
             prefetch_buffer_size=prefetch_buffer_size,
             use_adaptive_tokenizer=use_adaptive_tokenizer,
@@ -1298,10 +1384,28 @@ def train_trial(
             hd_dim=hd_dim,
         )
 
-        # Use actual tokenizer vocab size (AdaptiveQWTTokenizer returns learned size)
-        # This is the EFFECTIVE vocab size after learning from curriculum
-        vocab_size = tokenizer.vocab_size
-        logger.info(f"[HPO] Tokenizer trained on curriculum: effective_vocab_size={vocab_size}")
+        # Phase 201.7: Respect config vocab_size if specified (budget-aware)
+        # The config vocab_size is computed based on param_budget to prevent oversized models
+        config_vocab_size = trial_config.get("vocab_size")
+        tokenizer_vocab_size = tokenizer.vocab_size
+
+        if config_vocab_size is not None and config_vocab_size > 0:
+            # Use config-specified vocab_size (budget-aware)
+            vocab_size = config_vocab_size
+            logger.info(
+                f"[HPO] Using config vocab_size={vocab_size} (tokenizer has {tokenizer_vocab_size})"
+            )
+            # Warn if tokenizer vocab exceeds config - tokens beyond vocab_size will map to UNK
+            if tokenizer_vocab_size > vocab_size:
+                logger.warning(
+                    f"[HPO] Tokenizer vocab ({tokenizer_vocab_size}) exceeds budget-aware limit ({vocab_size}). "
+                    f"Tokens beyond {vocab_size} will be treated as UNK."
+                )
+        else:
+            # No config vocab_size - use tokenizer's actual size
+            vocab_size = tokenizer_vocab_size
+            logger.info(f"[HPO] Tokenizer trained on curriculum: effective_vocab_size={vocab_size}")
+
         if merger is not None:
             logger.info(f"[HPO] SuperwordMerger active: {merger.superword_count} superwords")
             # CRITICAL: Extend vocab_size to include superword tokens
@@ -1312,8 +1416,14 @@ def train_trial(
         logger.error(f"[HPO] Failed to load dataset: {e}")
         raise
 
-    # Build model with embedding layer
-    model = build_hsmn_model(trial_config, vocab_size, hidden_dim_override=hidden_dim)
+    # Build model with embedding layer (or HD streaming adapter if enabled)
+    model = build_hsmn_model(
+        trial_config,
+        vocab_size,
+        hidden_dim_override=hidden_dim,
+        is_hd_mode=use_hd_streaming,
+        hd_dim=hd_dim,
+    )
 
     # Create optimizer (pass model for SophiaG)
     optimizer = create_optimizer(trial_config, model=model)
@@ -1411,10 +1521,14 @@ def train_trial(
     logger.info(f"  UnifiedSmartTuner: {engine_config.use_unified_smart_tuner}")
 
     try:
+        # Create HPO reporter callback for per-batch logging to WebUI
+        epoch_tracker = {"epoch": 0}
+        reporter_callback = HPOReporterCallback(hpo_reporter, memory_manager, epoch_tracker)
+
         result: TrainingResult = engine.run(
             epochs=epochs,
             dataset=train_dataset,
-            callbacks=[],  # TrainingEngine handles internal callbacks
+            callbacks=[reporter_callback],  # Wire per-batch metrics to WebUI
             steps_per_epoch=steps_per_epoch,  # CRITICAL: Must pass to limit infinite generator
         )
 

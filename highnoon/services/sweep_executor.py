@@ -336,34 +336,75 @@ class RetryStrategy:
 
         elif failure_type == "budget_exceeded":
             # Model exceeds parameter budget - aggressively reduce architecture
-            # Use exponential decay: 0.4^n gives faster reduction than halving
-            reduction_factor = 0.4**retry_count  # 0.4, 0.16, 0.064...
+            # Phase 201.7: Primary driver is often vocab_size + HQE, not blocks/dim
             logger.warning(
                 f"[HPO] Budget exceeded on retry {retry_count}, "
-                f"reducing architecture by factor {reduction_factor:.2f}"
+                f"applying multi-stage reduction strategy"
             )
-            # Reduce all architecture parameters aggressively
+
+            # Stage 1: Reduce vocab_size (main driver when HQE is enabled)
+            # HQE embedding params = vocab_size * hd_dim, so reducing vocab has huge impact
+            current_vocab = modified.get("vocab_size")
+            if current_vocab and current_vocab > 8000:
+                new_vocab = max(8000, int(current_vocab * 0.5))  # Halve vocab each retry
+                logger.info(f"  vocab_size: {current_vocab} → {new_vocab}")
+                modified["vocab_size"] = new_vocab
+            elif current_vocab is None:
+                # If vocab_size is None (auto-detected), set explicit small value
+                # This ensures the trial runner doesn't auto-expand to 128K
+                budget = modified.get("param_budget", 100_000_000)
+                embedding_dim = modified.get("hidden_dim", 256)
+                use_hqe = modified.get("use_hyperdimensional_embedding", True)
+                hd_dim = modified.get("hd_dim")
+
+                # Import compute function (available in hpo_manager)
+                from highnoon.services.hpo_manager import compute_max_vocab_for_budget
+
+                # Use conservative model overhead on retries
+                new_vocab = compute_max_vocab_for_budget(
+                    param_budget=budget,
+                    embedding_dim=embedding_dim,
+                    use_hqe=use_hqe,
+                    hd_dim=hd_dim,
+                    model_overhead_fraction=0.6
+                    + 0.1 * retry_count,  # More overhead on later retries
+                )
+                logger.info(f"  vocab_size: None → {new_vocab} (budget-aware)")
+                modified["vocab_size"] = new_vocab
+
+            # Stage 2: Reduce hd_dim if specified (reduces HQE embedding params)
+            if "hd_dim" in modified and modified["hd_dim"]:
+                new_hd_dim = max(256, int(modified["hd_dim"] * 0.5))
+                logger.info(f"  hd_dim: {modified['hd_dim']} → {new_hd_dim}")
+                modified["hd_dim"] = new_hd_dim
+
+            # Stage 3: Reduce architecture params (blocks, experts, dim)
+            # CRITICAL: Floor values must be LOW to avoid increasing minimal configs
+            # Previous max(4, ...) was too high for configs starting at 2 blocks/3 experts
+            reduction_factor = 0.6**retry_count  # 0.6, 0.36, 0.216...
             if "num_reasoning_blocks" in modified:
-                new_blocks = max(4, int(modified["num_reasoning_blocks"] * reduction_factor))
-                logger.info(f"  blocks: {modified['num_reasoning_blocks']} → {new_blocks}")
-                modified["num_reasoning_blocks"] = new_blocks
+                new_blocks = max(2, int(modified["num_reasoning_blocks"] * reduction_factor))
+                if new_blocks != modified["num_reasoning_blocks"]:
+                    logger.info(f"  blocks: {modified['num_reasoning_blocks']} → {new_blocks}")
+                    modified["num_reasoning_blocks"] = new_blocks
             if "num_moe_experts" in modified:
-                new_experts = max(4, int(modified["num_moe_experts"] * reduction_factor))
-                logger.info(f"  experts: {modified['num_moe_experts']} → {new_experts}")
-                modified["num_moe_experts"] = new_experts
+                new_experts = max(2, int(modified["num_moe_experts"] * reduction_factor))
+                if new_experts != modified["num_moe_experts"]:
+                    logger.info(f"  experts: {modified['num_moe_experts']} → {new_experts}")
+                    modified["num_moe_experts"] = new_experts
             if "hidden_dim" in modified:
                 # Use guidance to decide how much to reduce
                 dim_reduction = 0.7
                 if guidance and "hidden_dim" in guidance:
-                    # If hidden_dim is very important for performance, reduce less aggressively
                     dim_reduction = 0.8 if guidance["hidden_dim"] > 0.1 else 0.6
 
                 new_dim = snap_to_multiple(
-                    modified["hidden_dim"] * (dim_reduction**retry_count), 8, min_val=256
+                    modified["hidden_dim"] * (dim_reduction**retry_count), 8, min_val=128
                 )
-                logger.info(f"  hidden_dim: {modified['hidden_dim']} → {new_dim}")
-                modified["hidden_dim"] = new_dim
-                modified["embedding_dim"] = new_dim
+                if new_dim != modified["hidden_dim"]:
+                    logger.info(f"  hidden_dim: {modified['hidden_dim']} → {new_dim}")
+                    modified["hidden_dim"] = new_dim
+                    modified["embedding_dim"] = new_dim
 
             # Ensure any other architectural params remain valid
             if "latent_kv_dim" in modified:
@@ -381,6 +422,13 @@ class RetryStrategy:
     def classify_failure(self, error_message: str | None, loss: float | None) -> str:
         """Classify the type of failure from error message and loss.
 
+        Properly distinguishes between:
+        - budget_exceeded: Explicitly reported budget violations
+        - crash: Segfaults (exit -11) or other abrupt terminations
+        - oom: Out of memory errors
+        - nan_loss: NaN from gradient issues (not budget)
+        - gradient_explosion: Inf loss from exploding gradients
+
         Args:
             error_message: Error message from trial
             loss: Final loss value (may be None if trial crashed)
@@ -390,9 +438,23 @@ class RetryStrategy:
         """
         if error_message:
             error_lower = error_message.lower()
-            # Check for budget exceeded FIRST (before other checks)
+
+            # Check for EXPLICIT budget exceeded indicators
+            # Must contain specific budget keywords, not just any error
             if "budget_exceeded" in error_lower or "exceeds parameter budget" in error_lower:
                 return "budget_exceeded"
+
+            # Segfault detection: exit code -11, SIGSEGV, or signal references
+            if any(
+                x in error_lower
+                for x in ["exit code -11", "sigsegv", "segmentation fault", "signal 11"]
+            ):
+                return "crash"
+
+            # CUDA/XLA errors are typically crashes, not budget issues
+            if any(x in error_lower for x in ["cuda", "xla", "stream_executor", "tensorflow"]):
+                return "crash"
+
             if "resource exhausted" in error_lower or "oom" in error_lower:
                 return "oom"
             if "swap" in error_lower:
@@ -400,10 +462,14 @@ class RetryStrategy:
             if "memory" in error_lower:
                 return "memory_critical"
 
-        # S15: Improved classification for non-finite loss without error message
+        # S15: Improved classification for non-finite loss
+        # Key fix: nan loss WITHOUT error should be classified as crash (likely segfault)
+        # not budget_exceeded, since budget issues produce explicit messages
         if loss is not None:
             if math.isnan(loss):
-                return "budget_exceeded" if not error_message else "nan_loss"
+                # If there's an error message, it's numerical instability (nan_loss)
+                # If no error message, trial likely crashed before producing output
+                return "nan_loss" if error_message else "crash"
             if math.isinf(loss):
                 return "gradient_explosion"
 
@@ -882,7 +948,10 @@ class SweepExecutor:
                 )
 
                 # Check for budget exceeded - retry with smaller architecture
-                if result.error and "budget" in result.error.lower():
+                # Use proper classification instead of loose string matching
+                # This prevents segfaults/CUDA errors from being misclassified as budget_exceeded
+                failure_type = self.retry_strategy.classify_failure(result.error, result.loss)
+                if failure_type == "budget_exceeded":
                     self._log(
                         "INFO",
                         f"[DEBUG] Trial {trial_id} detected as budget_exceeded, "

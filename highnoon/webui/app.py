@@ -3450,6 +3450,24 @@ def create_app(debug: bool = False) -> FastAPI:
         bp_monitor_stats: dict = {}
         galore_stats: dict = {}
 
+    class SmartTunerStatusUpdateRequest(BaseModel):
+        """Request body for updating smart tuner status (from training loop).
+
+        TrainingEngine._async_post_status() sends sweep_id in the body,
+        so we accept it here via Pydantic model.
+        """
+
+        sweep_id: str
+        enabled: bool = True
+        current_phase: str = "unknown"
+        exploration_factor: float = 1.0
+        emergency_mode: bool = False
+        global_step: int = 0
+        coordination_mode: str = "balanced"
+        lr_controller_stats: dict = {}
+        bp_monitor_stats: dict = {}
+        galore_stats: dict = {}
+
     @app.post("/api/smart-tuner/config")
     async def update_smart_tuner_config(config: SmartTunerConfigRequest):
         """Update unified smart tuner configuration.
@@ -3538,18 +3556,22 @@ def create_app(debug: bool = False) -> FastAPI:
         )
 
     @app.post("/api/smart-tuner/status")
-    async def update_smart_tuner_status(sweep_id: str, status: dict):
-        """Update smart tuner status for a sweep (called by training loop)."""
-        smart_tuner_states[sweep_id] = {
-            "enabled": status.get("enabled", True),
-            "current_phase": status.get("current_phase", "unknown"),
-            "exploration_factor": status.get("exploration_factor", 1.0),
-            "emergency_mode": status.get("emergency_mode", False),
-            "global_step": status.get("global_step", 0),
-            "coordination_mode": status.get("coordination_mode", "balanced"),
-            "lr_controller_stats": status.get("lr_controller_stats", {}),
-            "bp_monitor_stats": status.get("bp_monitor_stats", {}),
-            "galore_stats": status.get("galore_stats", {}),
+    async def update_smart_tuner_status(update: SmartTunerStatusUpdateRequest):
+        """Update smart tuner status for a sweep (called by training loop).
+
+        Accepts sweep_id and status fields in the request body via Pydantic model.
+        This matches the format sent by TrainingEngine._async_post_status().
+        """
+        smart_tuner_states[update.sweep_id] = {
+            "enabled": update.enabled,
+            "current_phase": update.current_phase,
+            "exploration_factor": update.exploration_factor,
+            "emergency_mode": update.emergency_mode,
+            "global_step": update.global_step,
+            "coordination_mode": update.coordination_mode,
+            "lr_controller_stats": update.lr_controller_stats,
+            "bp_monitor_stats": update.bp_monitor_stats,
+            "galore_stats": update.galore_stats,
             "last_updated": datetime.now().isoformat(),
         }
         return {"status": "updated"}

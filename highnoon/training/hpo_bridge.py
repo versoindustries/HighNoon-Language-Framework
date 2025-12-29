@@ -86,7 +86,13 @@ class HPOReporter:
             self._trial_dir.mkdir(parents=True, exist_ok=True)
             self._metrics_file = self._trial_dir / "metrics.jsonl"
             self._enabled = True
-            logger.info(f"[HPO Reporter] Enabled for trial: {self._trial_dir}")
+            # Extract trial_id from directory name if not explicitly set
+            # This ensures trial logs show correct IDs like "trial_0" instead of "None"
+            if self._trial_id is None:
+                self._trial_id = self._trial_dir.name
+            logger.info(
+                f"[HPO Reporter] Enabled for trial: {self._trial_dir} (id={self._trial_id})"
+            )
         else:
             # Enable anyway if sweep_id is provided for API-only logging
             if self._sweep_id:

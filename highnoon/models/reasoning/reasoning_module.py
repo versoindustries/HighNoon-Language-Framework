@@ -257,6 +257,8 @@ class ReasoningModule(tf.keras.layers.Layer):
         use_quantum_memory_replay: bool = False,
         use_entanglement_loss: bool = False,
         use_quantum_holographic_memory: bool = False,
+        # Phase 201.1: HD Activation Checkpointing - override global HD_ACTIVATION_DIM
+        hd_activation_dim: int | None = None,
         **kwargs,
     ):
         keras_kwargs = {k: v for k, v in kwargs.items() if k in ["name", "dtype", "trainable"]}
@@ -399,6 +401,9 @@ class ReasoningModule(tf.keras.layers.Layer):
         self.use_gradient_checkpointing = USE_GRADIENT_CHECKPOINTING
 
         # Phase 201.1: HD Activation Checkpointing (enhanced gradient checkpointing)
+        # CRITICAL: Use hd_activation_dim parameter if provided, else fall back to global
+        # This ensures trial-specific hd_dim is used, preventing memory bloat
+        effective_hd_activation_dim = hd_activation_dim if hd_activation_dim else HD_ACTIVATION_DIM
         self.use_hd_activation_checkpoint = (
             USE_HD_ACTIVATION_CHECKPOINT and self.use_gradient_checkpointing
         )
@@ -409,7 +414,7 @@ class ReasoningModule(tf.keras.layers.Layer):
                 self._hd_checkpoint_wrappers = [
                     _hd_checkpoint_layer_cls(
                         sublayers=[block],
-                        hd_dim=HD_ACTIVATION_DIM,
+                        hd_dim=effective_hd_activation_dim,
                         use_ctqw=HD_ACTIVATION_CTQW,
                         name=f"hd_checkpoint_{i}",
                     )
@@ -417,7 +422,7 @@ class ReasoningModule(tf.keras.layers.Layer):
                 ]
                 logger.info(
                     f"  - Phase 201.1: HD Activation Checkpointing enabled "
-                    f"(hd_dim={HD_ACTIVATION_DIM}, ctqw={HD_ACTIVATION_CTQW})"
+                    f"(hd_dim={effective_hd_activation_dim}, ctqw={HD_ACTIVATION_CTQW})"
                 )
             else:
                 self.use_hd_activation_checkpoint = False

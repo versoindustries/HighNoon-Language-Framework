@@ -319,7 +319,7 @@ class TensorBudgetController:
 
         if total_weighted < 1e-10:
             total_weighted = len(self._layers)
-            weighted_scores = {name: 1.0 for name in self._layers}
+            weighted_scores = dict.fromkeys(self._layers, 1.0)
 
         # Allocate ranks proportionally
         allocations: dict[str, dict[str, Any]] = {}

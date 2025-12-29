@@ -315,14 +315,24 @@ class QSGGenerator:
     def _encode_context(self, input_ids: tf.Tensor) -> tf.Tensor:
         """Encode input through model to get context representation.
 
+        Supports both standard token ID inputs and HD bundle inputs
+        from HolographicCorpus streaming mode.
+
         Args:
-            input_ids: Input token IDs [batch, seq_len].
+            input_ids: Either token IDs [batch, seq_len] (int32)
+                       or HD bundles [batch, hd_dim] (float32).
 
         Returns:
             Context representation [batch, seq_len, dim].
         """
-        # Get model output
-        outputs = self.model(input_ids, training=False)
+        # Phase 200+: Detect HD bundle input (float32, rank 2)
+        if input_ids.dtype == tf.float32 and len(input_ids.shape) == 2:
+            # HD bundle input - pass directly to model which has HDStreamingAdapter
+            logger.debug("[QSG] Using HD bundle input (float32)")
+            outputs = self.model(input_ids, training=False)
+        else:
+            # Standard token ID input
+            outputs = self.model(input_ids, training=False)
 
         # Extract hidden states
         if isinstance(outputs, dict):
@@ -337,7 +347,13 @@ class QSGGenerator:
 
         # Try calling reasoning module directly if available
         if hasattr(self.model, "reasoning_module"):
-            # Get embeddings
+            # Check if model has HD streaming adapter (HD mode)
+            if hasattr(self.model, "hd_streaming_adapter"):
+                # HD mode: input is already projected by adapter
+                context = self.model.reasoning_module(input_ids, training=False)
+                return context
+
+            # Standard mode: Get embeddings first
             if hasattr(self.model, "token_embedding"):
                 embeddings = self.model.token_embedding(input_ids)
             else:

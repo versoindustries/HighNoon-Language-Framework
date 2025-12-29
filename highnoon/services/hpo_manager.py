@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from highnoon import config as hn_config
 from highnoon.services.hpo_metrics import HPOMetricsCollector, OversizedConfigTracker, TrialStatus
 from highnoon.services.hpo_utils import convert_numpy_types
 
@@ -85,11 +86,54 @@ def load_hpo_config(config_path: Path | None = None) -> dict[str, Any]:
         return {}
 
 
+def compute_max_vocab_for_budget(
+    param_budget: int,
+    embedding_dim: int = 256,
+    use_hqe: bool = True,
+    hd_dim: int | None = None,
+    model_overhead_fraction: float = 0.5,
+) -> int:
+    """Compute maximum sustainable vocab_size for a given parameter budget.
+
+    When HQE is enabled, embedding parameters dominate the model size.
+    This function calculates the maximum vocab_size that leaves room for
+    the rest of the model (blocks, experts, output layers).
+
+    Args:
+        param_budget: Target parameter budget (e.g., 100_000_000)
+        embedding_dim: Model embedding dimension
+        use_hqe: Whether Hyperdimensional Embedding is enabled
+        hd_dim: Explicit HD dimension (defaults to embedding_dim * 8 if HQE)
+        model_overhead_fraction: Fraction of budget reserved for non-embedding params
+
+    Returns:
+        Maximum vocab_size that fits within the budget.
+    """
+    # Reserve fraction for model layers (blocks, MoE, output)
+    embedding_budget = int(param_budget * (1 - model_overhead_fraction))
+
+    if use_hqe:
+        # HQE: embed_params = vocab_size * hd_dim + hd_dim * embedding_dim
+        effective_hd_dim = hd_dim or (embedding_dim * 8)
+        projection_params = effective_hd_dim * embedding_dim
+        vocab_budget = embedding_budget - projection_params
+        max_vocab = vocab_budget // effective_hd_dim
+    else:
+        # Standard: embed_params = vocab_size * embedding_dim
+        max_vocab = embedding_budget // embedding_dim
+
+    # Ensure minimum viable vocab (at least 8K for basic tokenization)
+    # Phase 200+: Increased max to 300K for large vocabulary models
+    return max(8000, min(max_vocab, 300000))
+
+
 def estimate_model_params(config: dict[str, Any]) -> int:
     """Estimate total model parameters from architecture configuration.
 
-    Uses the HSMN 6-block pattern (SpatialBlock, TimeCrystal, LatentReasoning,
-    SpatialBlock, WLAM, MoE) to compute approximate parameter count.
+    Phase 11 Update: Support HQE (Hyperdimensional Embedding), QuantumLMHead,
+    and MoE Tucker decomposition aware estimation.
+
+    Phase 201.7 Update: Budget-aware vocab_size default when param_budget is set.
 
     Args:
         config: Architecture configuration containing:
@@ -98,57 +142,121 @@ def estimate_model_params(config: dict[str, Any]) -> int:
             - num_reasoning_blocks: Number of reasoning blocks (default 8)
             - num_moe_experts: Number of MoE experts (default 8)
             - mamba_state_dim: Mamba state dimension (default 64)
+            - use_hyperdimensional_embedding: Whether HQE is used
+            - hd_dim: Explicit HQE dimension (defaults to embedding_dim * 8)
+            - use_quantum_lm_head: Whether VQC-based head is used
+            - use_td_moe: Whether Tucker-decomposed MoE is used
+            - td_moe_tucker_rank: Rank for MoE decomposition
+            - param_budget: Optional parameter budget for smart defaults
 
     Returns:
         Estimated total parameter count.
-
-    Example:
-        >>> config = {"vocab_size": 32000, "embedding_dim": 512,
-        ...           "num_reasoning_blocks": 8, "num_moe_experts": 8}
-        >>> params = estimate_model_params(config)
-        >>> print(f"{params / 1e6:.1f}M parameters")
     """
-    # Use larger default for more conservative estimation
-    # Real tokenizers often learn 50K-128K vocabulary from curricula
-    vocab_size = config.get("vocab_size") or 65536
     embedding_dim = config.get("embedding_dim") or config.get("hidden_dim") or 512
+    use_hqe = config.get(
+        "use_hyperdimensional_embedding", getattr(hn_config, "USE_HYPERDIMENSIONAL_EMBEDDING", True)
+    )
+    param_budget = config.get("param_budget")
+    config_hd_dim = config.get("hd_dim")
+
+    # Budget-aware vocab_size default: when param_budget is set and vocab_size is null,
+    # compute max sustainable vocab instead of defaulting to 128K
+    vocab_size = config.get("vocab_size")
+    if vocab_size is None:
+        if param_budget is not None:
+            vocab_size = compute_max_vocab_for_budget(
+                param_budget=param_budget,
+                embedding_dim=embedding_dim,
+                use_hqe=use_hqe,
+                hd_dim=config_hd_dim,
+                model_overhead_fraction=0.5,
+            )
+            logger.debug(
+                f"[HPO] Budget-aware vocab default: {vocab_size} "
+                f"(budget={param_budget/1e6:.0f}M, hqe={use_hqe})"
+            )
+        else:
+            # No budget specified - use conservative default
+            vocab_size = 32000
     num_blocks = config.get("num_reasoning_blocks") or 8
     num_experts = config.get("num_moe_experts") or 8
     mamba_state = config.get("mamba_state_dim") or 64
 
-    # Embedding: vocab × embedding_dim
-    embed_params = vocab_size * embedding_dim
+    # Phase 201.2: Account for HQE impact on embedding parameters
+    # Note: use_hqe is already set above for budget-aware vocab calculation
+    if use_hqe:
+        # HQE uses hd_dim (default embedding_dim * 8) for base vectors
+        # hd_dim = config.get("hd_dim") or (embedding_dim * 8)
+        # Note: In hpo_trial_runner.py, hd_dim is calculated as hidden_dim * 8
+        hd_dim = config.get("hd_dim") or (embedding_dim * 8)
+        # Base vectors: [vocab_size, hd_dim]
+        # Position keys: [max_seq, hd_dim] (small compared to base)
+        # Projection: [hd_dim, embedding_dim]
+        embed_params = vocab_size * hd_dim + hd_dim * embedding_dim
+    else:
+        # Embedding: vocab × embedding_dim
+        embed_params = vocab_size * embedding_dim
 
     # Per-block parameter estimates based on HSMN architecture
     ff_dim = embedding_dim * 4  # ff_expansion=4
     d_inner = embedding_dim * 2  # expand_factor=2
 
-    # SpatialBlock (Mamba-2): input proj + conv + SSM params + output proj
+    # SpatialBlock (Mamba-2): approx 4 * embedding_dim * d_inner + state params
     spatial_params = 4 * embedding_dim * d_inner + mamba_state * embedding_dim * 2
 
-    # TimeCrystalSequenceBlock: HNN weights (W1, W2, W3) + output proj + VQC
+    # TimeCrystalSequenceBlock: Hamiltonian weights + output proj
     timecrystal_params = 8 * embedding_dim * embedding_dim
 
-    # LatentReasoningBlock: FFN layers with expansion
+    # LatentReasoningBlock: FFN layers
     latent_params = 3 * embedding_dim * ff_dim
 
     # WLAMBlock: wavelet transforms + attention
     wlam_params = 4 * embedding_dim * embedding_dim
 
-    # MoELayer: num_experts * (2 * d_model * ff_dim) + router
-    moe_params = num_experts * (2 * embedding_dim * ff_dim) + embedding_dim * num_experts
+    # MoELayer estimation
+    use_td_moe = config.get("use_td_moe", getattr(hn_config, "USE_TD_MOE", False))
+    if use_td_moe:
+        # Tucker decomposition reduces parameters: O(rank * (dim + ff_dim))
+        tucker_rank = config.get("td_moe_tucker_rank", 16)
+        # Approx: num_experts * tucker_rank * (embedding_dim + ff_dim)
+        moe_params = num_experts * (tucker_rank * (embedding_dim + ff_dim))
+    else:
+        # Standard MoE: num_experts * (2 * embedding_dim * ff_dim)
+        moe_params = num_experts * (2 * embedding_dim * ff_dim) + embedding_dim * num_experts
 
-    # Blocks per 6-block pattern (2 spatial blocks per pattern)
-    blocks_per_pattern = 6
-    num_patterns = (num_blocks + blocks_per_pattern - 1) // blocks_per_pattern
+    # Blocks per 6-block pattern: [Spatial, TimeCrystal, Latent, Spatial, WLAM, MoE]
+    num_full_patterns = num_blocks // 6
+    remaining_blocks = num_blocks % 6
+
     params_per_pattern = (
         spatial_params * 2 + timecrystal_params + latent_params + wlam_params + moe_params
     )
+    total_reasoning_params = num_full_patterns * params_per_pattern
 
-    # Output layer (LM head): embedding_dim × vocab
-    output_params = embedding_dim * vocab_size
+    # Add parameters for remaining blocks in order
+    rem_block_params = [
+        spatial_params,
+        timecrystal_params,
+        latent_params,
+        spatial_params,
+        wlam_params,
+        moe_params,
+    ]
+    for i in range(remaining_blocks):
+        total_reasoning_params += rem_block_params[i]
 
-    total = embed_params + params_per_pattern * num_patterns + output_params
+    # Output layer (LM head)
+    # Phase 11: QuantumLMHead estimation
+    use_qlm = config.get("use_quantum_lm_head", getattr(hn_config, "USE_QUANTUM_LM_HEAD", True))
+    if use_qlm:
+        # VQC head uses VQC layers + projection
+        # [embedding_dim, vqc_input_dim] + VQC weights
+        output_params = embedding_dim * 128 + 1024  # Simplified VQC estimate
+    else:
+        # standard LM head: embedding_dim × vocab
+        output_params = embedding_dim * vocab_size
+
+    total = embed_params + total_reasoning_params + output_params
     return int(total)
 
 
@@ -199,24 +307,110 @@ class HPOSearchSpace:
 
     # =========================================================================
     # MODEL ARCHITECTURE (Lite edition limits)
+    # Phase 201.7: Expanded ranges for better exploration across budget sizes
+    # - Minimum values for tiny models (sub-100M): 1 block, 64 dim, 2 experts
+    # - Maximum values at Lite limits: 24 blocks, 12 experts, 2048 dim
+    # - Dense intermediate values for smooth fANOVA-guided search
     # =========================================================================
-    num_reasoning_blocks: list[int] = field(default_factory=lambda: [4, 6, 8, 12, 16, 24])
-    hidden_dim: list[int] = field(default_factory=lambda: [256, 512, 768, 1024])
-    embedding_dim: list[int] = field(default_factory=lambda: [256, 512, 768, 1024, 2048, 4096])
-    num_moe_experts: list[int] = field(default_factory=lambda: [4, 6, 8, 12])
+    num_reasoning_blocks: list[int] = field(
+        default_factory=lambda: [1, 2, 3, 4, 5, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24]
+    )
+    hidden_dim: list[int] = field(
+        default_factory=lambda: [
+            64,
+            96,
+            128,
+            160,
+            192,
+            224,
+            256,
+            320,
+            384,
+            448,
+            512,
+            576,
+            640,
+            704,
+            768,
+            896,
+            1024,
+            1280,
+            1536,
+            1792,
+            2048,
+        ]
+    )
+    embedding_dim: list[int] = field(
+        default_factory=lambda: [
+            64,
+            96,
+            128,
+            192,
+            256,
+            384,
+            512,
+            640,
+            768,
+            1024,
+            1280,
+            1536,
+            2048,
+            2560,
+            3072,
+            3584,
+            4096,
+        ]
+    )
+    num_moe_experts: list[int] = field(default_factory=lambda: [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
+
+    # =========================================================================
+    # FEATURE FLAGS (for budget estimation consistency)
+    # =========================================================================
+    use_hyperdimensional_embedding: bool = True
+    use_quantum_lm_head: bool = True
+    use_td_moe: bool = True
+    # Note: hd_dim is defined in PHASE 200+ section as list[int] for HPO sampling
+    # For budget estimation, use hd_dim from config or calculate from embedding_dim * 8
+    # Phase 200+: vocab_size is now TUNABLE with curriculum-aware range
+    # Range from 16k (small models) to 300k (large tokenizers)
+    vocab_size: list[int] = field(
+        default_factory=lambda: [
+            16000,
+            24000,
+            32000,
+            48000,
+            64000,
+            96000,
+            128000,
+            160000,
+            200000,
+            256000,
+            300000,
+        ]
+    )
+    context_window: int | None = None
+    param_budget: int | None = None
 
     # HSMN-specific architecture params
-    mamba_state_dim: list[int] = field(default_factory=lambda: [32, 64, 128])
-    moe_top_k: list[int] = field(default_factory=lambda: [1, 2, 4])
+    # Phase 201.7: Fully expanded for comprehensive architecture search
+    mamba_state_dim: list[int] = field(
+        default_factory=lambda: [8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256]
+    )
+    moe_top_k: list[int] = field(default_factory=lambda: [1, 2, 3, 4, 6, 8])
     superposition_dim: list[int] = field(default_factory=lambda: [1, 2])  # Max 2 for Lite
-    tt_rank_middle: list[int] = field(default_factory=lambda: [8, 16, 32])
-    hamiltonian_hidden_dim: list[int] = field(default_factory=lambda: [128, 256, 512])
+    tt_rank_middle: list[int] = field(default_factory=lambda: [2, 4, 6, 8, 12, 16, 24, 32, 48, 64])
+    hamiltonian_hidden_dim: list[int] = field(
+        default_factory=lambda: [32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024]
+    )
 
     # =========================================================================
     # PHASE 44: QUANTUM TELEPORT BUS
+    # Phase 201.7: Fully expanded entanglement dimensions
     # =========================================================================
-    teleport_entanglement_dim: list[int] = field(default_factory=lambda: [32, 64, 128])
-    teleport_fidelity_threshold: tuple[float, float] = (0.85, 0.99)
+    teleport_entanglement_dim: list[int] = field(
+        default_factory=lambda: [8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256, 384]
+    )
+    teleport_fidelity_threshold: tuple[float, float] = (0.7, 0.995)
 
     # =========================================================================
     # PHASE 45: ENTROPY REGULARIZATION
@@ -240,8 +434,11 @@ class HPOSearchSpace:
 
     # =========================================================================
     # PHASE 50: MAJORANA POSITION ENCODING
+    # Phase 201.7: Expanded Floquet period options
     # =========================================================================
-    majorana_floquet_period: list[int] = field(default_factory=lambda: [4, 8, 16, 32])
+    majorana_floquet_period: list[int] = field(
+        default_factory=lambda: [2, 4, 6, 8, 12, 16, 24, 32, 48, 64]
+    )
 
     # =========================================================================
     # PHASE 51-52: QUANTUM LOSS FUNCTIONS
@@ -251,19 +448,22 @@ class HPOSearchSpace:
 
     # =========================================================================
     # PHASE 55: MPQR MULTI-PATH REASONING (Lite: max 8 paths, max 5 Grover)
+    # Phase 201.7: Expanded path and iteration counts
     # =========================================================================
-    mpqr_num_paths: list[int] = field(default_factory=lambda: [2, 4, 6, 8])
+    mpqr_num_paths: list[int] = field(default_factory=lambda: [1, 2, 3, 4, 5, 6, 7, 8])
     mpqr_grover_iterations: list[int] = field(default_factory=lambda: [1, 2, 3, 4, 5])
 
     # =========================================================================
     # PHASE 56: TOPOLOGICAL WAVELET ATTENTION
+    # Phase 201.7: Expanded scale counts
     # =========================================================================
-    twa_num_scales: list[int] = field(default_factory=lambda: [2, 3, 4, 6])
+    twa_num_scales: list[int] = field(default_factory=lambda: [1, 2, 3, 4, 5, 6, 8])
 
     # =========================================================================
     # PHASE 57: TD-MOE TUCKER DECOMPOSITION
+    # Phase 201.7: Expanded Tucker ranks
     # =========================================================================
-    td_moe_tucker_rank: list[int] = field(default_factory=lambda: [8, 16, 24, 32])
+    td_moe_tucker_rank: list[int] = field(default_factory=lambda: [4, 6, 8, 12, 16, 24, 32, 48, 64])
 
     # =========================================================================
     # PHASE 58: SYMPLECTIC GNN KALMAN
@@ -288,8 +488,11 @@ class HPOSearchSpace:
 
     # =========================================================================
     # PHASE 62: VQEM ERROR MITIGATION
+    # Phase 201.7: Fully expanded parameter counts
     # =========================================================================
-    vqem_num_params: list[int] = field(default_factory=lambda: [16, 32, 48, 64])
+    vqem_num_params: list[int] = field(
+        default_factory=lambda: [4, 8, 12, 16, 24, 32, 48, 64, 96, 128]
+    )
 
     # =========================================================================
     # PHASE 65: QUANTUM CRYSTALLIZATION
@@ -304,8 +507,9 @@ class HPOSearchSpace:
 
     # =========================================================================
     # PHASE 70: MULTI-STAGE HAMILTONIAN (Lite: max 6 stages)
+    # Phase 201.7: Expanded stage counts
     # =========================================================================
-    hamiltonian_num_stages: list[int] = field(default_factory=lambda: [2, 3, 4, 5, 6])
+    hamiltonian_num_stages: list[int] = field(default_factory=lambda: [1, 2, 3, 4, 5, 6])
 
     # =========================================================================
     # PHASE 71: INTRINSIC PLASTICITY
@@ -314,14 +518,16 @@ class HPOSearchSpace:
 
     # =========================================================================
     # PHASE 72: RANDOM NATURAL GRADIENT
+    # Phase 201.7: Expanded sample counts
     # =========================================================================
-    rng_num_samples: list[int] = field(default_factory=lambda: [5, 10, 15, 20])
+    rng_num_samples: list[int] = field(default_factory=lambda: [3, 5, 8, 10, 15, 20, 30, 50])
 
     # =========================================================================
     # PHASE 76: QUANTUM COHERENCE BUS
+    # Phase 201.7: Fully expanded node counts
     # =========================================================================
-    qcb_num_nodes: list[int] = field(default_factory=lambda: [4, 6, 8, 12])
-    qcb_fidelity_threshold: tuple[float, float] = (0.85, 0.98)
+    qcb_num_nodes: list[int] = field(default_factory=lambda: [2, 3, 4, 5, 6, 8, 10, 12, 16])
+    qcb_fidelity_threshold: tuple[float, float] = (0.7, 0.995)
 
     # =========================================================================
     # PHASE 78: SPINI INTEGRATOR
@@ -330,6 +536,7 @@ class HPOSearchSpace:
 
     # =========================================================================
     # PHASE 79: QCOT REASONING (Lite: max 5 steps)
+    # Phase 201.7: Expanded step counts
     # =========================================================================
     qcot_reasoning_steps: list[int] = field(default_factory=lambda: [1, 2, 3, 4, 5])
 
@@ -340,62 +547,77 @@ class HPOSearchSpace:
 
     # =========================================================================
     # PHASE 87: COCONUT MULTI-PATH EXPLORATION (Lite: max 8 paths)
+    # Phase 201.7: Expanded path counts and thresholds
     # =========================================================================
-    coconut_num_paths: list[int] = field(default_factory=lambda: [1, 2, 4, 8])
-    coconut_collapse_threshold: tuple[float, float] = (0.5, 0.95)
-    coconut_crystallize_threshold: tuple[float, float] = (0.7, 0.99)
+    coconut_num_paths: list[int] = field(default_factory=lambda: [1, 2, 3, 4, 5, 6, 7, 8])
+    coconut_collapse_threshold: tuple[float, float] = (0.3, 0.98)
+    coconut_crystallize_threshold: tuple[float, float] = (0.5, 0.995)
 
     # =========================================================================
     # PHASE 127: UNIFIED QUANTUM BUS
+    # Phase 201.7: Fully expanded bond dimensions
     # =========================================================================
-    unified_bus_mps_bond_dim: list[int] = field(default_factory=lambda: [16, 32, 48, 64])
-    unified_bus_coherence_threshold: tuple[float, float] = (0.8, 0.95)
+    unified_bus_mps_bond_dim: list[int] = field(
+        default_factory=lambda: [4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128]
+    )
+    unified_bus_coherence_threshold: tuple[float, float] = (0.6, 0.98)
 
     # =========================================================================
     # PHASE 130: QUANTUM SYNERGY PARAMETERS
+    # Phase 201.7: Expanded VQC and synergy parameters
     # =========================================================================
     # S3: VQC Adaptive Depth (Lite: max 8 layers)
-    vqc_min_layers: list[int] = field(default_factory=lambda: [1, 2])
-    vqc_max_layers: list[int] = field(default_factory=lambda: [4, 6, 8])
+    vqc_min_layers: list[int] = field(default_factory=lambda: [1, 2, 3])
+    vqc_max_layers: list[int] = field(default_factory=lambda: [3, 4, 5, 6, 7, 8])
     # S6: Hopfield base beta (MPS Entropy → Hopfield β adaptation)
-    hopfield_base_beta: tuple[float, float] = (0.5, 2.0)
-    hopfield_beta_min: tuple[float, float] = (0.3, 0.8)
-    hopfield_beta_max: tuple[float, float] = (2.0, 6.0)
+    hopfield_base_beta: tuple[float, float] = (0.1, 3.0)
+    hopfield_beta_min: tuple[float, float] = (0.1, 1.0)
+    hopfield_beta_max: tuple[float, float] = (1.5, 10.0)
     # S10: DTC Floquet Period (Bus Entanglement → Floquet Period)
-    dtc_floquet_period: list[int] = field(default_factory=lambda: [2, 4, 6, 8])
+    dtc_floquet_period: list[int] = field(default_factory=lambda: [2, 3, 4, 6, 8, 12, 16])
     # S12: SympFlow + QNG Geodesic Weight
-    sympflow_geodesic_weight: tuple[float, float] = (0.05, 0.3)
+    sympflow_geodesic_weight: tuple[float, float] = (0.01, 0.5)
 
     # =========================================================================
     # QMAMBA / Q-SSM PARAMETERS
+    # Phase 201.7: Expanded superposition and entanglement params
     # =========================================================================
-    qmamba_superposition_states: list[int] = field(default_factory=lambda: [2, 4, 8])
-    qmamba_entanglement_depth: list[int] = field(default_factory=lambda: [1, 2, 3])
-    qmamba_entanglement_strength: tuple[float, float] = (0.3, 0.9)
-    q_ssm_vqc_layers: list[int] = field(default_factory=lambda: [1, 2, 3, 4])
+    qmamba_superposition_states: list[int] = field(default_factory=lambda: [2, 3, 4, 6, 8, 12, 16])
+    qmamba_entanglement_depth: list[int] = field(default_factory=lambda: [1, 2, 3, 4, 5, 6])
+    qmamba_entanglement_strength: tuple[float, float] = (0.1, 0.95)
+    q_ssm_vqc_layers: list[int] = field(default_factory=lambda: [1, 2, 3, 4, 5, 6])
 
     # =========================================================================
     # QASA ATTENTION PARAMETERS
+    # Phase 201.7: Expanded VQC layers and entanglement
     # =========================================================================
-    qasa_vqc_layers: list[int] = field(default_factory=lambda: [1, 2, 3, 4])
-    qasa_entanglement_strength: tuple[float, float] = (0.2, 0.8)
+    qasa_vqc_layers: list[int] = field(default_factory=lambda: [1, 2, 3, 4, 5, 6])
+    qasa_entanglement_strength: tuple[float, float] = (0.1, 0.95)
 
     # =========================================================================
     # QMOE ROUTING PARAMETERS
+    # Phase 201.7: Expanded routing parameters
     # =========================================================================
-    qmoe_vqc_layers: list[int] = field(default_factory=lambda: [1, 2, 3])
-    qmoe_measurement_temp: tuple[float, float] = (0.5, 2.0)
+    qmoe_vqc_layers: list[int] = field(default_factory=lambda: [1, 2, 3, 4, 5])
+    qmoe_measurement_temp: tuple[float, float] = (0.1, 3.0)
 
     # =========================================================================
     # PHASE 200+: HD STREAMING CORPUS PARAMETERS
     # =========================================================================
     # Hyperdimensional corpus compression for memory-efficient training
     # When use_hd_streaming=True, samples are compressed into fixed-size HD bundles
+    # Phase 201.7: Fully expanded ranges for comprehensive HD architecture search
     use_hd_streaming: bool = True  # Enabled by default for memory efficiency
-    hd_reservoir_size: list[int] = field(default_factory=lambda: [1000, 2000, 3000])
-    hd_dim: list[int] = field(default_factory=lambda: [512, 1024])
+    hd_reservoir_size: list[int] = field(
+        default_factory=lambda: [250, 500, 750, 1000, 1500, 2000, 3000, 4000, 5000, 8000, 10000]
+    )
+    hd_dim: list[int] = field(
+        default_factory=lambda: [128, 192, 256, 384, 512, 768, 1024, 1536, 2048, 3072, 4096]
+    )
     # Vocab sample size for tokenizer learning (lower = less memory)
-    vocab_sample_size: list[int] = field(default_factory=lambda: [2000, 5000, 10000])
+    vocab_sample_size: list[int] = field(
+        default_factory=lambda: [500, 1000, 2000, 3000, 5000, 8000, 10000, 15000, 20000]
+    )
 
     # =========================================================================
     # PHASE 201: QUANTUM MEMORY OPTIMIZATION PARAMETERS
@@ -410,13 +632,16 @@ class HPOSearchSpace:
         ]
     )
     # Phase 201.3: LatentKVAttention for KV cache compression
+    # Phase 201.7: Fully expanded KV compression dimensions
     use_latent_kv: bool = True  # Enable latent KV compression
-    latent_kv_dim: list[int] = field(default_factory=lambda: [32, 64, 128])
+    latent_kv_dim: list[int] = field(
+        default_factory=lambda: [8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256]
+    )
 
     # =========================================================================
     # USER-SET FIXED PARAMETERS (not tuned)
     # =========================================================================
-    vocab_size: int | None = None
+    # Note: vocab_size is now tunable (see FEATURE FLAGS section)
     context_window: int | None = None
     position_embedding: str | None = None
 
@@ -497,7 +722,13 @@ class HPOSearchSpace:
         Returns:
             Tuple of (max_blocks, max_experts, max_dim) that fit within budget.
         """
-        vocab_size = self.vocab_size or 32000
+        # CRITICAL: self.vocab_size is a list[int] in HPOSearchSpace
+        # Use conservative (min) value for budget estimation
+        vocab_size = (
+            min(self.vocab_size)
+            if isinstance(self.vocab_size, list) and self.vocab_size
+            else (self.vocab_size if isinstance(self.vocab_size, int) else 32000)
+        )
 
         # Start with minimum viable config
         best_blocks = 4
@@ -512,12 +743,20 @@ class HPOSearchSpace:
         for dim in sorted_dims:
             for blocks in sorted_blocks:
                 for experts in sorted_experts:
+                    # Use representative hd_dim value (min of list if available)
+                    # This ensures estimate_model_params gets a scalar, not list
+                    representative_hd_dim = (
+                        min(self.hd_dim)
+                        if self.hd_dim and isinstance(self.hd_dim, list)
+                        else (self.hd_dim if isinstance(self.hd_dim, int) else dim * 8)
+                    )
                     test_config = {
                         "vocab_size": vocab_size,
                         "embedding_dim": dim,
                         "hidden_dim": dim,
                         "num_reasoning_blocks": blocks,
                         "num_moe_experts": experts,
+                        "hd_dim": representative_hd_dim,
                     }
                     estimated = estimate_model_params(test_config)
                     if estimated <= target_budget:
@@ -542,69 +781,40 @@ class HPOSearchSpace:
         Returns:
             HPOSearchSpace instance
         """
-        search_space = config.get("search_space", {})
+        search_space_config = config.get("search_space", {})
+        model_config = config.get("model_config", {})
 
-        # Phase 5: Check if config uses grouped format
-        group_keys = ["architecture_groups", "training_groups", "control_groups"]
-        is_grouped = any(key in config for key in group_keys)
+        # Create instance with default values
+        instance = cls()
 
-        if is_grouped:
-            # For grouped configs, create instance with defaults and store full config
-            instance = cls()
-            instance._grouped_config = config
-            instance._is_grouped = True
-            return instance
+        # Update from search_space config if provided
+        for key, value in search_space_config.items():
+            if hasattr(instance, key):
+                # Handle nested dicts for legacy flat format
+                if isinstance(value, dict) and "choices" in value:
+                    setattr(instance, key, value["choices"])
+                elif isinstance(value, dict) and "min" in value and "max" in value:
+                    setattr(instance, key, (value["min"], value["max"]))
+                else:
+                    setattr(instance, key, value)
 
-        # Legacy flat format handling
-        learning_rate = search_space.get("learning_rate", {})
-        lr_range = (learning_rate.get("min", 1e-5), learning_rate.get("max", 1e-2))
+        # Sync model-specific limits/flags for parameter estimation
+        # If vocab_size is not in search_space, use default from model_config
+        if not hasattr(instance, "vocab_size") or instance.vocab_size is None:
+            instance.vocab_size = model_config.get("vocab_size")
 
-        batch_size = search_space.get("batch_size", {})
-        batch_choices = batch_size.get("choices", [16, 32, 64, 128])
-
-        optimizer = search_space.get("optimizer", {})
-        opt_choices = optimizer.get("choices", ["sophiag", "adam"])
-
-        warmup = search_space.get("warmup_steps", {})
-        warmup_range = (warmup.get("min", 0), warmup.get("max", 1000))
-
-        weight_decay = search_space.get("weight_decay", {})
-        wd_range = (weight_decay.get("min", 0.0), weight_decay.get("max", 0.1))
-
-        reasoning_blocks = search_space.get("num_reasoning_blocks", {})
-        rb_choices = reasoning_blocks.get("choices", [4, 6, 8])
-
-        hidden_dim = search_space.get("hidden_dim", {})
-        hd_choices = hidden_dim.get("choices", [256, 512, 768])
-
-        # Phase 3: Transfer learning / fine-tuning params
-        lambda_da = search_space.get("lambda_da", {})
-        lambda_da_range = None
-        if lambda_da:
-            lambda_da_range = (lambda_da.get("min", 0.001), lambda_da.get("max", 0.1))
-
-        unfreeze_sched = search_space.get("unfreeze_schedule", {})
-        unfreeze_sched_choices = unfreeze_sched.get("choices")
-
-        unfreeze_int = search_space.get("unfreeze_interval", {})
-        unfreeze_int_range = None
-        if unfreeze_int:
-            unfreeze_int_range = (unfreeze_int.get("min", 100), unfreeze_int.get("max", 1000))
-
-        instance = cls(
-            learning_rate=lr_range,
-            batch_size=batch_choices,
-            optimizer=opt_choices,
-            warmup_steps=warmup_range,
-            weight_decay=wd_range,
-            num_reasoning_blocks=rb_choices,
-            hidden_dim=hd_choices,
-            lambda_da=lambda_da_range,
-            unfreeze_schedule=unfreeze_sched_choices,
-            unfreeze_interval=unfreeze_int_range,
+        instance.context_window = model_config.get("sequence_length") or model_config.get(
+            "context_window"
         )
-        instance._grouped_config = None
-        instance._is_grouped = False
+        instance.param_budget = config.get("param_budget") or model_config.get("param_budget")
+
+        # Capture hd_dim if provided (needed for accurate estimation)
+        instance.hd_dim = model_config.get("hd_dim")
+
+        # Store full config for grouped detection
+        instance._grouped_config = config
+        instance._is_grouped = "parameters" in search_space_config
+
         return instance
 
     def sample(self, trial_id: int, stage: int = 1) -> dict[str, Any]:
@@ -727,7 +937,19 @@ class HPOSearchSpace:
         lr_log_max = math.log10(lr_range[1])
         sampled_lr = 10 ** random.uniform(lr_log_min, lr_log_max)
 
+        # Sample vocab_size if it's a list or tuple
+        sampled_vocab_size = self.vocab_size
+        if isinstance(self.vocab_size, (list, tuple)):
+            if len(self.vocab_size) == 2 and all(isinstance(x, int) for x in self.vocab_size):
+                sampled_vocab_size = random.randint(*self.vocab_size)
+            else:
+                sampled_vocab_size = random.choice(self.vocab_size)
+
         config = {
+            # Metadata for internal tracking
+            "_trial_id": trial_id,
+            "vocab_size": sampled_vocab_size,
+            "param_budget": self.param_budget,
             # Training hyperparameters (LR auto-derived from optimizer)
             "learning_rate": sampled_lr,
             "batch_size": random.choice(filtered_batch),
@@ -893,7 +1115,8 @@ class HPOSearchSpace:
             # =================================================================
             "use_hd_streaming": self.use_hd_streaming,
             "hd_reservoir_size": random.choice(self.hd_reservoir_size),
-            "hd_dim": random.choice(self.hd_dim),
+            # Defensive null handling: use default [512, 1024] if hd_dim is None
+            "hd_dim": random.choice(self.hd_dim if self.hd_dim else [512, 1024]),
             "vocab_sample_size": random.choice(self.vocab_sample_size),
             # =================================================================
             # PHASE 201: Quantum Memory Optimization Parameters
@@ -905,8 +1128,7 @@ class HPOSearchSpace:
         }
 
         # Add user-set tokenizer/context config if provided
-        if self.vocab_size is not None:
-            config["vocab_size"] = self.vocab_size
+        # Note: vocab_size is now TUNABLE (sampled at line 880), no longer fixed
         if self.context_window is not None:
             config["context_window"] = self.context_window
         if self.position_embedding is not None:
@@ -920,109 +1142,123 @@ class HPOSearchSpace:
         if self.unfreeze_interval is not None:
             config["unfreeze_interval"] = random.randint(*self.unfreeze_interval)
 
+        # =================================================================
+        # PHASE 200+: Enforce hd_dim divisibility constraint
+        # hd_dim must be divisible by hidden_dim for HDStreamingAdapter projection
+        # =================================================================
+        hidden_dim = config.get("hidden_dim", 256)
+        hd_dim_val = config.get("hd_dim", 1024)
+        if hd_dim_val % hidden_dim != 0:
+            # Find nearest valid hd_dim that is divisible by hidden_dim
+            # Round up to next multiple
+            valid_hd_dim = ((hd_dim_val // hidden_dim) + 1) * hidden_dim
+            # But don't exceed max from search space
+            max_hd_dim = max(self.hd_dim) if self.hd_dim else 4096
+            if valid_hd_dim > max_hd_dim:
+                # Round down instead
+                valid_hd_dim = (hd_dim_val // hidden_dim) * hidden_dim
+            if valid_hd_dim > 0:
+                config["hd_dim"] = valid_hd_dim
+                logger.debug(
+                    f"[HPO Manager] Adjusted hd_dim {hd_dim_val} -> {valid_hd_dim} "
+                    f"(divisible by hidden_dim={hidden_dim})"
+                )
+
         # Parameter budget constraint check with smart tuner integration
         if self.param_budget is not None:
+            # Re-fetch target budget for stricter enforcement
+            prog_factor = self._compute_progression_factor(trial_id)
+            trial_target_budget = int(self.param_budget * prog_factor)
+
             # Initialize budget tracker if not already done
-            if self._budget_tracker is None:
+            if not hasattr(self, "_budget_tracker") or self._budget_tracker is None:
+                from highnoon.services.hpo_metrics import OversizedConfigTracker
+
                 self._budget_tracker = OversizedConfigTracker(
                     param_budget=self.param_budget,
                 )
 
             # Check initial estimate
-            initial_estimated = estimate_model_params(config)
-            max_attempts = 50  # Allow many attempts to find a fitting config
+            # CRITICAL: Pass trial_target_budget (not full param_budget) so that
+            # compute_max_vocab_for_budget uses the progressive target, preventing
+            # initial configs from being 2-3x larger than allowed.
+            config_for_estimate = config.copy()
+            config_for_estimate["param_budget"] = trial_target_budget
+            initial_estimated = estimate_model_params(config_for_estimate)
+            max_attempts = 100  # Stricter enforcement requires more attempts
             attempt = 0
 
-            # Log if initial config exceeds budget
-            if initial_estimated > self.param_budget:
-                logger.info(
-                    f"[SmartTuner] Trial {trial_id}: initial config exceeds budget "
-                    f"({initial_estimated / 1e6:.1f}M > {self.param_budget / 1e6:.1f}M), resampling..."
+            # Log if initial config exceeds the progressive target
+            if initial_estimated > trial_target_budget:
+                logger.debug(
+                    f"[SmartTuner] Trial {trial_id}: initial config exceeds progressive budget "
+                    f"({initial_estimated / 1e6:.1f}M > {trial_target_budget / 1e6:.1f}M), resampling..."
                 )
 
             estimated_params = initial_estimated
 
-            while estimated_params > self.param_budget and attempt < max_attempts:
+            while estimated_params > trial_target_budget and attempt < max_attempts:
                 # Re-sample with progressively smaller architecture
                 attempt += 1
                 random.seed(trial_id + attempt * 1000)
 
-                # Log each resample attempt
-                logger.debug(
-                    f"[SmartTuner] Trial {trial_id} attempt {attempt}: "
-                    f"adjusting architecture to fit budget"
-                )
-
                 # Progressively tighten constraints based on attempt number
-                if attempt < 15:
-                    # Early attempts: bias toward medium configs
-                    max_blocks = 12
-                    max_experts = 8
-                    max_dim = 1024
-                elif attempt < 30:
-                    # Middle attempts: smaller configs
-                    max_blocks = 8
-                    max_experts = 6
-                    max_dim = 768
+                if attempt < max_attempts // 2:
+                    current_dim = config["embedding_dim"]
+                    smaller_dims = [d for d in filtered_dims if d < current_dim]
+                    if smaller_dims:
+                        new_dim = random.choice(smaller_dims)
+                        config["embedding_dim"] = new_dim
+                        config["hidden_dim"] = new_dim
+                    else:
+                        # If dim is already min, try reducing blocks
+                        current_blocks = config["num_reasoning_blocks"]
+                        smaller_blocks = [b for b in filtered_blocks if b < current_blocks]
+                        if smaller_blocks:
+                            config["num_reasoning_blocks"] = random.choice(smaller_blocks)
+                        else:
+                            # If also at min blocks, try reducing experts
+                            current_experts = config["num_moe_experts"]
+                            smaller_experts = [e for e in filtered_experts if e < current_experts]
+                            if smaller_experts:
+                                config["num_moe_experts"] = random.choice(smaller_experts)
                 else:
-                    # Late attempts: minimum viable configs
-                    max_blocks = 4
-                    max_experts = 4
-                    max_dim = 512
-
-                smaller_blocks = [b for b in self.num_reasoning_blocks if b <= max_blocks]
-                smaller_experts = [e for e in self.num_moe_experts if e <= max_experts]
-                smaller_dims = [d for d in self.embedding_dim if d <= max_dim]
-
-                if smaller_blocks:
-                    config["num_reasoning_blocks"] = random.choice(smaller_blocks)
-                if smaller_experts:
-                    config["num_moe_experts"] = random.choice(smaller_experts)
-                if smaller_dims:
-                    config["embedding_dim"] = random.choice(smaller_dims)
+                    # Radical reduction phase: slam to minimums
+                    config["num_reasoning_blocks"] = min(filtered_blocks)
+                    config["num_moe_experts"] = min(filtered_experts)
+                    config["embedding_dim"] = min(filtered_dims)
                     config["hidden_dim"] = config["embedding_dim"]
 
-                estimated_params = estimate_model_params(config)
+                # Use progressive target budget for estimation during resampling
+                config_for_estimate = config.copy()
+                config_for_estimate["param_budget"] = trial_target_budget
+                estimated_params = estimate_model_params(config_for_estimate)
 
-            if estimated_params > self.param_budget:
-                # Last resort: use absolute minimum config
-                config["num_reasoning_blocks"] = min(self.num_reasoning_blocks)
-                config["num_moe_experts"] = min(self.num_moe_experts)
-                config["embedding_dim"] = min(self.embedding_dim)
-                config["hidden_dim"] = config["embedding_dim"]
-                estimated_params = estimate_model_params(config)
-
-                if estimated_params > self.param_budget:
-                    # Record this as a skipped configuration
-                    self._budget_tracker.record_oversized(
-                        trial_id=f"trial_{trial_id}",
-                        config=config.copy(),
-                        estimated_params=estimated_params,
-                        reason=f"minimum_config_exceeds_budget_after_{max_attempts}_attempts",
-                    )
-                    logger.warning(
-                        f"[SmartTuner] Trial {trial_id}: SKIPPED - even minimum config exceeds param_budget "
-                        f"({estimated_params / 1e6:.1f}M > {self.param_budget / 1e6:.1f}M). "
-                        f"Consider increasing budget or reducing vocab_size."
-                    )
-                else:
-                    logger.info(
-                        f"[SmartTuner] Trial {trial_id}: using minimum config to fit budget "
-                        f"({estimated_params / 1e6:.1f}M <= {self.param_budget / 1e6:.1f}M) "
-                        f"after {attempt} attempts"
-                    )
-            else:
-                if attempt > 0:
-                    logger.info(
-                        f"[SmartTuner] Trial {trial_id}: config adjusted to fit budget "
-                        f"({estimated_params / 1e6:.1f}M <= {self.param_budget / 1e6:.1f}M) "
-                        f"after {attempt} attempts"
-                    )
-                else:
+                if attempt % 20 == 0:
                     logger.debug(
-                        f"[SmartTuner] Trial {trial_id}: config within budget "
-                        f"({estimated_params / 1e6:.1f}M <= {self.param_budget / 1e6:.1f}M)"
+                        f"[SmartTuner] Trial {trial_id} attempt {attempt}: current {estimated_params/1e6:.1f}M"
                     )
+
+            if attempt > 0:
+                logger.info(
+                    f"[SmartTuner] Trial {trial_id}: config adjusted to fit progressive target "
+                    f"({estimated_params / 1e6:.1f}M <= {trial_target_budget / 1e6:.1f}M) "
+                    f"after {attempt} attempts"
+                )
+
+            # Record if even after adjustment we are over the ABSOLUTE budget
+            if estimated_params > self.param_budget:
+                self._budget_tracker.record_oversized(
+                    trial_id=f"trial_{trial_id}",
+                    config=config.copy(),
+                    estimated_params=estimated_params,
+                    reason="even_minimum_config_exceeds_budget_after_max_attempts",
+                )
+                logger.warning(
+                    f"[SmartTuner] Trial {trial_id}: ABSOLUTE budget exceeded "
+                    f"({estimated_params / 1e6:.1f}M > {self.param_budget / 1e6:.1f}M). "
+                    f"Consider increasing budget or reducing vocab_size/HQE base."
+                )
 
         return config
 

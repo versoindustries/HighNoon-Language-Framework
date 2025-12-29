@@ -346,6 +346,8 @@ set(HIGHNOON_OPS_SOURCES
     ops/hopfield_memory_op.cc         # Phase 86: MHN-based associative memory
     # Phase 91: Quantum GaLore Gradient Compression
     ops/quantum_galore_op.cc          # Phase 91: Entropy-based dynamic rank projection
+    # Phase 200+: HD Streaming Mode
+    ops/hd_streaming_adapter_op.cc    # Phase 200+: HD bundle → model projection
 )
 
 # Controller sources (requires spdlog: apt install libspdlog-dev)

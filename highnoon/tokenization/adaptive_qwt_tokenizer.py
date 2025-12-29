@@ -75,6 +75,7 @@ class AdaptiveQWTTokenizer(QWTTextTokenizer):
         *,
         vocab_size: int,
         model_max_length: int,
+        max_vocab_size: int | None = None,
         byte_offset: int = 32,
         enable_thinking_tokens: bool = True,
         min_ngram_size: int = 2,
@@ -85,6 +86,8 @@ class AdaptiveQWTTokenizer(QWTTextTokenizer):
         Args:
             vocab_size: Target vocabulary size (will grow via learning).
             model_max_length: Maximum sequence length for the model.
+            max_vocab_size: Hard cap on vocabulary size from QAHPO budget.
+                If set, vocabulary learning will stop at this limit.
             byte_offset: Offset for byte values in vocabulary (default: 32).
             enable_thinking_tokens: Enable thinking token injection.
             min_ngram_size: Minimum n-gram size for codebook learning.
@@ -104,6 +107,17 @@ class AdaptiveQWTTokenizer(QWTTextTokenizer):
         self._base_vocab_size = base_vocab
         self._codebook_capacity = max(0, vocab_size - base_vocab)
 
+        # Hard cap from QAHPO budget (enforced during learning)
+        self._max_vocab_size = max_vocab_size
+        if max_vocab_size is not None and max_vocab_size < vocab_size:
+            # Reduce codebook capacity to respect budget
+            self._codebook_capacity = max(0, max_vocab_size - base_vocab)
+            logger.info(
+                "[AdaptiveQWT] Budget cap active: max_vocab_size=%d limits codebook to %d",
+                max_vocab_size,
+                self._codebook_capacity,
+            )
+
         # N-gram configuration
         self._min_ngram_size = min_ngram_size
         self._max_ngram_size = max_ngram_size
@@ -113,10 +127,11 @@ class AdaptiveQWTTokenizer(QWTTextTokenizer):
         self._trained = False
 
         logger.info(
-            "[AdaptiveQWT] Initialized: base_vocab=%d, target=%d, codebook_capacity=%d",
+            "[AdaptiveQWT] Initialized: base_vocab=%d, target=%d, codebook_capacity=%d%s",
             self._base_vocab_size,
             self._target_vocab_size,
             self._codebook_capacity,
+            f" (capped at {max_vocab_size})" if max_vocab_size else "",
         )
 
     @property
@@ -246,11 +261,20 @@ class AdaptiveQWTTokenizer(QWTTextTokenizer):
         )
 
         self._trained = True
-        logger.info(
-            "[AdaptiveQWT] Learned %d n-gram tokens, vocab_size now %d",
-            learned_count,
-            self.vocab_size,
-        )
+        final_vocab = self.vocab_size
+
+        # Check if we hit the budget cap
+        if self._max_vocab_size is not None and final_vocab >= self._max_vocab_size:
+            logger.info(
+                "[AdaptiveQWT] vocab_size capped at %d (budget limit)",
+                self._max_vocab_size,
+            )
+        else:
+            logger.info(
+                "[AdaptiveQWT] Learned %d n-gram tokens, vocab_size now %d",
+                learned_count,
+                final_vocab,
+            )
 
         return learned_count
 

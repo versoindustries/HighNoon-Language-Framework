@@ -155,6 +155,7 @@ def load_training_dataset(
 
                 tokenizer = AdaptiveQWTTokenizer(
                     vocab_size=vocab_size or config.VOCAB_SIZE,
+                    max_vocab_size=vocab_size,  # Hard cap from QAHPO budget
                     model_max_length=sequence_length,
                     min_ngram_size=2,
                     max_ngram_size=5,
@@ -211,6 +212,7 @@ def load_training_dataset(
 
             tokenizer = AdaptiveQWTTokenizer(
                 vocab_size=vocab_size,
+                max_vocab_size=vocab_size,  # Hard cap from QAHPO budget
                 model_max_length=sequence_length,
                 min_ngram_size=2,
                 max_ngram_size=5,

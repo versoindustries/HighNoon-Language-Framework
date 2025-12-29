@@ -98,12 +98,17 @@ def create_scheduler(
     user_optimizer = model_config.get("optimizer")
     optimizer_list = [user_optimizer] if user_optimizer else None
 
-    # Create HPOSearchSpace with user's budget constraint for proper enforcement
-    # This ensures sampled configs respect param_budget, vocab_size, context_window, and optimizer
+    # Create HPOSearchSpace with user's budget constraint and feature flags for proper enforcement
+    # Flags like use_hyperdimensional_embedding significantly impact param count
+    # Note: hd_dim is NOT passed here - it uses the default_factory [512, 1024] for HPO sampling
+    # The model_config.hd_dim is used later for parameter estimation, not for HPO search space
     hpo_search_space = HPOSearchSpace(
         vocab_size=vocab_size,
         context_window=context_window,
         param_budget=param_budget,
+        use_hyperdimensional_embedding=model_config.get("use_hyperdimensional_embedding", True),
+        use_quantum_lm_head=model_config.get("use_quantum_lm_head", True),
+        use_td_moe=model_config.get("use_td_moe", True),
     )
 
     # Override optimizer list if user specified one
@@ -144,6 +149,28 @@ def create_scheduler(
         if search_space:
             custom_sampled = sample_search_space(search_space, trial_id)
             base_config.update(custom_sampled)
+
+        # Phase 201.7: Ensure vocab_size is set explicitly when param_budget is specified
+        # This prevents trial_runner from auto-detecting a huge vocab from the curriculum
+        if param_budget and base_config.get("vocab_size") is None:
+            from highnoon.services.hpo_manager import compute_max_vocab_for_budget
+
+            embedding_dim = base_config.get("hidden_dim", 256)
+            use_hqe = base_config.get("use_hyperdimensional_embedding", True)
+            hd_dim = base_config.get("hd_dim")
+
+            max_vocab = compute_max_vocab_for_budget(
+                param_budget=param_budget,
+                embedding_dim=embedding_dim,
+                use_hqe=use_hqe,
+                hd_dim=hd_dim,
+                model_overhead_fraction=0.5,
+            )
+            base_config["vocab_size"] = max_vocab
+            logger.info(
+                f"[HPO] Set budget-aware vocab_size={max_vocab} "
+                f"(budget={param_budget/1e6:.0f}M, hqe={use_hqe})"
+            )
 
         return base_config
 

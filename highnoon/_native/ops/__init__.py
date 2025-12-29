@@ -62,6 +62,13 @@ from highnoon._native.ops.fused_wavelet_encoder import (
     fused_wavelet_encoder_chunk,
 )
 
+# Phase 200+: HD Streaming Adapter
+from highnoon._native.ops.hd_streaming_adapter import (
+    HDStreamingAdapter,
+    hd_streaming_project,
+    hd_streaming_project_grad,
+)
+
 # Phase 71: Intrinsic Plasticity
 from highnoon._native.ops.intrinsic_plasticity_ops import (
     cayley_parameterization,
@@ -309,4 +316,8 @@ __all__ = [
     "multi_stage_hamiltonian",
     "random_natural_gradient",
     "specialized_ops_available",
+    # Phase 200+: HD Streaming Adapter
+    "HDStreamingAdapter",
+    "hd_streaming_project",
+    "hd_streaming_project_grad",
 ]

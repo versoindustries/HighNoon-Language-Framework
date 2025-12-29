@@ -894,6 +894,13 @@ class QuantumLMHead(tf.keras.layers.Layer):
             alpha = tf.nn.sigmoid(self.fallback_weight)
             logits = alpha * logits + (1 - alpha) * dense_logits
 
+        # Phase 200+: HD Streaming shape fix
+        # When seq_len=1 (HD bundle mode), squeeze to (batch, vocab)
+        # This ensures compatibility with sparse_categorical_crossentropy
+        # for single-token prediction from HD bundles
+        if len(logits.shape) == 3 and logits.shape[1] == 1:
+            logits = tf.squeeze(logits, axis=1)
+
         return logits
 
     def _apply_vqc_circuit(self, x: tf.Tensor) -> tf.Tensor:
@@ -916,7 +923,8 @@ class QuantumLMHead(tf.keras.layers.Layer):
 
         for layer in range(self.vqc_layers):
             # Get rotation parameters for this layer
-            rx = self.vqc_params[layer, :, 0]  # [vqc_qubits]
+            # Note: rx (Rx rotation) extracted but unused - only Rz/Ry used in simplified model
+            _ = self.vqc_params[layer, :, 0]  # rx - unused in simplified model
             ry = self.vqc_params[layer, :, 1]
             rz = self.vqc_params[layer, :, 2]
 
@@ -927,8 +935,7 @@ class QuantumLMHead(tf.keras.layers.Layer):
 
             # Reshape for broadcasting
             # amplitudes: [batch, seq, vqc_dim]
-            # We need to group vqc_dim into 2^qubits bins
-            batch_shape = tf.shape(amplitudes)[:2]  # [batch, seq]
+            # Phase rotation applied across full vqc_dim
 
             # Apply phase rotation (Rz approximation)
             # Each group of 2^(qubits-i) elements gets phase from qubit i

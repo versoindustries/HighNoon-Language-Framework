@@ -27,24 +27,13 @@ from highnoon._native.ops import (
 from highnoon.analysis.memory_profiler import MemoryProfiler
 from highnoon.analysis.system_identification import parse_log_file, prepare_data_from_logs
 from highnoon.config import (  # Lite Edition Limits (enforced by C++ binaries); EWC (deprecated but kept for compatibility); GaLore gradient compression; Quantum training flags; Neural error mitigation; Meta controller
-    BARREN_PLATEAU_MONITOR,
-    BARREN_PLATEAU_RECOVERY_LR_SCALE,
     BARREN_PLATEAU_THRESHOLD,
     ENABLE_EWC,
     EWC_LAMBDA,
     GALORE_RANK,
     GALORE_SCALE,
     GALORE_UPDATE_PROJ_GAP,
-    LITE_MAX_CONTEXT_LENGTH,
-    LITE_MAX_MOE_EXPERTS,
-    LITE_MAX_PARAMS,
-    LITE_MAX_REASONING_BLOCKS,
     META_CONTROLLER_FREQUENCY,
-    QNG_DAMPING,
-    USE_META_CONTROLLER,
-    USE_NEURAL_QEM,
-    USE_NEURAL_ZNE,
-    USE_QUANTUM_NATURAL_GRADIENT,
     USE_TENSOR_GALORE,
 )
 
@@ -56,7 +45,7 @@ from highnoon.training.control_bridge import EvolutionTimeControlBridge
 from highnoon.training.data_utils import ensure_path
 
 # GaLore gradient compression
-from highnoon.training.gradient_compression import GaLoreOptimizerWrapper, TensorGaLoreCompressor
+from highnoon.training.gradient_compression import TensorGaLoreCompressor
 
 # HPO integration
 from highnoon.training.hpo_bridge import HPOReporter, load_trial_config

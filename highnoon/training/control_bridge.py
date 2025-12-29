@@ -27,7 +27,6 @@ Hamiltonian dynamics are becoming unstable.
 """
 
 import logging
-from typing import Optional
 
 import tensorflow as tf
 

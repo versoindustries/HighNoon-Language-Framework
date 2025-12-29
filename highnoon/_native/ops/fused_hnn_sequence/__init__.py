@@ -60,7 +60,7 @@ def _ensure_loaded():
 # --- Custom Gradient Registration ---
 # Register the gradient so TensorFlow knows how to call the C++ grad kernel
 
-from tensorflow.python.framework import ops as _ops
+from tensorflow.python.framework import ops as _ops  # noqa: E402
 
 
 @_ops.RegisterGradient("FusedHNNSequence")

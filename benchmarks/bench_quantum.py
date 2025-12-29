@@ -80,11 +80,11 @@ def benchmark_phase1_neumann_cayley() -> list[QuantumBenchmarkResult]:
     A_skew = (A - A.T) / 2  # Skew-symmetric
 
     # Cayley transform: U = (I - A)(I + A)^{-1}
-    I = np.eye(dim, dtype=np.float32)
-    U = np.linalg.solve(I + A_skew, I - A_skew)
+    identity = np.eye(dim, dtype=np.float32)
+    U = np.linalg.solve(identity + A_skew, identity - A_skew)
 
     # Check orthogonality: U^T U should be identity
-    orthogonality_error = np.linalg.norm(U.T @ U - I) / dim
+    orthogonality_error = np.linalg.norm(U.T @ U - identity) / dim
 
     results.append(
         QuantumBenchmarkResult(
@@ -102,13 +102,13 @@ def benchmark_phase1_neumann_cayley() -> list[QuantumBenchmarkResult]:
     epsilon = 0.01  # Small epsilon ensures ||A|| < 1 for convergence
     A_small = epsilon * A_skew
     # Neumann series: (I + A)^{-1} ≈ I - A + A² - A³ + ...
-    neumann_approx = I.copy()
+    neumann_approx = identity.copy()
     power = A_small.copy()
     for k in range(1, 6):
         neumann_approx += ((-1) ** k) * power
         power = power @ A_small
 
-    exact_inv = np.linalg.inv(I + A_small)
+    exact_inv = np.linalg.inv(identity + A_small)
     neumann_error = np.linalg.norm(neumann_approx - exact_inv) / np.linalg.norm(exact_inv)
 
     results.append(

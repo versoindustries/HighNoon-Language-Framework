@@ -47,7 +47,6 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Iterator
 from typing import Any
 
 import numpy as np

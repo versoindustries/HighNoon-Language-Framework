@@ -286,7 +286,7 @@ class HolographicActivationEncoder:
                 phases = phase_matrix[:seq_len]  # [L, hd_dim]
             else:
                 # Dynamic slicing for tensor seq_len
-                phases = phase_matrix[:tf.minimum(seq_len, max_seq)]
+                phases = phase_matrix[: tf.minimum(seq_len, max_seq)]
 
             # Undo phase: multiply by phase again (since phase is ±1)
             unphased = bundle * phases  # [B, L, hd_dim]
@@ -306,8 +306,7 @@ class HolographicActivationEncoder:
                 # Dynamic broadcast
                 decoded_expanded = tf.expand_dims(decoded, axis=1)  # [B, 1, D]
                 reconstructed = tf.broadcast_to(
-                    decoded_expanded,
-                    [tf.shape(decoded)[0], seq_len, tf.shape(decoded)[1]]
+                    decoded_expanded, [tf.shape(decoded)[0], seq_len, tf.shape(decoded)[1]]
                 )
 
         return reconstructed
@@ -466,7 +465,6 @@ class HDCheckpointLayer(tf.keras.layers.Layer):
 
                     # Update slot via assignment (simplified from full superposition write)
                     # In full implementation, would use superposition_write C++ op
-                    indices = tf.constant([[slot_idx]])
                     bus.write_slot(slot_idx, bundle_projected)
                     logger.debug(f"[HDCheckpoint] Wrote bundle to State Bus slot {slot_idx}")
                     return
@@ -635,7 +633,9 @@ class HDCheckpointLayer(tf.keras.layers.Layer):
 
                 except Exception as e:
                     # If anything fails, pass gradient through unchanged
-                    logger.debug(f"[HDCheckpoint] Gradient computation failed: {e}, using passthrough")
+                    logger.debug(
+                        f"[HDCheckpoint] Gradient computation failed: {e}, using passthrough"
+                    )
                     input_grad = upstream
                     if variables:
                         var_grads = [tf.zeros_like(v) for v in variables]

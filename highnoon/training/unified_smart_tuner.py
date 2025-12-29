@@ -540,7 +540,6 @@ class UnifiedSmartTuner:
         vqc_decisions = None
         if self._vqc_meta is not None and not self._emergency_mode:
             try:
-                from highnoon.training.vqc_meta_optimizer import VQCTuningDecisions
 
                 vqc_decisions = self._vqc_meta.compute_tuning_decisions(
                     loss=loss,

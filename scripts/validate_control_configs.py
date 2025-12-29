@@ -20,12 +20,9 @@ Copyright 2025 Verso Industries
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import math
-import os
 import sys
-import tempfile
 from pathlib import Path
 
 # Add project root to sys.path
@@ -99,7 +96,9 @@ def validate_native_ops_available() -> bool:
         True if native ops are available, False otherwise
     """
     try:
-        from highnoon._native.ops.meta_controller_op import trigger_meta_controller
+        from highnoon._native.ops.meta_controller_op import (  # noqa: F401 - imported to test availability
+            trigger_meta_controller,
+        )
 
         logger.info("Native meta_controller_op is available")
         return True

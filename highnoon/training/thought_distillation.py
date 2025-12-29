@@ -46,7 +46,7 @@ from typing import Any
 import tensorflow as tf
 from tensorflow.keras import layers
 
-from highnoon.config import COCONUT_CRYSTALLIZE_THRESHOLD, COCONUT_NUM_PATHS, USE_CONTINUOUS_THOUGHT
+from highnoon.config import COCONUT_CRYSTALLIZE_THRESHOLD
 
 logger = logging.getLogger(__name__)
 

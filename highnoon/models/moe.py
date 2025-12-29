@@ -27,7 +27,6 @@ CRITICAL: This module requires C++ compiled operators. No Python fallback is pro
 """
 
 import logging
-import math
 from typing import Any
 
 import tensorflow as tf
@@ -60,7 +59,7 @@ from highnoon.config import (  # Phase 14.2: MoE Innovations; Phase 19.4: Thermo
     HD_SHARED_BASIS_NUM_VECTORS,
     NEUMANN_CAYLEY_TERMS,
     NUM_SHARED_EXPERTS,
-    QMOE_USE_FLOQUET_PHASE,  # S4: Floquet-QMoE phase routing
+    QMOE_USE_FLOQUET_PHASE,
     SUPERPOSITION_COMPLEXITY_SCALE,
     SUPERPOSITION_DIM,
     SUPERPOSITION_MAX_DIM,

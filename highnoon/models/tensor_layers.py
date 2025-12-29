@@ -355,7 +355,7 @@ class SuperpositionTTLayer(layers.Layer):
 # --- END: SuperpositionTTLayer Implementation ---
 
 # Phase 14.4.3: Import config for hybrid TN-NN
-from highnoon.config import USE_HYBRID_TN
+from highnoon.config import USE_HYBRID_TN  # noqa: E402
 
 
 class HybridTTLayer(layers.Layer):

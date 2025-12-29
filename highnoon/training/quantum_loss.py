@@ -409,11 +409,9 @@ def spectral_entropy(
     # Handle different input shapes
     if len(h.shape) == 3:
         # [batch, seq, dim] -> flatten to [batch * seq, dim]
-        batch_size = tf.shape(h)[0]
         h_flat = tf.reshape(h, [-1, h.shape[-1]])
     else:
         # [batch, dim]
-        batch_size = tf.shape(h)[0]
         h_flat = h
 
     # Center the data
@@ -616,7 +614,7 @@ def coherence_preservation_loss(
     if isinstance(coherence_metrics, dict):
         # Average over all block coherence values
         values = []
-        for key, value in coherence_metrics.items():
+        for _, value in coherence_metrics.items():
             if tf.is_tensor(value):
                 values.append(tf.cast(value, tf.float32))
             else:

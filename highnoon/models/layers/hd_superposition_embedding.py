@@ -45,12 +45,7 @@ from typing import Any
 import tensorflow as tf
 from tensorflow.keras import layers
 
-from highnoon.config import (
-    HD_ACTIVE_VOCAB_SIZE,
-    HD_EMBEDDING_DIM,
-    HD_SUPERPOSITION_BRANCHES,
-    USE_HD_SUPERPOSITION_EMBEDDING,
-)
+from highnoon.config import HD_ACTIVE_VOCAB_SIZE, HD_EMBEDDING_DIM, HD_SUPERPOSITION_BRANCHES
 
 logger = logging.getLogger(__name__)
 

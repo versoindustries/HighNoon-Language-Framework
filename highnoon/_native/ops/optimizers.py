@@ -26,7 +26,6 @@ NO PYTHON FALLBACKS: RuntimeError raised if native ops unavailable.
 """
 
 import logging
-from typing import Tuple
 
 import tensorflow as tf
 

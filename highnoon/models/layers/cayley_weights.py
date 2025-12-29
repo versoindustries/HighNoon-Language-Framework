@@ -152,13 +152,13 @@ class CayleyDense(tf.keras.layers.Layer):
         Uses Woodbury identity for efficient computation when cached.
         """
         n = tf.shape(A)[0]
-        I = tf.eye(n, dtype=A.dtype)
+        identity = tf.eye(n, dtype=A.dtype)
 
         # W = (I - A) @ (I + A)^{-1}
         # For numerical stability, solve (I + A) @ W^T = (I - A)^T
         # Then transpose result
-        I_plus_A = I + A
-        I_minus_A = I - A
+        I_plus_A = identity + A
+        I_minus_A = identity - A
 
         # Use matrix solve for numerical stability
         W = tf.linalg.solve(I_plus_A, I_minus_A)

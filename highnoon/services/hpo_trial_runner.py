@@ -38,7 +38,9 @@ HamiltonianMetaControllerCallback = None
 EvolutionTimeControlBridge = None
 try:
     from highnoon.training.callbacks import HamiltonianMetaControllerCallback
-    from highnoon.training.control_bridge import EvolutionTimeControlBridge
+    from highnoon.training.control_bridge import (  # noqa: F401 - availability check
+        EvolutionTimeControlBridge,
+    )
 
     META_CONTROLLER_AVAILABLE = True
 except (ImportError, ModuleNotFoundError):
@@ -46,29 +48,17 @@ except (ImportError, ModuleNotFoundError):
 
 # Import config module for global feature flags
 # Note: Using `hn_config` to avoid conflict with local `config` dict parameter
-import highnoon.config as hn_config
+import highnoon.config as hn_config  # noqa: E402
 
 # Quantum control and QSG imports
-from highnoon.config import (  # Quantum training features; Model architecture limits; Quantum tokenization pipeline (Phase 48+)
-    GALORE_RANK,
-    LITE_MAX_CONTEXT_LENGTH,
-    LITE_MAX_MOE_EXPERTS,
-    LITE_MAX_PARAMS,
-    LITE_MAX_REASONING_BLOCKS,
+from highnoon.config import (  # noqa: E402  # Quantum training features; Model architecture limits; Quantum tokenization pipeline (Phase 48+)
     META_CONTROLLER_FREQUENCY,
     USE_HYBRID_PID,
-    USE_HYPERDIMENSIONAL_EMBEDDING,
     USE_INTELLIGENT_VOCAB_CONTROLLER,
-    USE_NEURAL_QEM,
-    USE_NEURAL_ZNE,
     USE_QSG_GENERATION,
-    USE_QUANTUM_LM_HEAD,
-    USE_QUANTUM_LR_CONTROLLER,
     USE_RLS_SYSID,
-    USE_TENSOR_GALORE,
     VOCAB_CONTROLLER_AUTO_TRAIN,
 )
-from highnoon.training.quantum_lr_controller import QuantumAdaptiveLRController
 
 # QULS - Quantum Unified Loss System (Phase 132)
 QULS_AVAILABLE = False
@@ -76,7 +66,7 @@ QuantumUnifiedLoss = None
 QULSConfig = None
 create_quls_from_hpo_config = None
 try:
-    from highnoon.training.quantum_loss import (
+    from highnoon.training.quantum_loss import (  # noqa: F401 - availability check
         QuantumUnifiedLoss,
         QULSConfig,
         create_quls_from_hpo_config,
@@ -1074,7 +1064,7 @@ def create_optimizer(
         # SympFlow: Symplectic Hamiltonian Optimizer
         # Uses Hamiltonian dynamics with symplectic integration for optimization
         try:
-            from highnoon.config import (
+            from highnoon.config import (  # noqa: F401 - imported for future use
                 SYMPFLOW_FRICTION,
                 SYMPFLOW_MASS,
                 SYMPFLOW_NUM_LEAPFROG_STEPS,

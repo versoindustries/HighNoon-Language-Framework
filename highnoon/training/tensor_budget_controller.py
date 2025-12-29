@@ -33,11 +33,10 @@ References:
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
-import tensorflow as tf
 
 from highnoon.config import (
     TENSOR_BUDGET_EMBEDDING_PRIORITY,
@@ -412,7 +411,7 @@ class TensorBudgetController:
             "step_counter": self._step_counter,
             "last_realloc_step": self._last_realloc_step,
             "layer_types": {
-                lt: sum(1 for l in self._layers.values() if l.layer_type == lt)
+                lt: sum(1 for layer in self._layers.values() if layer.layer_type == lt)
                 for lt in ["lm_head", "embedding", "moe", "attention", "ffn", "other"]
             },
             "rank_distribution": {

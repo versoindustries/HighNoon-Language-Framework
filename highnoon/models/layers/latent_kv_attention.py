@@ -45,7 +45,9 @@ from highnoon.config import GQA_NUM_KV_HEADS, LATENT_KV_DIM, LATENT_KV_USE_QUANT
 logger = logging.getLogger(__name__)
 
 # Strict C++ compliance: require fused op
-from highnoon._native.ops.fused_latent_kv_attention_op import fused_latent_kv_attention_available
+from highnoon._native.ops.fused_latent_kv_attention_op import (  # noqa: E402
+    fused_latent_kv_attention_available,
+)
 
 _cpp_op_available = fused_latent_kv_attention_available()
 

@@ -259,7 +259,7 @@ class HyperbandSchedule:
 
         logger.info(
             f"[Hyperband] Generated bracket {bracket.bracket_id} (s={s}): "
-            f"{[(l.epochs, l.n_configs) for l in levels]}"
+            f"{[(level.epochs, level.n_configs) for level in levels]}"
         )
 
         return bracket

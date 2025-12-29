@@ -149,10 +149,10 @@ def _sanitize_diagnostics(payload: Mapping[str, Any] | None) -> dict[str, dict[s
     for axis, fields in payload.items():
         axis_key = str(axis).upper()
         axis_metrics: dict[str, float] = {}
-        for field in TMC_DIAGNOSTIC_FIELDS:
-            if field in fields:
+        for field_name in TMC_DIAGNOSTIC_FIELDS:
+            if field_name in fields:
                 try:
-                    axis_metrics[field] = float(fields[field])
+                    axis_metrics[field_name] = float(fields[field_name])
                 except (TypeError, ValueError):
                     continue
         if axis_metrics:

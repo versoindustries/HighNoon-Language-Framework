@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 # OP LOADING
 # =============================================================================
 
-from highnoon._native import get_op
+from highnoon._native import get_op  # noqa: E402
 
 logger = logging.getLogger(__name__)
 

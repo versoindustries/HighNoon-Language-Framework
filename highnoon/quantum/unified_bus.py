@@ -415,7 +415,7 @@ class UnifiedQuantumBus(tf.keras.layers.Layer):
         self._orth_center.assign(0)
 
         # Reinitialize MPS cores
-        for i, core in enumerate(self.mps_cores):
+        for _, core in enumerate(self.mps_cores):
             stddev = (2.0 / (core.shape[0] + core.shape[2])) ** 0.5
             new_core = tf.random.normal(core.shape, stddev=stddev)
             core.assign(new_core)

@@ -133,7 +133,7 @@ def load_huggingface_dataset(
     except ImportError:
         raise ImportError(
             "HuggingFace datasets library required. Install with: pip install datasets"
-        )
+        ) from None
 
     if dataset_name not in DATASET_CONFIGS:
         raise ValueError(

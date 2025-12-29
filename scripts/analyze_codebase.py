@@ -11,15 +11,13 @@ Generates a markdown report: CODE_ANALYSIS_REPORT.md
 
 import ast
 import hashlib
-import json
 import logging
 import os
 import subprocess
 import sys
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
 
 # Configuration
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
@@ -145,7 +143,7 @@ class DuplicateDetector:
 
     def find_duplicates(self) -> list[DuplicateItem]:
         duplicates = []
-        for h, nodes in self.hashes.items():
+        for _, nodes in self.hashes.items():
             if len(nodes) > 1:
                 # Pick the first one for metadata
                 first = nodes[0]

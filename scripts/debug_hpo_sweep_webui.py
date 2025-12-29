@@ -23,7 +23,6 @@ import argparse
 import gc
 import logging
 import math
-import os
 import sys
 import time
 from pathlib import Path
@@ -45,21 +44,21 @@ logger = logging.getLogger(__name__)
 # Imports (after path setup)
 # =============================================================================
 
-import tensorflow as tf
+import tensorflow as tf  # noqa: E402
 
 # Import global config
-import highnoon.config as hn_config
-
 # Serialization API
-from highnoon.serialization import load_model, save_model
-from highnoon.services.hpo_training_bridge import HPOTrainingConfig
+from highnoon.serialization import load_model, save_model  # noqa: E402
+from highnoon.services.hpo_training_bridge import HPOTrainingConfig  # noqa: E402
 
 # Vocabulary Controller for quantum tokenization pipeline
-from highnoon.tokenization.vocab_controller import IntelligentVocabController, VocabControllerConfig
+from highnoon.tokenization.vocab_controller import (  # noqa: E402
+    IntelligentVocabController,
+    VocabControllerConfig,
+)
 
 # TrainingEngine and HPO Bridge (new unified infrastructure)
-from highnoon.training.training_engine import (
-    EnterpriseTrainingConfig,
+from highnoon.training.training_engine import (  # noqa: E402
     TrainingCallback,
     TrainingEngine,
     TrainingResult,
@@ -299,7 +298,6 @@ def build_model(config: HPOTrainingConfig) -> tf.keras.Model:
     from highnoon.models.layers.hyperdimensional_layer import HyperdimensionalEmbedding
     from highnoon.models.reasoning.block_factory import QuantumLMHead
     from highnoon.models.reasoning.reasoning_module import ReasoningModule
-    from highnoon.services.hpo_trial_runner import build_hsmn_model
 
     # Create vocab controller with auto-learning disabled for debug
     # (effective vocab = base vocab without corpus training)
@@ -457,7 +455,10 @@ def create_verso_baseline_dataset(
         TensorFlow dataset yielding (inputs, labels) tuples, or None if loading fails.
     """
     try:
-        from datasets import IterableDataset, load_dataset
+        from datasets import (  # noqa: F401 - IterableDataset for type hint
+            IterableDataset,
+            load_dataset,
+        )
     except ImportError:
         logger.warning("[VersoBaseline] HuggingFace datasets not installed")
         return None

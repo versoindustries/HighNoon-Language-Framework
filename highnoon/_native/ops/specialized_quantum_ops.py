@@ -8,7 +8,6 @@ NO PYTHON FALLBACKS: RuntimeError raised if native ops unavailable.
 """
 
 import logging
-from typing import Tuple
 
 import tensorflow as tf
 
@@ -90,8 +89,6 @@ def spiking_quantum_neuron(
         Tuple of (spikes [batch, neurons], new_potential [batch, neurons]).
     """
     if not config.USE_NEUROMORPHIC_MEMORY:
-        batch_size = tf.shape(input_tensor)[0]
-        neurons = input_tensor.shape[1] or tf.shape(input_tensor)[1]
         return tf.zeros_like(input_tensor), membrane_potential
     _load_ops()
     tau = tau or config.NEUROMORPHIC_TAU

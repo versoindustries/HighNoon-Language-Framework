@@ -27,7 +27,7 @@ import os
 import sys
 import time
 import traceback
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -50,10 +50,9 @@ logger = logging.getLogger("HPO_NAN_DEBUG")
 # Suppress noisy TensorFlow logs but keep warnings
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "1"
 
-import tensorflow as tf
+import tensorflow as tf  # noqa: E402
 
 # Import global config
-import highnoon.config as hn_config
 
 # ============================================================================
 # Debug Configuration

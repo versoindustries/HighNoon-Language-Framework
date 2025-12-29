@@ -510,7 +510,7 @@ class DatasetRegistry:
         except ImportError:
             raise ImportError(
                 "HuggingFace datasets library required. Install with: pip install datasets"
-            )
+            ) from None
 
         config = self.get_config(name)
         use_streaming = streaming if streaming is not None else config.streaming

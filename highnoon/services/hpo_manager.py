@@ -1483,21 +1483,21 @@ class HPOTrialManager:
 
             trial_idx = 0
             # Stage 1: COARSE
-            for i in range(max_stage1):
+            for _ in range(max_stage1):
                 trial_id = f"trial_{trial_idx:04d}"
                 config = self.search_space.sample(trial_idx, stage=1)
                 trials.append((trial_id, config, 1))
                 trial_idx += 1
 
             # Stage 2: REFINE
-            for i in range(max_stage2):
+            for _ in range(max_stage2):
                 trial_id = f"trial_{trial_idx:04d}"
                 config = self.search_space.sample(trial_idx, stage=2)
                 trials.append((trial_id, config, 2))
                 trial_idx += 1
 
             # Stage 3: FINE
-            for i in range(max_stage3):
+            for _ in range(max_stage3):
                 trial_id = f"trial_{trial_idx:04d}"
                 config = self.search_space.sample(trial_idx, stage=3)
                 trials.append((trial_id, config, 3))

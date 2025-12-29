@@ -436,7 +436,10 @@ class NativeOpsBridge:
 
         # Import QMR config
         try:
-            from highnoon.config import ENABLE_QUANTUM_MEMORY_REPLAY, QMR_CHECKPOINT_STRATEGY
+            from highnoon.config import (  # noqa: F401 - imported for config validation
+                ENABLE_QUANTUM_MEMORY_REPLAY,
+                QMR_CHECKPOINT_STRATEGY,
+            )
 
             qmr_enabled = ENABLE_QUANTUM_MEMORY_REPLAY
         except ImportError:
@@ -463,7 +466,7 @@ class NativeOpsBridge:
         try:
             embedding_dim = model.embedding_dim if hasattr(model, "embedding_dim") else 128
             num_blocks = model.num_reasoning_blocks if hasattr(model, "num_reasoning_blocks") else 6
-        except:
+        except Exception:
             embedding_dim = 128
             num_blocks = 6
 

@@ -422,7 +422,7 @@ def format_comparison_markdown(results: dict[str, Any]) -> str:
         "|--------------|------------|-------------|",
     ]
 
-    for name, profile in results["profiles"].items():
+    for _, profile in results["profiles"].items():
         lines.append(f"| {profile['name']} | {profile['complexity']} | {profile['description']} |")
 
     lines.extend(["", "## Timing Results (ms)", ""])

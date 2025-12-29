@@ -55,11 +55,7 @@ from typing import Any
 
 import tensorflow as tf
 
-from highnoon._native.ops.hyperdimensional_embedding import (
-    ctqw_spread,
-    holographic_bundle,
-    hyperdimensional_embedding_available,
-)
+from highnoon._native.ops.hyperdimensional_embedding import ctqw_spread
 
 logger = logging.getLogger(__name__)
 

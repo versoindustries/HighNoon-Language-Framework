@@ -548,7 +548,7 @@ class LatentReasoningBlock(FusedReasoningBlockMixin, tf.keras.layers.Layer):
             raise RuntimeError(
                 "LatentReasoningBlock requires C++ fused_latent_reasoning op in strict mode. "
                 "Please compile with: ./build_secure.sh"
-            )
+            ) from None
 
         if _fused_latent_reasoning_op is None:
             raise RuntimeError(

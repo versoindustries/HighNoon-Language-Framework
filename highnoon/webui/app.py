@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 # Logging Configuration for HPO Debugging
 # ============================================================================
 # Set HIGHNOON_LOG_LEVEL=DEBUG to enable comprehensive HPO tracing
-import os as _os
+import os as _os  # noqa: E402
 
 _log_level_str = _os.environ.get("HIGHNOON_LOG_LEVEL", "INFO").upper()
 _log_level = getattr(logging, _log_level_str, logging.INFO)
@@ -1384,11 +1384,13 @@ def create_app(debug: bool = False) -> FastAPI:
                     )
                 return {"datasets": results, "total": len(results)}
         except httpx.HTTPStatusError as e:
-            raise HTTPException(status_code=e.response.status_code, detail="HuggingFace API error")
+            raise HTTPException(
+                status_code=e.response.status_code, detail="HuggingFace API error"
+            ) from e
         except httpx.RequestError as e:
             raise HTTPException(
                 status_code=503, detail=f"Failed to connect to HuggingFace: {str(e)}"
-            )
+            ) from e
 
     @app.get("/api/huggingface/dataset/{dataset_id:path}")
     async def get_huggingface_dataset_info(dataset_id: str):
@@ -1423,11 +1425,13 @@ def create_app(debug: bool = False) -> FastAPI:
                     "dataset_info": dataset_info.get("dataset_info", {}),
                 }
         except httpx.HTTPStatusError as e:
-            raise HTTPException(status_code=e.response.status_code, detail="Dataset not found")
+            raise HTTPException(
+                status_code=e.response.status_code, detail="Dataset not found"
+            ) from e
         except httpx.RequestError as e:
             raise HTTPException(
                 status_code=503, detail=f"Failed to connect to HuggingFace: {str(e)}"
-            )
+            ) from e
 
     @app.get("/api/huggingface/dataset/{dataset_id:path}/preview")
     async def preview_huggingface_dataset(
@@ -1472,11 +1476,13 @@ def create_app(debug: bool = False) -> FastAPI:
             # Try without config
             if config != "default":
                 return await preview_huggingface_dataset(dataset_id, "default", split, rows)
-            raise HTTPException(status_code=e.response.status_code, detail="Preview not available")
+            raise HTTPException(
+                status_code=e.response.status_code, detail="Preview not available"
+            ) from e
         except httpx.RequestError as e:
             raise HTTPException(
                 status_code=503, detail=f"Failed to connect to HuggingFace: {str(e)}"
-            )
+            ) from e
 
     # ========================================================================
     # API Routes - Local Datasets
@@ -1538,12 +1544,12 @@ def create_app(debug: bool = False) -> FastAPI:
                 }
                 local_datasets.append(new_dataset)
                 return {"status": "added", "dataset": new_dataset}
-        except httpx.HTTPStatusError:
-            raise HTTPException(status_code=404, detail="Dataset not found on HuggingFace")
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(status_code=404, detail="Dataset not found on HuggingFace") from e
         except httpx.RequestError as e:
             raise HTTPException(
                 status_code=503, detail=f"Failed to connect to HuggingFace: {str(e)}"
-            )
+            ) from e
 
     @app.delete("/api/datasets/{dataset_id:path}")
     async def remove_dataset(dataset_id: str):
@@ -3318,7 +3324,7 @@ def create_app(debug: bool = False) -> FastAPI:
 
         # Get marginal curves for top 3 parameters
         marginal_curves = {}
-        for i, imp in enumerate(result.individual[:3]):
+        for _, imp in enumerate(result.individual[:3]):
             curve = analyzer.get_marginal_curve(imp.name)
             if curve:
                 marginal_curves[imp.name] = {
@@ -3486,7 +3492,7 @@ def create_app(debug: bool = False) -> FastAPI:
                 json.dump(config_dict, f, indent=2)
             logger.info("[SmartTuner] Configuration updated: %s", config_dict)
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to save config: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to save config: {e}") from e
 
         return {"status": "updated", "config": config_dict}
 
@@ -3599,10 +3605,10 @@ def create_app(debug: bool = False) -> FastAPI:
             memory = TunerMemory(TUNER_MEMORY_PATH)
             memory.clear()
             return {"status": "cleared", "message": "Cross-trial memory cleared"}
-        except ImportError:
-            raise HTTPException(status_code=500, detail="TunerMemory module not available")
+        except ImportError as e:
+            raise HTTPException(status_code=500, detail="TunerMemory module not available") from e
         except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+            raise HTTPException(status_code=500, detail=str(e)) from e
 
     @app.post("/api/smart-tuner/memory/compact")
     async def compact_tuner_memory(keep_top_n: int = 100):
@@ -3617,10 +3623,10 @@ def create_app(debug: bool = False) -> FastAPI:
                 "removed": removed,
                 "kept": keep_top_n,
             }
-        except ImportError:
-            raise HTTPException(status_code=500, detail="TunerMemory module not available")
+        except ImportError as e:
+            raise HTTPException(status_code=500, detail="TunerMemory module not available") from e
         except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+            raise HTTPException(status_code=500, detail=str(e)) from e
 
     @app.get("/api/smart-tuner/suggest")
     async def suggest_tuner_config(
@@ -3738,7 +3744,7 @@ def create_app(debug: bool = False) -> FastAPI:
                 json.dump(config_dict, f, indent=2)
             logger.info("[TrainingConfig] Configuration updated: %s", config_dict)
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to save config: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to save config: {e}") from e
 
         return {"status": "updated", "config": config_dict}
 
@@ -3813,7 +3819,7 @@ def create_app(debug: bool = False) -> FastAPI:
                 json.dump(config_dict, f, indent=2)
             logger.info("[SynergyConfig] Configuration updated: %s", config_dict)
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to save config: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to save config: {e}") from e
 
         return {"status": "updated", "config": config_dict}
 
@@ -3888,7 +3894,7 @@ def create_app(debug: bool = False) -> FastAPI:
                 json.dump(config_dict, f, indent=2)
             logger.info("[ArchConfig] Configuration updated: %s", config_dict)
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to save config: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to save config: {e}") from e
 
         return {"status": "updated", "config": config_dict}
 
@@ -3955,9 +3961,9 @@ def create_app(debug: bool = False) -> FastAPI:
                 "message": f"Host started on port {payload.port}. Workers can join with the cluster secret.",
             }
         except RuntimeError as e:
-            raise HTTPException(status_code=400, detail=str(e))
+            raise HTTPException(status_code=400, detail=str(e)) from e
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to start host: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to start host: {e}") from e
 
     @app.post("/api/distributed/join-cluster")
     async def join_distributed_cluster(payload: JoinClusterRequest):
@@ -3978,13 +3984,13 @@ def create_app(debug: bool = False) -> FastAPI:
                 "message": "Successfully joined the cluster.",
             }
         except ValueError as e:
-            raise HTTPException(status_code=401, detail=str(e))
+            raise HTTPException(status_code=401, detail=str(e)) from e
         except ConnectionError as e:
-            raise HTTPException(status_code=503, detail=str(e))
+            raise HTTPException(status_code=503, detail=str(e)) from e
         except RuntimeError as e:
-            raise HTTPException(status_code=400, detail=str(e))
+            raise HTTPException(status_code=400, detail=str(e)) from e
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to join cluster: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to join cluster: {e}") from e
 
     @app.post("/api/distributed/disconnect")
     async def disconnect_from_cluster():
@@ -3999,7 +4005,7 @@ def create_app(debug: bool = False) -> FastAPI:
                 "message": "Returned to standalone mode.",
             }
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to disconnect: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to disconnect: {e}") from e
 
     @app.get("/api/distributed/workers")
     async def list_distributed_workers():
@@ -4406,8 +4412,8 @@ def create_app(debug: bool = False) -> FastAPI:
                 is_customizable=current.is_customizable,
                 is_custom=current.is_custom,
             )
-        except ImportError:
-            raise HTTPException(status_code=500, detail="Attribution module not available")
+        except ImportError as e:
+            raise HTTPException(status_code=500, detail="Attribution module not available") from e
 
     @app.post("/api/attribution/reset", response_model=AttributionResponse)
     async def reset_attribution():

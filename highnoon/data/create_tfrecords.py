@@ -126,7 +126,6 @@ def create_tfrecords(
     num_examples = 0
     num_shards = 0
     current_shard_examples = []
-    shard_writer = None
 
     def _write_shard(examples: list, shard_idx: int) -> None:
         """Write a shard of examples to TFRecord."""

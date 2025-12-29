@@ -36,7 +36,6 @@ import json
 import logging
 import os
 import platform
-import re
 import shutil
 import statistics
 import subprocess
@@ -48,8 +47,6 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any
-
-import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -839,7 +836,9 @@ class CacheBenchmark:
             kernel = kr["kernel_name"]
             size = kr["input_size"]
             miss_rate = counters.get("cache_miss_rate", 0)
-            l1_miss_rate = counters.get("l1_miss_rate", 0)
+            _l1_miss_rate = counters.get(
+                "l1_miss_rate", 0
+            )  # noqa: F841 - unused but kept for future
             llc_miss_rate = counters.get("llc_miss_rate", 0)
 
             if miss_rate > 0.10:  # >10% cache miss rate

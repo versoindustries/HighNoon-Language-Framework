@@ -45,14 +45,12 @@ Reference:
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
 import numpy as np
 import tensorflow as tf
-
-from highnoon import config as hn_config
 
 logger = logging.getLogger(__name__)
 

@@ -34,7 +34,6 @@ Ops:
 """
 
 import logging
-from typing import Tuple
 
 import tensorflow as tf
 
@@ -308,7 +307,6 @@ def unified_bus_propagate_entanglement(
     """
     if not config.USE_UNIFIED_QUANTUM_BUS:
         # Pass through if disabled
-        batch = tf.shape(block_states)[0]
         nb = block_states.shape[1] or num_blocks or config.QCB_NUM_NODES
         coherence = tf.eye(nb, dtype=tf.float32)
         return block_states, coherence

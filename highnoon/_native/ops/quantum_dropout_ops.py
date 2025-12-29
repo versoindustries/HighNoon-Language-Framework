@@ -27,7 +27,6 @@ Ops:
 """
 
 import logging
-from typing import Tuple
 
 import tensorflow as tf
 

@@ -415,7 +415,7 @@ class FisherLayerGrouper:
         }
 
         # Update group statistics
-        remapped_labels = np.array([label_map.get(l, 0) for l in labels])
+        remapped_labels = np.array([label_map.get(label, 0) for label in labels])
         self._update_group_stats(fisher_values, remapped_labels, var_names)
 
         logger.info(
@@ -532,7 +532,7 @@ class FisherLayerGrouper:
 
         max_fisher = max(s.mean_fisher for s in self._group_stats.values())
 
-        for group_id, stats in self._group_stats.items():
+        for _, stats in self._group_stats.items():
             if max_fisher > 1e-10:
                 # Inverse relationship: high Fisher -> low LR scale
                 relative_fisher = stats.mean_fisher / max_fisher

@@ -213,7 +213,7 @@ class InlineQuantumPBT:
         )
 
         # Generate perturbed variants
-        for i in range(1, self.config.population_size):
+        for _ in range(1, self.config.population_size):
             perturbed = {}
             for key, value in initial_config.items():
                 if isinstance(value, float):

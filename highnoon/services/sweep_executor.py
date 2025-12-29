@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Any
 
 # Phase 201.6: Sweep compression config
 from highnoon.config import SWEEP_COMPRESS_CHECKPOINTS, SWEEP_MAX_IN_MEMORY_TRIALS
-from highnoon.services.hpo_utils import convert_numpy_types, next_power_of_2, snap_to_multiple
+from highnoon.services.hpo_utils import next_power_of_2, snap_to_multiple
 
 # Note: Using synchronous file I/O for checkpoints (small files)
 

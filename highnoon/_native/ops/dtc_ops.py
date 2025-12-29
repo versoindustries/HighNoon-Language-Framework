@@ -30,7 +30,6 @@ Memory: O(d²) for Floquet Hamiltonian
 """
 
 import logging
-from typing import Optional
 
 import tensorflow as tf
 

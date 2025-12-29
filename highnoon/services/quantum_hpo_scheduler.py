@@ -59,7 +59,7 @@ import logging
 import math
 import random
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -69,9 +69,8 @@ from highnoon.services.hpo_manager import (
     OPTIMIZER_LR_RANGES,
     estimate_model_params,
 )
-from highnoon.services.hpo_metrics import HPOMetricsCollector, TrialStatus
 from highnoon.services.hpo_schedulers import HPOSchedulerBase, TrialConfig, TrialResult
-from highnoon.services.hpo_utils import convert_numpy_types, next_power_of_2, snap_to_multiple
+from highnoon.services.hpo_utils import next_power_of_2, snap_to_multiple
 
 # Import new enhancement modules
 try:

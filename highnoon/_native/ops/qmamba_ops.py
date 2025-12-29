@@ -27,7 +27,6 @@ Complexity: O(n · K · state_dim) where K is num_superposition_states
 """
 
 import logging
-from typing import Optional
 
 import tensorflow as tf
 

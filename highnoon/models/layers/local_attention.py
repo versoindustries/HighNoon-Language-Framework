@@ -484,7 +484,6 @@ class LocalAttentionBlock(FusedReasoningBlockMixin, layers.Layer):
         """
         # Compute approximate entanglement entropy from attention patterns
         # Use query-key overlap as proxy for entanglement
-        batch_size = tf.shape(q)[0]
         seq_len = tf.shape(q)[2]
 
         # Compute attention scores for entropy estimation

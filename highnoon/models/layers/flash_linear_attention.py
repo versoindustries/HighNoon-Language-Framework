@@ -56,7 +56,7 @@ from highnoon.config import (
 
 # Try importing enhanced ops (may not be built yet)
 try:
-    from highnoon._native.ops.fused_flash_attention_op import (
+    from highnoon._native.ops.fused_flash_attention_op import (  # noqa: F401 - availability check  # noqa: F401 - availability check
         fused_chunkwise_linear_attention,
         fused_flash_attention_available,
         fused_gated_linear_attention,

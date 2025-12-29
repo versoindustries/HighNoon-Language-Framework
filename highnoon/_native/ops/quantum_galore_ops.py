@@ -30,7 +30,6 @@ Example:
 from __future__ import annotations
 
 import logging
-from typing import Tuple
 
 import numpy as np
 import tensorflow as tf

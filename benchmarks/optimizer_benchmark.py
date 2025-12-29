@@ -344,8 +344,8 @@ def benchmark_optimizer(
             if optimizer_name in ["sophiag", "qiao"] and step % 10 == 0:
                 try:
 
-                    def loss_fn_for_hessian():
-                        return loss_fn(y_batch, model(x_batch, training=True))
+                    def loss_fn_for_hessian(x=x_batch, y=y_batch):
+                        return loss_fn(y, model(x, training=True))
 
                     optimizer.update_hessian(loss_fn_for_hessian, (x_batch, y_batch))
                 except Exception:
@@ -366,7 +366,7 @@ def benchmark_optimizer(
         improvement = loss_history[0] - best_loss
         target = loss_history[0] - 0.9 * improvement
         convergence_step = next(
-            (i for i, l in enumerate(loss_history) if l <= target), len(loss_history)
+            (i for i, loss_val in enumerate(loss_history) if loss_val <= target), len(loss_history)
         )
     else:
         convergence_step = 0

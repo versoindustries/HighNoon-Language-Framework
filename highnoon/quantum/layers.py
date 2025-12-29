@@ -588,7 +588,7 @@ class QuantumEnergyLayer(HybridVQCLayer):
 
 
 # Phase 14.4.1: Import config for enhanced VQC
-from highnoon.config import VQC_ENCODING, VQC_REUPLOADING_DEPTH
+from highnoon.config import VQC_ENCODING, VQC_REUPLOADING_DEPTH  # noqa: E402
 
 
 class EnhancedVQCLayer(HybridVQCLayer):

@@ -189,7 +189,7 @@ class FAISSIndex:
 
             self._faiss = faiss
         except ImportError:
-            raise ImportError("FAISS not installed. Install with: pip install faiss-cpu")
+            raise ImportError("FAISS not installed. Install with: pip install faiss-cpu") from None
 
         self.embedding_dim = embedding_dim
         self.index_type = index_type

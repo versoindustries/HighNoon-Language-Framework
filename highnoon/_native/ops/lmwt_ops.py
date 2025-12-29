@@ -27,7 +27,6 @@ AVX2/AVX512/NEON SIMD and OpenMP parallelization.
 """
 
 import logging
-from typing import Optional, Tuple
 
 import tensorflow as tf
 

@@ -95,8 +95,8 @@ class SweepConfig:
     time_budget_hours: float | None = None
     objective: str = "composite"
     direction: str = "minimize"
-    epochs_per_trial: int = 5
-    steps_per_epoch: int = 100
+    epochs_per_trial: int = 20  # Increased from 5 for longer trials (system ID needs more data)
+    steps_per_epoch: int = 500  # Increased from 100 for better QAHPO convergence
     min_epochs: int = 1
     max_epochs: int = 100
     search_strategy: str = "bayesian"
@@ -1166,8 +1166,29 @@ class SweepExecutor:
 
         # VERBOSE LOGGING: Print trial subprocess output to console for debugging
         print(f"\n{'='*80}")
+
+        # Translate negative exit codes to signal names for better debugging
+        exit_code_str = str(process.returncode)
+        if process.returncode < 0:
+            import signal
+
+            sig_num = -process.returncode
+            sig_name = (
+                signal.Signals(sig_num).name
+                if sig_num in signal.Signals._value2member_map_
+                else f"SIGNAL_{sig_num}"
+            )
+            exit_code_str = f"{process.returncode} ({sig_name})"
+            print(f"[HPO DEBUG] ⚠️  CRASH DETECTED: {sig_name} (signal {sig_num})")
+            if sig_num == 11:  # SIGSEGV
+                print("[HPO DEBUG] SIGSEGV typically indicates:")
+                print("  - Null pointer dereference in C++ op")
+                print("  - Out-of-bounds memory access")
+                print("  - CUDA memory allocation failure in native code")
+                print("  - Check stderr below for faulthandler stack trace")
+
         print(
-            f"[HPO DEBUG] Trial {trial_id} completed in {wall_time:.1f}s (exit code: {process.returncode})"
+            f"[HPO DEBUG] Trial {trial_id} completed in {wall_time:.1f}s (exit code: {exit_code_str})"
         )
         print(
             f"[HPO DEBUG] Config: learning_rate={config.get('learning_rate')}, "

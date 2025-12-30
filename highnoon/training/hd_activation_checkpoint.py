@@ -598,19 +598,40 @@ class HDCheckpointLayer(tf.keras.layers.Layer):
                     # Decode bundle to reconstruct input activation
                     reconstructed = encoder_ref.decode(stored_bundle, x_shape_for_decode)
 
-                    # FIX: Use a SINGLE GradientTape for both input and variable gradients
+                    # CRITICAL FIX: Ensure reconstructed tensor has same dtype as upstream
+                    # C++ native ops may produce complex64 tensors that cause SIGSEGV
+                    # when TensorFlow tries to compute gradients with float32 expectations
+                    if reconstructed.dtype != upstream.dtype:
+                        logger.debug(
+                            f"[HDCheckpoint] Dtype mismatch: reconstructed={reconstructed.dtype}, "
+                            f"upstream={upstream.dtype}. Casting for gradient stability."
+                        )
+                        # Cast to match upstream dtype (typically float32)
+                        if upstream.dtype in (tf.float32, tf.float64, tf.float16):
+                            reconstructed = tf.cast(tf.math.real(reconstructed), upstream.dtype)
+                        else:
+                            reconstructed = tf.cast(reconstructed, upstream.dtype)
+
+                    # Use a SINGLE persistent GradientTape for both input and variable gradients
                     # This avoids nested tape issues with C++ native ops and is more efficient
                     with tf.GradientTape(persistent=True) as tape:
                         tape.watch(reconstructed)
-                        if variables:
-                            for v in variables:
-                                tape.watch(v)
                         h = reconstructed
                         for layer in sublayers_ref:
                             h = layer(h, training=training) if hasattr(layer, "call") else layer(h)
 
-                    # Compute gradient w.r.t. reconstructed input
-                    input_grad = tape.gradient(h, reconstructed, upstream)
+                        # Ensure output is real-valued for gradient computation
+                        if h.dtype in (tf.complex64, tf.complex128):
+                            h = tf.math.real(h)
+
+                    # Compute gradient w.r.t. reconstructed input with explicit error handling
+                    try:
+                        input_grad = tape.gradient(h, reconstructed, upstream)
+                    except Exception as grad_e:
+                        logger.debug(
+                            f"[HDCheckpoint] Input gradient failed: {grad_e}. Using passthrough."
+                        )
+                        input_grad = None
 
                     # Ensure input_grad has correct shape
                     if input_grad is None:
@@ -618,7 +639,12 @@ class HDCheckpointLayer(tf.keras.layers.Layer):
 
                     # Compute variable gradients from the same tape (reuses computation)
                     if variables:
-                        var_grads = tape.gradient(h, variables, upstream)
+                        try:
+                            var_grads = tape.gradient(h, variables, upstream)
+                        except Exception as var_grad_e:
+                            logger.debug(f"[HDCheckpoint] Variable gradient failed: {var_grad_e}")
+                            var_grads = None
+
                         # Handle None gradients for variables
                         if var_grads is None:
                             var_grads = [tf.zeros_like(v) for v in variables]
@@ -628,7 +654,7 @@ class HDCheckpointLayer(tf.keras.layers.Layer):
                                 for g, v in zip(var_grads, variables)
                             ]
 
-                    # Clean up persistent tape to free memory
+                    # Clean up persistent tape
                     del tape
 
                 except Exception as e:

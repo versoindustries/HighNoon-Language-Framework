@@ -364,12 +364,13 @@ class HPOSearchSpace:
     num_moe_experts: list[int] = field(default_factory=lambda: [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
 
     # =========================================================================
-    # FEATURE FLAGS (for budget estimation consistency)
+    # FEATURE FLAGS DESIGN PRINCIPLE
     # =========================================================================
-    use_hyperdimensional_embedding: bool = True
-    use_quantum_lm_head: bool = True
-    use_td_moe: bool = True
-    # Note: hd_dim is defined in PHASE 200+ section as list[int] for HPO sampling
+    # Feature flags (use_hyperdimensional_embedding, use_quantum_norm, etc.) are
+    # NOT tuned by HPO. They are set globally in highnoon/config.py and pulled
+    # at runtime by model/training components. This ensures consistent behavior.
+    #
+    # hd_dim is defined in PHASE 200+ section as list[int] for HPO sampling
     # For budget estimation, use hd_dim from config or calculate from embedding_dim * 8
     # Phase 200+: vocab_size is now TUNABLE with curriculum-aware range
     # Range from 16k (small models) to 300k (large tokenizers)
@@ -579,12 +580,12 @@ class HPOSearchSpace:
     sympflow_geodesic_weight: tuple[float, float] = (0.01, 0.5)
 
     # =========================================================================
-    # QMAMBA / Q-SSM PARAMETERS
-    # Phase 201.7: Expanded superposition and entanglement params
+    # DEPRECATED: QMAMBA / Q-SSM PARAMETERS (Removed per HIGHNOON_UPGRADE_ROADMAP.md)
+    # QMamba blocks replaced by HDSpatialBlock when HD streaming is enabled.
+    # These parameters are no longer tuned by QAHPO.
     # =========================================================================
-    qmamba_superposition_states: list[int] = field(default_factory=lambda: [2, 3, 4, 6, 8, 12, 16])
-    qmamba_entanglement_depth: list[int] = field(default_factory=lambda: [1, 2, 3, 4, 5, 6])
-    qmamba_entanglement_strength: tuple[float, float] = (0.1, 0.95)
+    # NOTE: Q-SSM VQC layers moved to HD block configuration
+    # q_ssm_vqc_layers retained for backward compatibility with Q-SSM gated blocks
     q_ssm_vqc_layers: list[int] = field(default_factory=lambda: [1, 2, 3, 4, 5, 6])
 
     # =========================================================================
@@ -605,9 +606,8 @@ class HPOSearchSpace:
     # PHASE 200+: HD STREAMING CORPUS PARAMETERS
     # =========================================================================
     # Hyperdimensional corpus compression for memory-efficient training
-    # When use_hd_streaming=True, samples are compressed into fixed-size HD bundles
+    # Note: use_hd_streaming flag is pulled from global config.py at runtime
     # Phase 201.7: Fully expanded ranges for comprehensive HD architecture search
-    use_hd_streaming: bool = True  # Enabled by default for memory efficiency
     hd_reservoir_size: list[int] = field(
         default_factory=lambda: [250, 500, 750, 1000, 1500, 2000, 3000, 4000, 5000, 8000, 10000]
     )
@@ -623,7 +623,7 @@ class HPOSearchSpace:
     # PHASE 201: QUANTUM MEMORY OPTIMIZATION PARAMETERS
     # =========================================================================
     # Phase 201.2: TTDense compression for FFN layers
-    use_tt_ffn: bool = True  # Enable TTDense for FFN projections
+    # Note: use_tt_ffn flag is pulled from global config.py at runtime
     tt_ffn_ranks: list[list[int]] = field(
         default_factory=lambda: [
             [1, 4, 4, 1],  # Conservative
@@ -633,10 +633,90 @@ class HPOSearchSpace:
     )
     # Phase 201.3: LatentKVAttention for KV cache compression
     # Phase 201.7: Fully expanded KV compression dimensions
-    use_latent_kv: bool = True  # Enable latent KV compression
+    # Note: use_latent_kv flag is pulled from global config.py at runtime
     latent_kv_dim: list[int] = field(
         default_factory=lambda: [8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256]
     )
+
+    # =========================================================================
+    # PHASE 132: QULS (QUANTUM UNIFIED LOSS SYSTEM) PARAMETERS
+    # =========================================================================
+    # Label smoothing for softmax targets (reduces overconfidence)
+    quls_label_smoothing: tuple[float, float] = (0.0, 0.2)
+    # Quantum fidelity loss weight (trace fidelity with target distribution)
+    quls_fidelity_weight: tuple[float, float] = (0.005, 0.05)
+    # Born probability temperature for fidelity computation
+    quls_fidelity_temperature: tuple[float, float] = (0.5, 2.0)
+    # Born rule |ψ|² = p enforcement penalty weight
+    quls_born_rule_weight: tuple[float, float] = (0.001, 0.02)
+    # Coherence preservation loss weight (penalizes coherence drop)
+    quls_coherence_weight: tuple[float, float] = (0.005, 0.05)
+    # Symplectic energy conservation loss weight
+    quls_symplectic_weight: tuple[float, float] = (0.005, 0.05)
+    # VQC variance boost factor for adaptive weighting
+    quls_vqc_variance_boost: tuple[float, float] = (1.0, 4.0)
+    # Weight reduction during barren plateau detection
+    quls_barren_plateau_reduction: tuple[float, float] = (0.05, 0.3)
+    # Weight EMA decay for adaptive weight updates
+    quls_weight_ema_decay: tuple[float, float] = (0.95, 0.999)
+
+    # =========================================================================
+    # PHASE 131: QALRC (QUANTUM ADAPTIVE LR CONTROLLER) PARAMETERS
+    # =========================================================================
+    # Annealing schedule exponent (higher = faster convergence focus)
+    qalrc_annealing_power: tuple[float, float] = (1.0, 4.0)
+    # Base quantum tunneling probability for escaping local minima
+    qalrc_tunneling_probability: tuple[float, float] = (0.01, 0.15)
+    # EMA coefficient for gradient entropy smoothing
+    qalrc_entropy_smoothing: tuple[float, float] = (0.8, 0.99)
+
+    # =========================================================================
+    # PHASE 200+: SAQC (SPECTRALLY-AWARE QUANTUM CURRICULUM) PARAMETERS
+    # =========================================================================
+    # Fraction of tunneling/orthogonal samples during plateau
+    saqc_tunneling_dataset_ratio: tuple[float, float] = (0.1, 0.4)
+    # Minimum steps before curriculum stage transition
+    saqc_min_stage_duration: list[int] = field(
+        default_factory=lambda: [50, 100, 150, 200, 300, 500]
+    )
+    # Steps between curriculum state updates
+    saqc_update_interval: list[int] = field(default_factory=lambda: [5, 10, 15, 20, 30, 50])
+    # Spectral entropy threshold triggering retreat mode
+    saqc_entropy_retreat_threshold: tuple[float, float] = (0.2, 0.5)
+    # Fidelity threshold enabling acceleration mode
+    saqc_fidelity_advance_threshold: tuple[float, float] = (0.75, 0.95)
+    # Coherence gate threshold for curriculum progression
+    saqc_coherence_gate_threshold: tuple[float, float] = (0.8, 0.98)
+
+    # =========================================================================
+    # PHASE 17: HAMILTONIAN ENHANCEMENT PARAMETERS
+    # =========================================================================
+    # Number of basis Hamiltonians for superposition mode
+    hamiltonian_basis_size: list[int] = field(default_factory=lambda: [2, 4, 6, 8])
+    # RBM hidden dimension for Neural Quantum State ansatz
+    hamiltonian_nqs_hidden_dim: list[int] = field(
+        default_factory=lambda: [8, 16, 24, 32, 48, 64, 96, 128, 192, 256]
+    )
+    # Magnus expansion truncation level (2 or 4 terms)
+    hamiltonian_magnus_level: list[int] = field(default_factory=lambda: [2, 4])
+    # Padé matrix exponential scaling iterations
+    hamiltonian_pade_scaling: list[int] = field(default_factory=lambda: [2, 4, 6, 8])
+
+    # =========================================================================
+    # PHASE T1-T6: QUANTUM TRAINING LOOP PARAMETERS
+    # =========================================================================
+    # Barren plateau gradient norm threshold for detection
+    barren_plateau_threshold: tuple[float, float] = (1e-7, 1e-5)
+    # LR scaling factor during barren plateau recovery
+    barren_plateau_recovery_lr_scale: tuple[float, float] = (5.0, 20.0)
+    # QNG damping for QFIM regularization
+    qng_damping: tuple[float, float] = (1e-5, 1e-3)
+    # GaLore gradient projection rank
+    galore_rank: list[int] = field(default_factory=lambda: [8, 16, 24, 32, 48, 64, 96, 128])
+    # Steps between GaLore projection updates
+    galore_update_proj_gap: list[int] = field(default_factory=lambda: [100, 150, 200, 300, 500])
+    # GaLore gradient scaling factor
+    galore_scale: tuple[float, float] = (0.1, 0.5)
 
     # =========================================================================
     # USER-SET FIXED PARAMETERS (not tuned)
@@ -731,9 +811,10 @@ class HPOSearchSpace:
         )
 
         # Start with minimum viable config
-        best_blocks = 4
-        best_experts = 4
-        best_dim = 256
+        best_blocks = 2
+        best_experts = 2
+        best_dim = 64
+        best_params = 0  # Track the largest fitting config's param count
 
         # Try dimensions from smallest to largest
         sorted_dims = sorted(self.embedding_dim)
@@ -759,13 +840,12 @@ class HPOSearchSpace:
                         "hd_dim": representative_hd_dim,
                     }
                     estimated = estimate_model_params(test_config)
-                    if estimated <= target_budget:
-                        # This config fits, update best if dimensions are better
-                        if dim >= best_dim:
-                            best_dim = dim
-                            best_blocks = blocks
-                            best_experts = experts
-                    # Don't break - continue checking other combos at this dim
+                    # Only update if this config fits AND is larger than current best
+                    if estimated <= target_budget and estimated > best_params:
+                        best_dim = dim
+                        best_blocks = blocks
+                        best_experts = experts
+                        best_params = estimated
 
         return (best_blocks, best_experts, best_dim)
 
@@ -1094,11 +1174,9 @@ class HPOSearchSpace:
             # S12: SympFlow Geodesic Weight
             "sympflow_geodesic_weight": random.uniform(*self.sympflow_geodesic_weight),
             # =================================================================
-            # QMamba / Q-SSM Parameters
+            # Q-SSM Parameters (QMamba deprecated per HIGHNOON_UPGRADE_ROADMAP.md)
+            # HD blocks now replace QMamba when USE_HD_STREAMING is enabled
             # =================================================================
-            "qmamba_superposition_states": random.choice(self.qmamba_superposition_states),
-            "qmamba_entanglement_depth": random.choice(self.qmamba_entanglement_depth),
-            "qmamba_entanglement_strength": random.uniform(*self.qmamba_entanglement_strength),
             "q_ssm_vqc_layers": random.choice(self.q_ssm_vqc_layers),
             # =================================================================
             # QASA Attention Parameters
@@ -1112,19 +1190,65 @@ class HPOSearchSpace:
             "qmoe_measurement_temp": random.uniform(*self.qmoe_measurement_temp),
             # =================================================================
             # PHASE 200+: HD Streaming Corpus Parameters
+            # Note: use_hd_streaming pulled from global config.py at runtime
             # =================================================================
-            "use_hd_streaming": self.use_hd_streaming,
             "hd_reservoir_size": random.choice(self.hd_reservoir_size),
             # Defensive null handling: use default [512, 1024] if hd_dim is None
             "hd_dim": random.choice(self.hd_dim if self.hd_dim else [512, 1024]),
             "vocab_sample_size": random.choice(self.vocab_sample_size),
             # =================================================================
             # PHASE 201: Quantum Memory Optimization Parameters
+            # Note: use_tt_ffn, use_latent_kv pulled from global config.py
             # =================================================================
-            "use_tt_ffn": self.use_tt_ffn,
             "tt_ffn_ranks": random.choice(self.tt_ffn_ranks),
-            "use_latent_kv": self.use_latent_kv,
             "latent_kv_dim": random.choice(self.latent_kv_dim),
+            # =================================================================
+            # PHASE 132: QULS (Quantum Unified Loss System) Parameters
+            # =================================================================
+            "quls_label_smoothing": random.uniform(*self.quls_label_smoothing),
+            "quls_fidelity_weight": random.uniform(*self.quls_fidelity_weight),
+            "quls_fidelity_temperature": random.uniform(*self.quls_fidelity_temperature),
+            "quls_born_rule_weight": random.uniform(*self.quls_born_rule_weight),
+            "quls_coherence_weight": random.uniform(*self.quls_coherence_weight),
+            "quls_symplectic_weight": random.uniform(*self.quls_symplectic_weight),
+            "quls_vqc_variance_boost": random.uniform(*self.quls_vqc_variance_boost),
+            "quls_barren_plateau_reduction": random.uniform(*self.quls_barren_plateau_reduction),
+            "quls_weight_ema_decay": random.uniform(*self.quls_weight_ema_decay),
+            # =================================================================
+            # PHASE 131: QALRC (Quantum Adaptive LR Controller) Parameters
+            # =================================================================
+            "qalrc_annealing_power": random.uniform(*self.qalrc_annealing_power),
+            "qalrc_tunneling_probability": random.uniform(*self.qalrc_tunneling_probability),
+            "qalrc_entropy_smoothing": random.uniform(*self.qalrc_entropy_smoothing),
+            # =================================================================
+            # PHASE 200+: SAQC (Spectrally-Aware Quantum Curriculum) Parameters
+            # =================================================================
+            "saqc_tunneling_dataset_ratio": random.uniform(*self.saqc_tunneling_dataset_ratio),
+            "saqc_min_stage_duration": random.choice(self.saqc_min_stage_duration),
+            "saqc_update_interval": random.choice(self.saqc_update_interval),
+            "saqc_entropy_retreat_threshold": random.uniform(*self.saqc_entropy_retreat_threshold),
+            "saqc_fidelity_advance_threshold": random.uniform(
+                *self.saqc_fidelity_advance_threshold
+            ),
+            "saqc_coherence_gate_threshold": random.uniform(*self.saqc_coherence_gate_threshold),
+            # =================================================================
+            # PHASE 17: Hamiltonian Enhancement Parameters
+            # =================================================================
+            "hamiltonian_basis_size": random.choice(self.hamiltonian_basis_size),
+            "hamiltonian_nqs_hidden_dim": random.choice(self.hamiltonian_nqs_hidden_dim),
+            "hamiltonian_magnus_level": random.choice(self.hamiltonian_magnus_level),
+            "hamiltonian_pade_scaling": random.choice(self.hamiltonian_pade_scaling),
+            # =================================================================
+            # PHASE T1-T6: Quantum Training Loop Parameters
+            # =================================================================
+            "barren_plateau_threshold": random.uniform(*self.barren_plateau_threshold),
+            "barren_plateau_recovery_lr_scale": random.uniform(
+                *self.barren_plateau_recovery_lr_scale
+            ),
+            "qng_damping": random.uniform(*self.qng_damping),
+            "galore_rank": random.choice(self.galore_rank),
+            "galore_update_proj_gap": random.choice(self.galore_update_proj_gap),
+            "galore_scale": random.uniform(*self.galore_scale),
         }
 
         # Add user-set tokenizer/context config if provided

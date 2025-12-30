@@ -8,6 +8,7 @@ Includes RSS memory tracking via psutil for trial resource monitoring.
 """
 
 import argparse
+import faulthandler
 import gc
 import json
 import logging
@@ -17,7 +18,48 @@ import sys
 from pathlib import Path
 from typing import Any
 
+# =============================================================================
+# CRITICAL: Enable faulthandler BEFORE importing TensorFlow
+# =============================================================================
+# This enables Python to dump a stack trace on SIGSEGV, SIGFPE, SIGABRT, etc.
+# Without this, native code crashes (C++ ops, CUDA, XLA) produce no Python trace.
+faulthandler.enable(file=sys.stderr, all_threads=True)
+print("[HPO] Faulthandler enabled: SIGSEGV will dump Python stack trace", file=sys.stderr)
+
 import tensorflow as tf
+
+# =============================================================================
+# FORCE CPU-ONLY MODE FOR HPO TRIALS
+# =============================================================================
+# HighNoon C++ ops are CPU-optimized with AVX2/AVX512 SIMD. GPU acceleration
+# provides no benefit for our custom ops and causes SIGSEGV crashes when:
+# 1. CUDA FFT tries to allocate 6GB+ for HD bundles (hd_dim=1536)
+# 2. XLA auto-dispatches to GPU for FFT ops even when ops are CPU-native
+# 3. Memory pressure causes CUDA driver to crash
+#
+# CRITICAL: This MUST run BEFORE any TensorFlow operations to ensure no
+# GPU kernels are ever loaded or initialized.
+
+GPU_AVAILABLE = False  # Always False for HPO trials - CPU-only design
+print("[HPO] CPU-ONLY MODE: HighNoon C++ ops are CPU-optimized (AVX2/AVX512)", file=sys.stderr)
+print("[HPO] Disabling GPU to prevent CUDA FFT SIGSEGV crashes", file=sys.stderr)
+
+try:
+    # Hide ALL GPUs from TensorFlow BEFORE any other TF operations
+    tf.config.set_visible_devices([], "GPU")
+
+    # Verify GPUs are hidden
+    _visible_gpus = tf.config.get_visible_devices("GPU")
+    if _visible_gpus:
+        print(f"[HPO] WARNING: Failed to hide GPUs: {_visible_gpus}", file=sys.stderr)
+    else:
+        print("[HPO] GPU devices hidden successfully", file=sys.stderr)
+except Exception as e:
+    print(f"[HPO] GPU hiding failed (non-fatal): {e}", file=sys.stderr)
+
+# Force XLA to use CPU-only compiler to prevent CUDA kernel generation
+os.environ["TF_XLA_FLAGS"] = os.environ.get("TF_XLA_FLAGS", "") + " --tf_xla_cpu_global_jit"
+os.environ["CUDA_VISIBLE_DEVICES"] = ""  # Belt-and-suspenders: hide at driver level
 
 from highnoon.data.loaders import load_training_dataset
 from highnoon.models.reasoning.reasoning_module import ReasoningModule

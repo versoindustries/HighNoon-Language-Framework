@@ -1,0 +1,160 @@
+/* QULSMetricsPanel.css - Styling for QULS Metrics Panel */
+/* Phase 200+: HIGHNOON_UPGRADE_ROADMAP.md Phase 4.2 */
+
+.quls-panel {
+    background: var(--color-surface-elevated, #1e1e2e);
+    border: 1px solid var(--color-border, #313244);
+    border-radius: 12px;
+    margin-bottom: 16px;
+    overflow: hidden;
+    transition: all 0.2s ease;
+}
+
+.quls-panel--expanded {
+    border-color: var(--color-primary, #89b4fa);
+}
+
+.quls-panel__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    padding: 12px 16px;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    color: var(--color-text, #cdd6f4);
+    transition: background 0.2s ease;
+}
+
+.quls-panel__header:hover {
+    background: var(--color-surface-hover, rgba(255, 255, 255, 0.05));
+}
+
+.quls-panel__title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: 600;
+    font-size: 14px;
+}
+
+.quls-panel__status {
+    font-size: 11px;
+    font-weight: 500;
+    padding: 2px 8px;
+    border-radius: 10px;
+    background: var(--color-surface, #181825);
+    color: var(--color-text-muted, #a6adc8);
+}
+
+.quls-panel__status--connected {
+    background: rgba(166, 227, 161, 0.15);
+    color: var(--color-success, #a6e3a1);
+}
+
+.quls-panel__alert {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 10px;
+    background: rgba(243, 139, 168, 0.2);
+    color: var(--color-danger, #f38ba8);
+    animation: pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
+}
+
+.quls-panel__content {
+    padding: 0 16px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.quls-panel__section {
+    background: var(--color-surface, #181825);
+    border-radius: 8px;
+    padding: 12px;
+}
+
+.quls-panel__section-title {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--color-text-muted, #a6adc8);
+    margin: 0 0 10px 0;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.quls-panel__grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+    gap: 12px;
+}
+
+.quls-panel__grid--compact {
+    grid-template-columns: repeat(auto-fit, minmax(80px, 1fr));
+    gap: 8px;
+}
+
+.quls-panel__metric {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.quls-panel__metric-label {
+    font-size: 10px;
+    color: var(--color-text-muted, #a6adc8);
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+}
+
+.quls-panel__metric-value {
+    font-size: 14px;
+    font-weight: 600;
+    font-family: var(--font-mono, 'JetBrains Mono', monospace);
+    color: var(--color-text, #cdd6f4);
+}
+
+.quls-panel__metric-value--primary {
+    color: var(--color-primary, #89b4fa);
+    font-size: 16px;
+}
+
+.quls-panel__metric-value--warning {
+    color: var(--color-warning, #f9e2af);
+}
+
+.quls-panel__mode--explore {
+    color: var(--color-primary, #89b4fa);
+}
+
+.quls-panel__mode--exploit {
+    color: var(--color-success, #a6e3a1);
+}
+
+.quls-panel__mode--emergency {
+    color: var(--color-danger, #f38ba8);
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+    .quls-panel__grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+
+    .quls-panel__grid--compact {
+        grid-template-columns: repeat(2, 1fr);
+    }
+}

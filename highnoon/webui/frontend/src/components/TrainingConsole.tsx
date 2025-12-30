@@ -391,7 +391,7 @@ export function TrainingConsole({ sweepId, isRunning, devMode = false }: Trainin
                                     )}
                                     {log.mean_confidence !== undefined && log.mean_confidence !== null && (
                                         <span className="training-console__confidence">
-                                            conf={( log.mean_confidence * 100).toFixed(1)}%
+                                            conf={(log.mean_confidence * 100).toFixed(1)}%
                                         </span>
                                     )}
                                     {log.memory_mb !== undefined && log.memory_mb !== null && (
@@ -408,6 +408,17 @@ export function TrainingConsole({ sweepId, isRunning, devMode = false }: Trainin
                     )}
                 </div>
             </CardContent>
+
+            {/* Status bar */}
+            <div className="training-console__status-bar">
+                <div className="training-console__status-indicator">
+                    <span className={`training-console__status-dot ${isRunning ? 'training-console__status-dot--live' : ''}`} />
+                    <span>{isRunning ? 'STREAMING' : sweepId ? 'IDLE' : 'NO SWEEP'}</span>
+                </div>
+                <span className="training-console__log-count">
+                    {filteredLogs.length} entries
+                </span>
+            </div>
         </Card>
     );
 }

@@ -1,0 +1,684 @@
+/* HUDGauges.css - Futuristic F1/Jet cockpit gauge styles */
+/* Enhanced HighNoon theme with glassmorphism and glow effects */
+
+/* =============================================================================
+   SHARED HUD VARIABLES
+   ============================================================================= */
+
+.hud-speedometer,
+.hud-tachometer,
+.hud-status-ring,
+.hud-alert-panel {
+    --hud-glow-primary: 0 0 20px rgba(99, 102, 241, 0.4);
+    --hud-glow-success: 0 0 20px rgba(16, 185, 129, 0.4);
+    --hud-glow-warning: 0 0 20px rgba(245, 158, 11, 0.4);
+    --hud-glow-danger: 0 0 20px rgba(239, 68, 68, 0.5);
+    --hud-glow-info: 0 0 20px rgba(59, 130, 246, 0.4);
+    --hud-glass-bg: rgba(18, 18, 26, 0.8);
+    --hud-scanline: repeating-linear-gradient(0deg,
+            transparent,
+            transparent 2px,
+            rgba(255, 255, 255, 0.02) 2px,
+            rgba(255, 255, 255, 0.02) 4px);
+}
+
+/* =============================================================================
+   HUD SPEEDOMETER
+   ============================================================================= */
+
+.hud-speedometer {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--spacing-sm);
+    padding: var(--spacing-sm);
+}
+
+.hud-speedometer__ring {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.hud-speedometer__svg {
+    display: block;
+    filter: drop-shadow(0 0 8px rgba(99, 102, 241, 0.3));
+}
+
+.hud-speedometer__outer-glow {
+    fill: none;
+    stroke: rgba(99, 102, 241, 0.1);
+    stroke-width: 1;
+    filter: blur(4px);
+}
+
+.hud-speedometer__track {
+    stroke: var(--bg-muted);
+    opacity: 0.4;
+    stroke-linecap: round;
+}
+
+.hud-speedometer__zone {
+    opacity: 0.15;
+    stroke-linecap: round;
+}
+
+.hud-speedometer__zone--good {
+    stroke: var(--color-success);
+}
+
+.hud-speedometer__zone--warning {
+    stroke: var(--color-warning);
+}
+
+.hud-speedometer__zone--danger {
+    stroke: var(--color-danger);
+}
+
+.hud-speedometer__progress-glow {
+    opacity: 0.3;
+    filter: blur(6px);
+    stroke-linecap: round;
+}
+
+.hud-speedometer__progress {
+    stroke-linecap: round;
+    transition: stroke 0.3s ease;
+    filter: drop-shadow(var(--hud-glow-primary));
+}
+
+.hud-speedometer__tick {
+    stroke: rgba(255, 255, 255, 0.3);
+    stroke-width: 1.5;
+    stroke-linecap: round;
+}
+
+.hud-speedometer__hub {
+    fill: var(--bg-elevated);
+    stroke: rgba(255, 255, 255, 0.2);
+    stroke-width: 1;
+}
+
+.hud-speedometer__needle-group {
+    transition: transform 0.1s ease-out;
+}
+
+.hud-speedometer__needle {
+    stroke-width: 2;
+    stroke-linecap: round;
+    filter: drop-shadow(0 0 4px currentColor);
+}
+
+.hud-speedometer__needle-dot {
+    filter: drop-shadow(0 0 6px currentColor);
+}
+
+.hud-speedometer__readout {
+    position: absolute;
+    bottom: 15%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+}
+
+.hud-speedometer__value {
+    font-family: var(--font-mono);
+    font-weight: var(--font-bold);
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
+    text-shadow: 0 0 10px currentColor;
+    transition: color 0.3s ease;
+}
+
+.hud-speedometer__unit {
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+}
+
+.hud-speedometer__labels {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+}
+
+.hud-speedometer__label {
+    font-size: var(--text-xs);
+    font-weight: var(--font-semibold);
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+.hud-speedometer__sublabel {
+    font-size: 0.65rem;
+    color: var(--text-muted);
+}
+
+/* Size variants */
+.hud-speedometer--sm .hud-speedometer__readout {
+    bottom: 20%;
+}
+
+.hud-speedometer--lg .hud-speedometer__readout {
+    bottom: 12%;
+}
+
+/* =============================================================================
+   HUD TACHOMETER
+   ============================================================================= */
+
+.hud-tachometer {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.hud-tachometer__svg {
+    display: block;
+}
+
+.hud-tachometer__inner-ring {
+    fill: var(--hud-glass-bg);
+    stroke: rgba(255, 255, 255, 0.05);
+    stroke-width: 1;
+}
+
+.hud-tachometer__segment {
+    stroke-linecap: round;
+    transition: stroke 0.15s ease;
+    opacity: 0.3;
+}
+
+.hud-tachometer__segment--filled {
+    opacity: 1;
+    filter: drop-shadow(0 0 4px currentColor);
+}
+
+.hud-tachometer__segment--redzone {
+    animation: redzonePulse 0.5s ease-in-out infinite alternate;
+}
+
+@keyframes redzonePulse {
+    from {
+        opacity: 0.7;
+    }
+
+    to {
+        opacity: 1;
+    }
+}
+
+.hud-tachometer__center {
+    fill: var(--bg-surface);
+    stroke: rgba(255, 255, 255, 0.08);
+    stroke-width: 1;
+}
+
+.hud-tachometer__value-container {
+    position: absolute;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    text-align: center;
+}
+
+.hud-tachometer__value {
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    font-weight: var(--font-bold);
+    color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+    transition: color 0.3s ease;
+}
+
+.hud-tachometer__value--redline {
+    color: var(--color-danger);
+    text-shadow: 0 0 8px var(--color-danger);
+    animation: redlineFlash 0.3s ease-in-out infinite alternate;
+}
+
+@keyframes redlineFlash {
+    from {
+        opacity: 0.8;
+    }
+
+    to {
+        opacity: 1;
+    }
+}
+
+.hud-tachometer__label {
+    font-size: 0.6rem;
+    font-weight: var(--font-medium);
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+}
+
+.hud-tachometer--redline {
+    animation: redlineGlow 0.5s ease-in-out infinite alternate;
+}
+
+@keyframes redlineGlow {
+    from {
+        filter: drop-shadow(0 0 8px rgba(239, 68, 68, 0.3));
+    }
+
+    to {
+        filter: drop-shadow(0 0 16px rgba(239, 68, 68, 0.6));
+    }
+}
+
+/* =============================================================================
+   HUD STATUS RING
+   ============================================================================= */
+
+.hud-status-ring {
+    position: relative;
+    width: 160px;
+    height: 160px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.hud-status-ring__outer {
+    position: absolute;
+    width: 100%;
+    height: 100%;
+    border-radius: 50%;
+    border: 2px dashed transparent;
+    transition: border-color 0.3s ease;
+}
+
+.hud-status-ring--running .hud-status-ring__outer {
+    animation: statusRotate 4s linear infinite;
+}
+
+@keyframes statusRotate {
+    from {
+        transform: rotate(0deg);
+    }
+
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+.hud-status-ring__dash {
+    position: absolute;
+    width: 8px;
+    height: 3px;
+    border-radius: 2px;
+}
+
+.hud-status-ring__dash:nth-child(1) {
+    top: 0;
+    left: 50%;
+    transform: translateX(-50%);
+}
+
+.hud-status-ring__dash:nth-child(2) {
+    right: 0;
+    top: 50%;
+    transform: translateY(-50%);
+}
+
+.hud-status-ring__dash:nth-child(3) {
+    bottom: 0;
+    left: 50%;
+    transform: translateX(-50%);
+}
+
+.hud-status-ring__dash:nth-child(4) {
+    left: 0;
+    top: 50%;
+    transform: translateY(-50%);
+}
+
+.hud-status-ring__middle {
+    position: absolute;
+    width: 85%;
+    height: 85%;
+    border-radius: 50%;
+    border: 1px solid;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.hud-status-ring__tunneling-svg {
+    position: absolute;
+    width: 100%;
+    height: 100%;
+    transform: rotate(-90deg);
+}
+
+.hud-status-ring__tunneling-track {
+    fill: none;
+    stroke: rgba(255, 255, 255, 0.05);
+    stroke-width: 2;
+}
+
+.hud-status-ring__tunneling-fill {
+    fill: none;
+    stroke-width: 2;
+    stroke-linecap: round;
+    transition: stroke-dasharray 0.5s ease;
+}
+
+.hud-status-ring__content {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--spacing-xs);
+    z-index: 1;
+}
+
+.hud-status-ring__icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    filter: drop-shadow(0 0 6px currentColor);
+}
+
+.hud-status-ring__phase {
+    font-size: var(--text-xs);
+    font-weight: var(--font-bold);
+    letter-spacing: 0.15em;
+    text-shadow: 0 0 8px currentColor;
+}
+
+.hud-status-ring__trial {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 0.65rem;
+    color: var(--text-secondary);
+}
+
+.hud-status-ring__time {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+}
+
+.hud-status-ring__indicators {
+    position: absolute;
+    bottom: -24px;
+    display: flex;
+    gap: var(--spacing-md);
+}
+
+.hud-status-ring__indicator {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 1px;
+}
+
+.hud-status-ring__indicator-label {
+    font-size: 0.55rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+}
+
+.hud-status-ring__indicator-value {
+    font-family: var(--font-mono);
+    font-size: 0.65rem;
+    font-weight: var(--font-semibold);
+    color: var(--text-secondary);
+}
+
+/* Emergency state */
+.hud-status-ring--emergency .hud-status-ring__outer {
+    animation: emergencyPulse 0.5s ease-in-out infinite alternate, statusRotate 1s linear infinite;
+    border-color: var(--color-danger);
+}
+
+@keyframes emergencyPulse {
+    from {
+        box-shadow: 0 0 10px rgba(239, 68, 68, 0.3);
+    }
+
+    to {
+        box-shadow: 0 0 30px rgba(239, 68, 68, 0.6);
+    }
+}
+
+/* =============================================================================
+   HUD ALERT PANEL
+   ============================================================================= */
+
+.hud-alert-panel {
+    background: var(--hud-glass-bg);
+    backdrop-filter: var(--glass-blur);
+    border-radius: var(--radius-md);
+    border: 1px solid var(--border-default);
+    overflow: hidden;
+}
+
+.hud-alert-panel--clear {
+    background: rgba(16, 185, 129, 0.05);
+    border-color: rgba(16, 185, 129, 0.2);
+}
+
+.hud-alert-panel__status {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-sm);
+    padding: var(--spacing-sm) var(--spacing-md);
+}
+
+.hud-alert-panel__status-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--color-success);
+    box-shadow: 0 0 8px var(--color-success);
+    animation: statusPulse 2s ease-in-out infinite;
+}
+
+@keyframes statusPulse {
+
+    0%,
+    100% {
+        opacity: 1;
+        transform: scale(1);
+    }
+
+    50% {
+        opacity: 0.6;
+        transform: scale(1.2);
+    }
+}
+
+.hud-alert-panel__status-text {
+    font-size: var(--text-xs);
+    font-weight: var(--font-medium);
+    color: var(--color-success);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.hud-alert-panel__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--spacing-sm) var(--spacing-md);
+    background: rgba(255, 255, 255, 0.02);
+    border-bottom: 1px solid var(--border-subtle);
+}
+
+.hud-alert-panel__summary {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-sm);
+}
+
+.hud-alert-panel__header-icon {
+    color: var(--color-warning);
+}
+
+.hud-alert-panel__title {
+    font-size: var(--text-xs);
+    font-weight: var(--font-semibold);
+    color: var(--text-primary);
+}
+
+.hud-alert-panel__badge {
+    padding: 2px 6px;
+    border-radius: var(--radius-full);
+    font-size: 0.6rem;
+    font-weight: var(--font-semibold);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.hud-alert-panel__badge--critical {
+    background: var(--color-danger-muted);
+    color: var(--color-danger);
+}
+
+.hud-alert-panel__badge--warning {
+    background: var(--color-warning-muted);
+    color: var(--color-warning);
+}
+
+.hud-alert-panel__expand {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 8px;
+    background: transparent;
+    border: none;
+    font-size: 0.65rem;
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: color 0.15s ease;
+}
+
+.hud-alert-panel__expand:hover {
+    color: var(--text-secondary);
+}
+
+.hud-alert-panel__list {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    padding: var(--spacing-xs);
+}
+
+.hud-alert-panel__item {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--spacing-sm);
+    padding: var(--spacing-sm);
+    background: var(--alert-bg);
+    border-left: 3px solid var(--alert-border);
+    border-radius: var(--radius-sm);
+    animation: alertSlideIn 0.2s ease-out backwards;
+}
+
+@keyframes alertSlideIn {
+    from {
+        opacity: 0;
+        transform: translateX(-8px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateX(0);
+    }
+}
+
+.hud-alert-panel__item--critical {
+    animation: criticalPulse 1s ease-in-out infinite;
+}
+
+@keyframes criticalPulse {
+
+    0%,
+    100% {
+        background: var(--alert-bg);
+    }
+
+    50% {
+        background: rgba(239, 68, 68, 0.2);
+    }
+}
+
+.hud-alert-panel__item-icon {
+    flex-shrink: 0;
+    margin-top: 1px;
+}
+
+.hud-alert-panel__item-content {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.hud-alert-panel__item-title {
+    font-size: var(--text-xs);
+    font-weight: var(--font-semibold);
+    color: var(--alert-color);
+}
+
+.hud-alert-panel__item-message {
+    font-size: 0.65rem;
+    color: var(--text-secondary);
+    line-height: 1.4;
+}
+
+.hud-alert-panel__item-dismiss {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    opacity: 0.5;
+    transition: opacity 0.15s ease;
+}
+
+.hud-alert-panel__item-dismiss:hover {
+    opacity: 1;
+}
+
+/* Compact variant */
+.hud-alert-panel--compact .hud-alert-panel__item {
+    padding: 6px var(--spacing-sm);
+}
+
+.hud-alert-panel--compact .hud-alert-panel__item-content {
+    flex-direction: row;
+    align-items: center;
+    gap: var(--spacing-sm);
+}
+
+/* =============================================================================
+   SCANLINE OVERLAY (optional retro effect)
+   ============================================================================= */
+
+.hud-scanline-overlay {
+    position: absolute;
+    inset: 0;
+    background: var(--hud-scanline);
+    pointer-events: none;
+    opacity: 0.5;
+}

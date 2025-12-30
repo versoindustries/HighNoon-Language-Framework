@@ -348,6 +348,14 @@ set(HIGHNOON_OPS_SOURCES
     ops/quantum_galore_op.cc          # Phase 91: Entropy-based dynamic rank projection
     # Phase 200+: HD Streaming Mode
     ops/hd_streaming_adapter_op.cc    # Phase 200+: HD bundle → model projection
+    # Phase 200+: Block-Integrated HD Streaming (HIGHNOON_UPGRADE_ROADMAP.md Phase 2.2)
+    ops/hd_spatial_block_op.cc        # HD Spatial Block: FFT-domain Mamba SSM
+    ops/hd_timecrystal_op.cc          # HD TimeCrystal Block: Floquet dynamics
+    ops/hd_moe_dispatch_op.cc         # HD MoE Dispatch: Holographic routing
+    # Phase 200+: QULS Native Ops (HIGHNOON_UPGRADE_ROADMAP.md Phase 3.2)
+    ops/holographic_loss_op.cc        # Holographic Cross-Entropy Loss
+    # Phase 200+: SAQC - Spectrally-Aware Quantum Curriculum (quantum_enhancement_analysis.md)
+    ops/quantum_curriculum_op.cc      # FFT-domain spectral complexity for curriculum
 )
 
 # Controller sources (requires spdlog: apt install libspdlog-dev)

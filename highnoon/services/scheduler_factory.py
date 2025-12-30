@@ -97,17 +97,15 @@ def create_scheduler(
     user_optimizer = model_config.get("optimizer")
     optimizer_list = [user_optimizer] if user_optimizer else None
 
-    # Create HPOSearchSpace with user's budget constraint and feature flags for proper enforcement
-    # Flags like use_hyperdimensional_embedding significantly impact param count
-    # Note: hd_dim is NOT passed here - it uses the default_factory [512, 1024] for HPO sampling
+    # Create HPOSearchSpace with user's budget constraint for proper enforcement
+    # Note: Feature flags (use_hyperdimensional_embedding, use_quantum_lm_head, use_td_moe)
+    # are NOT passed here - they are pulled from global config.py at runtime by model components.
+    # This follows the design principle documented in HPOSearchSpace (lines 369-377).
     # The model_config.hd_dim is used later for parameter estimation, not for HPO search space
     hpo_search_space = HPOSearchSpace(
         vocab_size=vocab_size,
         context_window=context_window,
         param_budget=param_budget,
-        use_hyperdimensional_embedding=model_config.get("use_hyperdimensional_embedding", True),
-        use_quantum_lm_head=model_config.get("use_quantum_lm_head", True),
-        use_td_moe=model_config.get("use_td_moe", True),
     )
 
     # Override optimizer list if user specified one

@@ -141,6 +141,7 @@
     0% {
         background-position: 200% 0;
     }
+
     100% {
         background-position: -200% 0;
     }
@@ -597,9 +598,12 @@
 }
 
 @keyframes emergencyPulse {
-    0%, 100% {
+
+    0%,
+    100% {
         opacity: 1;
     }
+
     50% {
         opacity: 0.7;
     }
@@ -651,4 +655,38 @@
     display: flex;
     align-items: center;
     gap: var(--spacing-xs);
+}
+
+/* =============================================================================
+   COCKPIT VARIANT - New F1/Jet HUD mode
+   ============================================================================= */
+
+.hpo-dashboard--cockpit {
+    position: relative;
+    gap: var(--spacing-md);
+}
+
+.hpo-dashboard__actions-floating {
+    position: absolute;
+    top: var(--spacing-lg);
+    right: var(--spacing-lg);
+    z-index: 100;
+    display: flex;
+    gap: var(--spacing-sm);
+}
+
+/* Ensure console is below the HUD */
+.hpo-dashboard--cockpit .hpo-dashboard__console {
+    margin-top: var(--spacing-md);
+}
+
+/* Make console toggle more visible in cockpit mode */
+.hpo-dashboard--cockpit .hpo-dashboard__console-toggle {
+    background: rgba(0, 0, 0, 0.4);
+    border: 1px solid var(--border-default);
+}
+
+.hpo-dashboard--cockpit .hpo-dashboard__console-toggle:hover {
+    background: rgba(0, 0, 0, 0.5);
+    border-color: var(--border-strong);
 }

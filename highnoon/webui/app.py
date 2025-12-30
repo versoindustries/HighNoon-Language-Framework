@@ -277,7 +277,7 @@ class StartHPORequest(BaseModel):
     stage: HPOStage = HPOStage.COARSE
     max_trials: int | None = Field(default=None, ge=1, le=999)  # None = auto (convergence mode)
     auto_stop_on_convergence: bool = Field(default=True)  # Run until convergence detected
-    epochs_per_trial: int = Field(default=5, ge=1, le=20)  # Replaces steps_per_trial
+    epochs_per_trial: int = Field(default=20, ge=1, le=50)  # Increased for better system ID
     search_strategy: str = "quantum"  # QAHPO is the default and only strategy
     curriculum_id: str | None = None
 
@@ -3350,9 +3350,16 @@ def create_app(debug: bool = False) -> FastAPI:
 
     @app.post("/api/hpo/sweep/{sweep_id}/log")
     async def add_hpo_log(sweep_id: str, log_entry: dict[str, Any]):
-        """Add a log entry for an HPO sweep (called by trial runner)."""
+        """Add a log entry for an HPO sweep (called by trial runner).
+
+        Also bridges metrics to the telemetry WebSocket by:
+        1. Setting current_trial_id on the sweep
+        2. Creating/updating a synthetic training job entry for telemetry
+        """
         if sweep_id not in hpo_logs:
             hpo_logs[sweep_id] = []
+
+        trial_id = log_entry.get("trial_id")
 
         entry = {
             "timestamp": datetime.now().isoformat(),
@@ -3363,7 +3370,7 @@ def create_app(debug: bool = False) -> FastAPI:
             "gradient_norm": log_entry.get("gradient_norm"),
             "learning_rate": log_entry.get("learning_rate"),
             "epoch": log_entry.get("epoch"),
-            "trial_id": log_entry.get("trial_id"),
+            "trial_id": trial_id,
             # Memory metrics
             "memory_mb": log_entry.get("memory_mb"),
             "peak_memory_mb": log_entry.get("peak_memory_mb"),
@@ -3379,6 +3386,50 @@ def create_app(debug: bool = False) -> FastAPI:
         # Keep only last MAX_LOG_ENTRIES
         if len(hpo_logs[sweep_id]) > MAX_LOG_ENTRIES:
             hpo_logs[sweep_id] = hpo_logs[sweep_id][-MAX_LOG_ENTRIES:]
+
+        # Bridge metrics to telemetry WebSocket:
+        # 1. Update sweep with current_trial_id so telemetry can find it
+        sweep = hpo_sweeps.get(sweep_id)
+        if sweep and trial_id:
+            sweep["current_trial_id"] = trial_id
+
+        # 2. Create/update synthetic training job for telemetry WebSocket
+        if trial_id:
+            job_key = trial_id  # Use trial_id as the job key
+            if job_key not in training_jobs:
+                training_jobs[job_key] = {
+                    "job_id": job_key,
+                    "state": "running",
+                    "global_step": 0,
+                    "current_epoch": 0,
+                    "loss": 0.0,
+                    "learning_rate": 0.0,
+                    "throughput": 0.0,
+                    "progress_percent": 0.0,
+                }
+
+            # Update with latest metrics from trial
+            job = training_jobs[job_key]
+            job["state"] = "running"
+            if log_entry.get("step") is not None:
+                job["global_step"] = log_entry["step"]
+            if log_entry.get("epoch") is not None:
+                job["current_epoch"] = log_entry["epoch"]
+            if log_entry.get("loss") is not None:
+                job["loss"] = log_entry["loss"]
+            if log_entry.get("learning_rate") is not None:
+                job["learning_rate"] = log_entry["learning_rate"]
+            if log_entry.get("memory_mb") is not None:
+                job["memory_rss_mb"] = log_entry["memory_mb"]
+            if log_entry.get("peak_memory_mb") is not None:
+                job["memory_peak_mb"] = log_entry["peak_memory_mb"]
+            if log_entry.get("gradient_norm") is not None:
+                job["gradient_norm"] = log_entry["gradient_norm"]
+            if log_entry.get("perplexity") is not None:
+                job["perplexity"] = log_entry["perplexity"]
+            # Track trial number from sweep
+            if sweep:
+                job["current_trial"] = sweep.get("completed_trials", 0) + 1
 
         return {"status": "ok"}
 
@@ -4309,6 +4360,175 @@ def create_app(debug: bool = False) -> FastAPI:
                     break
 
                 await asyncio.sleep(2)
+        except WebSocketDisconnect:
+            pass
+
+    # ========================================================================
+    # Phase 200+: QULS Full Telemetry WebSocket (HIGHNOON_UPGRADE_ROADMAP.md)
+    # ========================================================================
+
+    @app.websocket("/ws/telemetry/{job_id}")
+    async def telemetry_websocket(websocket: WebSocket, job_id: str):
+        """WebSocket endpoint for full QULS telemetry streaming.
+
+        Streams per-batch telemetry for the HPO page metrics panel:
+        - Loss component breakdown (fidelity, entropy, coherence, barren plateau)
+        - HPO state (trial, tunneling probability, temperature)
+        - Memory stats (current, peak)
+        - Gradient norms (global, VQC variance)
+
+        Supports both:
+        - HPO sweep IDs (looks up current trial telemetry from sweep)
+        - Direct training job IDs
+
+        HIGHNOON_UPGRADE_ROADMAP.md Phase 4.1 - WebUI Metrics Dashboard.
+        """
+        await websocket.accept()
+
+        try:
+            while True:
+                # First check if this is an HPO sweep ID
+                sweep = hpo_sweeps.get(job_id)
+                job = None
+                is_sweep = False
+
+                if sweep:
+                    is_sweep = True
+                    # Get the current trial's training job if available
+                    current_trial_id = sweep.get("current_trial_id")
+                    if current_trial_id:
+                        job = training_jobs.get(current_trial_id)
+                else:
+                    # Try direct training job lookup
+                    job = training_jobs.get(job_id)
+
+                # Build telemetry payload - either from job or from sweep state
+                if job:
+                    telemetry = {
+                        "type": "full_telemetry",
+                        "timestamp": datetime.utcnow().isoformat(),
+                        "job_id": job_id,
+                        "loss": {
+                            "total": job.get("loss", 0.0),
+                            "fidelity": job.get("quls_components", {}).get("fidelity", 0.0),
+                            "entropy": job.get("quls_components", {}).get("entropy", 0.0),
+                            "coherence": job.get("quls_components", {}).get("coherence", 0.0),
+                            "symplectic": job.get("quls_components", {}).get("symplectic", 0.0),
+                            "born_rule": job.get("quls_components", {}).get("born_rule", 0.0),
+                            "holographic": job.get("quls_components", {}).get("holographic", 0.0),
+                            "barren_plateau_detected": job.get("barren_plateau_detected", False),
+                        },
+                        "hpo": {
+                            "trial_id": job.get(
+                                "current_trial", sweep.get("completed_trials", 0) if sweep else 0
+                            ),
+                            "tunneling_probability": job.get("tunneling_prob", 0.0),
+                            "annealing_temperature": job.get("annealing_temperature", 1.0),
+                            "exploration_mode": job.get("exploration_mode", "exploit"),
+                        },
+                        "memory": {
+                            "rss_mb": job.get("memory_rss_mb", 0.0),
+                            "peak_mb": job.get("memory_peak_mb", 0.0),
+                            "gpu_allocated_mb": job.get("gpu_allocated_mb", 0.0),
+                        },
+                        "gradients": {
+                            "global_norm": job.get("gradient_norm", 0.0),
+                            "vqc_variance": job.get("vqc_gradient_variance", 0.0),
+                            "max_layer_norm": job.get("max_layer_gradient_norm", 0.0),
+                        },
+                        "training": {
+                            "epoch": job.get("current_epoch", 0),
+                            "step": job.get("global_step", 0),
+                            "learning_rate": job.get("learning_rate", 0.0),
+                            "throughput_samples_sec": job.get("throughput", 0.0),
+                        },
+                    }
+                    await websocket.send_json(telemetry)
+
+                    # Check for job completion
+                    if job.get("state") in ["completed", "failed", "cancelled"]:
+                        # For sweeps, only finish if sweep is done, not individual trials
+                        if is_sweep:
+                            if sweep.get("state") in ["completed", "cancelled"]:
+                                await websocket.send_json(
+                                    {
+                                        "type": "finished",
+                                        "state": sweep.get("state"),
+                                    }
+                                )
+                                break
+                        else:
+                            await websocket.send_json(
+                                {
+                                    "type": "finished",
+                                    "state": job.get("state"),
+                                }
+                            )
+                            break
+                elif is_sweep:
+                    # Sweep exists but no active trial yet - send sweep status telemetry
+                    telemetry = {
+                        "type": "full_telemetry",
+                        "timestamp": datetime.utcnow().isoformat(),
+                        "job_id": job_id,
+                        "sweep_status": {
+                            "state": sweep.get("state", "unknown"),
+                            "completed_trials": sweep.get("completed_trials", 0),
+                            "max_trials": sweep.get("max_trials", 0),
+                            "best_loss": sweep.get("best_loss"),
+                            "best_trial_id": sweep.get("best_trial_id"),
+                        },
+                        "loss": {
+                            "total": 0.0,
+                            "fidelity": 0.0,
+                            "entropy": 0.0,
+                            "coherence": 0.0,
+                            "symplectic": 0.0,
+                            "born_rule": 0.0,
+                            "holographic": 0.0,
+                            "barren_plateau_detected": False,
+                        },
+                        "hpo": {
+                            "trial_id": sweep.get("completed_trials", 0),
+                            "tunneling_probability": 0.0,
+                            "annealing_temperature": 1.0,
+                            "exploration_mode": "warmup",
+                        },
+                        "memory": {"rss_mb": 0.0, "peak_mb": 0.0, "gpu_allocated_mb": 0.0},
+                        "gradients": {
+                            "global_norm": 0.0,
+                            "vqc_variance": 0.0,
+                            "max_layer_norm": 0.0,
+                        },
+                        "training": {
+                            "epoch": 0,
+                            "step": 0,
+                            "learning_rate": 0.0,
+                            "throughput_samples_sec": 0.0,
+                        },
+                    }
+                    await websocket.send_json(telemetry)
+
+                    # Check if sweep is done
+                    if sweep.get("state") in ["completed", "cancelled"]:
+                        await websocket.send_json(
+                            {
+                                "type": "finished",
+                                "state": sweep.get("state"),
+                            }
+                        )
+                        break
+                else:
+                    # Neither sweep nor job found - send waiting status and keep connection alive
+                    await websocket.send_json(
+                        {
+                            "type": "waiting",
+                            "message": "Waiting for training data...",
+                            "job_id": job_id,
+                        }
+                    )
+
+                await asyncio.sleep(1)  # More frequent updates for telemetry
         except WebSocketDisconnect:
             pass
 

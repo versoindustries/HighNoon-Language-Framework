@@ -31,8 +31,258 @@ logger = tf.get_logger()
 
 
 # =============================================================================
-# Phase 19-24: Unified Quantum Enhancements (Phases 19-24)
+# Phase 200+: HD Block Wrappers (HIGHNOON_UPGRADE_ROADMAP.md)
 # =============================================================================
+# These wrappers call C++ ops directly. NO PYTHON FALLBACKS.
+# If C++ ops are not compiled, they raise NotImplementedError.
+
+
+class HDSpatialBlock(tf.keras.layers.Layer):
+    """HD-space Mamba SSM block using FFT-domain processing.
+
+    Replaces QMambaBlock/SpatialBlock when USE_HD_SPATIAL_BLOCK=True.
+    Processes HD bundles directly via C++ HDSpatialBlockForward op.
+
+    Complexity: O(L × D log D) via FFT-based SSM
+
+    Attributes:
+        hd_dim: Hyperdimensional embedding dimension.
+        hidden_dim: Internal hidden dimension.
+        state_dim: SSM state dimension.
+    """
+
+    def __init__(
+        self,
+        hd_dim: int = 4096,
+        hidden_dim: int = 512,
+        state_dim: int = 16,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.hd_dim = hd_dim
+        self.hidden_dim = hidden_dim
+        self.state_dim = state_dim
+        self._op = None
+
+    def build(self, input_shape):
+        """Build layer weights and load C++ op."""
+        # Load native op (no fallback)
+        from highnoon._native import get_op
+
+        self._op = get_op("hd_spatial_block")
+        if self._op is None or not hasattr(self._op, "HDSpatialBlockForward"):
+            if config.HD_REQUIRE_NATIVE_OPS:
+                raise NotImplementedError(
+                    "HDSpatialBlock requires C++ op. Compile with build_secure.sh."
+                )
+
+        # SSM parameters
+        self.a_log = self.add_weight(
+            name="a_log",
+            shape=(self.state_dim,),
+            initializer=tf.keras.initializers.RandomUniform(-4.0, -1.0),
+            trainable=True,
+        )
+        self.b_proj = self.add_weight(
+            name="b_proj",
+            shape=(self.hd_dim, self.state_dim),
+            initializer="glorot_uniform",
+            trainable=True,
+        )
+        self.c_proj = self.add_weight(
+            name="c_proj",
+            shape=(self.hd_dim, self.state_dim),
+            initializer="glorot_uniform",
+            trainable=True,
+        )
+        self.dt_proj = self.add_weight(
+            name="dt_proj",
+            shape=(self.hd_dim,),
+            initializer=tf.keras.initializers.Constant(0.01),
+            trainable=True,
+        )
+        self.skip_proj = self.add_weight(
+            name="skip_proj",
+            shape=(self.hd_dim, self.hd_dim),
+            initializer="identity",
+            trainable=True,
+        )
+        super().build(input_shape)
+
+    def call(self, inputs, training=False):
+        """Forward pass via C++ op."""
+        batch_size = tf.shape(inputs)[0]
+        seq_len = tf.shape(inputs)[1]
+
+        # Broadcast dt to [seq_len, hd_dim]
+        dt = tf.broadcast_to(
+            tf.nn.softplus(self.dt_proj)[tf.newaxis, :],
+            [seq_len, self.hd_dim],
+        )
+
+        if self._op is not None and hasattr(self._op, "HDSpatialBlockForward"):
+            output, _ = self._op.HDSpatialBlockForward(
+                hd_input=inputs,
+                a_log=self.a_log,
+                b_proj=self.b_proj,
+                c_proj=self.c_proj,
+                dt=dt,
+                skip_proj=self.skip_proj,
+                hd_dim=self.hd_dim,
+                state_dim=self.state_dim,
+                hidden_dim=self.hidden_dim,
+            )
+            return output
+        else:
+            raise NotImplementedError("HDSpatialBlock C++ op not available.")
+
+
+class HDTimeCrystalBlock(tf.keras.layers.Layer):
+    """HD-space Floquet dynamics block.
+
+    Replaces TimeCrystalSequenceBlock when USE_HD_TIMECRYSTAL_BLOCK=True.
+    Uses Floquet harmonic decomposition for O(L × D log D) evolution.
+
+    Attributes:
+        hd_dim: Hyperdimensional embedding dimension.
+        floquet_modes: Number of Floquet harmonics.
+        drive_frequency: Periodic drive frequency.
+    """
+
+    def __init__(
+        self,
+        hd_dim: int = 4096,
+        hidden_dim: int = 512,
+        floquet_modes: int = 16,
+        drive_frequency: float = 1.0,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.hd_dim = hd_dim
+        self.hidden_dim = hidden_dim
+        self.floquet_modes = floquet_modes
+        self.drive_frequency = drive_frequency
+        self._op = None
+
+    def build(self, input_shape):
+        """Build layer weights and load C++ op."""
+        from highnoon._native import get_op
+
+        self._op = get_op("hd_timecrystal")
+        if self._op is None or not hasattr(self._op, "HDTimeCrystalForward"):
+            if config.HD_REQUIRE_NATIVE_OPS:
+                raise NotImplementedError(
+                    "HDTimeCrystalBlock requires C++ op. Compile with build_secure.sh."
+                )
+
+        # Floquet parameters
+        self.floquet_energies = self.add_weight(
+            name="floquet_energies",
+            shape=(self.floquet_modes, self.hd_dim),
+            initializer=tf.keras.initializers.RandomNormal(0.0, 0.1),
+            trainable=True,
+        )
+        self.drive_weights = self.add_weight(
+            name="drive_weights",
+            shape=(self.floquet_modes,),
+            initializer=tf.keras.initializers.Constant(1.0 / self.floquet_modes),
+            trainable=True,
+        )
+        self.coupling_matrix = self.add_weight(
+            name="coupling_matrix",
+            shape=(self.floquet_modes, self.floquet_modes),
+            initializer="identity",
+            trainable=True,
+        )
+        super().build(input_shape)
+
+    def call(self, inputs, training=False):
+        """Forward pass via C++ op."""
+        if self._op is not None and hasattr(self._op, "HDTimeCrystalForward"):
+            output = self._op.HDTimeCrystalForward(
+                hd_input=inputs,
+                floquet_energies=self.floquet_energies,
+                drive_weights=self.drive_weights,
+                coupling_matrix=self.coupling_matrix,
+                hd_dim=self.hd_dim,
+                floquet_modes=self.floquet_modes,
+                drive_frequency=self.drive_frequency,
+            )
+            return output
+        else:
+            raise NotImplementedError("HDTimeCrystalBlock C++ op not available.")
+
+
+class HDMoEBlock(tf.keras.layers.Layer):
+    """HD-space Mixture-of-Experts block with holographic routing.
+
+    Replaces MoELayer when USE_HD_MOE_BLOCK=True.
+    Uses holographic similarity for expert selection in O(D) time.
+
+    Attributes:
+        hd_dim: Hyperdimensional embedding dimension.
+        num_experts: Number of MoE experts.
+        top_k: Top-K experts per token.
+    """
+
+    def __init__(
+        self,
+        hd_dim: int = 4096,
+        hidden_dim: int = 512,
+        num_experts: int = 8,
+        top_k: int = 2,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.hd_dim = hd_dim
+        self.hidden_dim = hidden_dim
+        self.num_experts = num_experts
+        self.top_k = top_k
+        self._op = None
+
+    def build(self, input_shape):
+        """Build layer weights and load C++ op."""
+        from highnoon._native import get_op
+
+        self._op = get_op("hd_moe_dispatch")
+        if self._op is None or not hasattr(self._op, "HDMoEDispatchForward"):
+            if config.HD_REQUIRE_NATIVE_OPS:
+                raise NotImplementedError(
+                    "HDMoEBlock requires C++ op. Compile with build_secure.sh."
+                )
+
+        # Expert parameters
+        self.expert_bases = self.add_weight(
+            name="expert_bases",
+            shape=(self.num_experts, self.hd_dim),
+            initializer="glorot_uniform",
+            trainable=True,
+        )
+        self.expert_weights = self.add_weight(
+            name="expert_weights",
+            shape=(self.num_experts, self.hd_dim),
+            initializer="glorot_uniform",
+            trainable=True,
+        )
+        super().build(input_shape)
+
+    def call(self, inputs, training=False):
+        """Forward pass via C++ op."""
+        if self._op is not None and hasattr(self._op, "HDMoEDispatchForward"):
+            output, routing_probs, expert_indices, aux_loss = self._op.HDMoEDispatchForward(
+                hd_input=inputs,
+                expert_bases=self.expert_bases,
+                expert_weights=self.expert_weights,
+                hd_dim=self.hd_dim,
+                num_experts=self.num_experts,
+                top_k=self.top_k,
+            )
+            # Add auxiliary loss for load balancing
+            if training:
+                self.add_loss(aux_loss * 0.01)
+            return output
+        else:
+            raise NotImplementedError("HDMoEBlock C++ op not available.")
 
 
 class QuantumEnhancedBlock(tf.keras.layers.Layer):
@@ -490,9 +740,23 @@ def create_reasoning_stack(
         block = None
 
         block_type = i % 6  # Phase 10.4: Pattern now has 6 unique blocks
+        # Phase 200+: Get HD streaming config
+        use_hd_streaming = kwargs.get(
+            "use_hd_streaming", getattr(config, "USE_HD_STREAMING", False)
+        )
+        hd_dim = kwargs.get("hd_dim", getattr(config, "HD_EMBEDDING_DIM", 4096))
+
         if block_type == 0:
+            # Phase 200+: Use HDSpatialBlock when HD streaming and USE_HD_SPATIAL_BLOCK enabled
+            if use_hd_streaming and getattr(config, "USE_HD_SPATIAL_BLOCK", False):
+                block = HDSpatialBlock(
+                    hd_dim=hd_dim,
+                    hidden_dim=embedding_dim,
+                    state_dim=mamba_state_dim,
+                    name=f"hd_spatial_block_{i}",
+                )
             # S2 Synergy: Use QMambaBlock when USE_QMAMBA is enabled
-            if config.USE_QMAMBA:
+            elif config.USE_QMAMBA:
                 block = QMambaBlock(
                     embedding_dim=embedding_dim,
                     num_superposition_paths=kwargs.get("qmamba_superposition_states", 4),
@@ -511,19 +775,28 @@ def create_reasoning_stack(
                     name=f"spatial_block_{i}",
                 )
         elif block_type == 1:
-            # Get Lorentzian config from kwargs or global config
-            use_lorentzian = kwargs.get("use_lorentzian", config.USE_LORENTZIAN_TRANSFORM)
-            lorentzian_dim = kwargs.get("lorentzian_dim", config.LORENTZIAN_HYPERBOLIC_DIM)
+            # Phase 200+: Use HDTimeCrystalBlock when HD streaming enabled
+            if use_hd_streaming and getattr(config, "USE_HD_TIMECRYSTAL_BLOCK", False):
+                block = HDTimeCrystalBlock(
+                    hd_dim=hd_dim,
+                    hidden_dim=embedding_dim,
+                    floquet_modes=16,
+                    name=f"hd_timecrystal_block_{i}",
+                )
+            else:
+                # Get Lorentzian config from kwargs or global config
+                use_lorentzian = kwargs.get("use_lorentzian", config.USE_LORENTZIAN_TRANSFORM)
+                lorentzian_dim = kwargs.get("lorentzian_dim", config.LORENTZIAN_HYPERBOLIC_DIM)
 
-            block = TimeCrystalSequenceBlock(
-                embedding_dim=embedding_dim,
-                state_dim=embedding_dim // 2,
-                hamiltonian_hidden_dim=embedding_dim,
-                d_inner=d_inner,
-                use_lorentzian=use_lorentzian,
-                lorentzian_dim=lorentzian_dim,
-                name=f"timecrystal_block_{i}",
-            )
+                block = TimeCrystalSequenceBlock(
+                    embedding_dim=embedding_dim,
+                    state_dim=embedding_dim // 2,
+                    hamiltonian_hidden_dim=embedding_dim,
+                    d_inner=d_inner,
+                    use_lorentzian=use_lorentzian,
+                    lorentzian_dim=lorentzian_dim,
+                    name=f"timecrystal_block_{i}",
+                )
 
             # Phase 2: Add KalmanBlock after TimeCrystal for state estimation
             # Provides uncertainty tracking and corrects Hamiltonian integration drift
@@ -683,13 +956,23 @@ def create_reasoning_stack(
                 name=f"wlam_block_{i}",
             )
         elif block_type == 5:
-            block = MoELayer(
-                num_experts=num_experts,
-                d_model=embedding_dim,
-                d_ff=reasoning_ff_dim,
-                superposition_dim=superposition_dim,
-                name=f"moe_layer_{i}",
-            )
+            # Phase 200+: Use HDMoEBlock when HD streaming enabled
+            if use_hd_streaming and getattr(config, "USE_HD_MOE_BLOCK", False):
+                block = HDMoEBlock(
+                    hd_dim=hd_dim,
+                    hidden_dim=embedding_dim,
+                    num_experts=num_experts,
+                    top_k=kwargs.get("top_k", config.TOP_K),
+                    name=f"hd_moe_block_{i}",
+                )
+            else:
+                block = MoELayer(
+                    num_experts=num_experts,
+                    d_model=embedding_dim,
+                    d_ff=reasoning_ff_dim,
+                    superposition_dim=superposition_dim,
+                    name=f"moe_layer_{i}",
+                )
 
         if block:
             # Phase 19-24: Wrap with quantum enhancements if enabled

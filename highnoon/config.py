@@ -702,6 +702,54 @@ HQE_CTQW_STEPS: int = 3  # CTQW spreading walk steps
 HD_EMBEDDING_DIM: int = 4096  # Hyperdimensional embedding dimension
 HD_ACTIVE_VOCAB_SIZE: int = 10000  # Active vocabulary for DualPathEmbedding
 
+# =============================================================================
+# PHASE 200+: BLOCK-INTEGRATED HD STREAMING (HIGHNOON_UPGRADE_ROADMAP.md)
+# =============================================================================
+# When enabled, reasoning blocks operate natively on HD bundles instead of
+# converting back to model_dim at block boundaries. Requires native C++ ops.
+
+USE_HD_SPATIAL_BLOCK: bool = True  # Replace SpatialBlock with HDSpatialBlock
+USE_HD_TIMECRYSTAL_BLOCK: bool = True  # Replace TimeCrystalBlock with HDTimeCrystal
+USE_HD_MOE_BLOCK: bool = True  # Replace FusedMoEDispatch with HDMoEDispatch
+USE_HOLOGRAPHIC_LOSS: bool = True  # Use HD-space cross-entropy (no logits tensor)
+HD_PROJECTION_FREEZE_EPOCHS: int = 2  # Freeze HD projections for N epochs
+HD_REQUIRE_NATIVE_OPS: bool = True  # Raise error if C++ ops unavailable
+
+# =============================================================================
+# QULS → QAHPO FEEDBACK (HIGHNOON_UPGRADE_ROADMAP.md Phase 1.2)
+# =============================================================================
+# Enables QULS telemetry export to QuantumAdaptiveHPO for barren plateau
+# detection and tunneling probability adjustment.
+
+USE_QULS_HPO_FEEDBACK: bool = True  # Enable QULS → QAHPO feedback loop
+BARREN_PLATEAU_TUNNELING_THRESHOLD: int = 3  # Plateau count to boost tunneling
+BARREN_PLATEAU_EARLY_STOP_THRESHOLD: int = 7  # Plateau count for early-stop
+QULS_FEEDBACK_WINDOW_SIZE: int = 10  # Sliding window for plateau detection
+VQC_GRADIENT_VARIANCE_MIN: float = 1e-6  # Threshold for barren detection
+
+# =============================================================================
+# PHASE 200+: SPECTRALLY-AWARE QUANTUM CURRICULUM (SAQC)
+# =============================================================================
+# Synergizes QULS telemetry with curriculum scheduling for quantum-adaptive
+# data progression. Complements QULS→QAHPO feedback by closing the loop between
+# model quantum state and training data complexity. See quantum_enhancement_analysis.md.
+#
+# SAQC Modes:
+#   - NORMAL: Standard adaptive curriculum progression
+#   - RETREAT: Low spectral entropy → high-diversity batches to restore rank
+#   - TUNNELING: Barren plateau → inject orthogonal/edge-case datasets
+#   - ACCELERATE: High fidelity → rapid curriculum advancement
+
+USE_QUANTUM_CURRICULUM: bool = True  # Master switch for SAQC
+SAQC_ENTROPY_RETREAT_THRESHOLD: float = 0.3  # Spectral entropy below this triggers retreat
+SAQC_FIDELITY_ADVANCE_THRESHOLD: float = 0.85  # Fidelity above this enables acceleration
+SAQC_TUNNELING_DATASET_RATIO: float = 0.2  # Fraction of tunneling samples during plateau
+SAQC_COHERENCE_GATE_THRESHOLD: float = 0.9  # Coherence required for progression
+SAQC_REQUIRE_NATIVE_OP: bool = True  # Fail if C++ op unavailable
+SAQC_FFT_DIM: int = 64  # FFT dimension for spectral analysis
+SAQC_UPDATE_INTERVAL: int = 10  # Steps between curriculum state updates
+SAQC_MIN_STAGE_DURATION: int = 100  # Minimum steps before stage transition
+
 # Phase 48.1: Tensor-Ring MoE Gating
 USE_TENSOR_RING_MOE: bool = True  # Enable Tensor-Ring decomposition for MoE gates
 TENSOR_RING_RANK: int = 8  # Ring rank for TR decomposition

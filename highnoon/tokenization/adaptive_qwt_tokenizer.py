@@ -167,6 +167,39 @@ class AdaptiveQWTTokenizer(QWTTextTokenizer):
         """Return the SuperwordMerger instance (or None if not trained)."""
         return self._merger
 
+    def validate_for_model(self, model_vocab_size: int) -> bool:
+        """Validate that model vocab size is compatible with tokenizer.
+
+        Checks that the model's vocabulary size is at least as large as the
+        tokenizer's actual vocabulary to prevent index-out-of-bounds errors
+        and dead embeddings.
+
+        Args:
+            model_vocab_size: The vocab_size used to build the model.
+
+        Returns:
+            True if validation passes.
+
+        Raises:
+            ValueError: If model vocab is smaller than tokenizer vocab.
+
+        Example:
+            >>> tokenizer.validate_for_model(model.vocab_size)
+            True
+        """
+        if model_vocab_size < self.vocab_size:
+            raise ValueError(
+                f"Model vocab ({model_vocab_size}) < tokenizer vocab ({self.vocab_size}). "
+                "Model must be built with tokenizer.vocab_size to prevent crashes."
+            )
+        if model_vocab_size > self.vocab_size * 2:
+            logger.warning(
+                f"[AdaptiveQWT] Model vocab ({model_vocab_size}) >> tokenizer vocab "
+                f"({self.vocab_size}). {model_vocab_size - self.vocab_size} embeddings "
+                "will never train (dead embeddings)."
+            )
+        return True
+
     def learn_from_corpus(
         self,
         texts: Sequence[str],
@@ -233,6 +266,7 @@ class AdaptiveQWTTokenizer(QWTTextTokenizer):
 
         if not token_sequences:
             logger.warning("[AdaptiveQWT] No sequences tokenized, returning 0")
+            self._trained = True  # Mark as trained even with empty result
             return 0
 
         if interrupted:

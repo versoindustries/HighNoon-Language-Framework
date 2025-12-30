@@ -893,8 +893,14 @@ def build_hsmn_model(
             if use_dual_path:
                 from highnoon.models.layers.hyperdimensional_layer import DualPathEmbedding
 
-                # hd_dim must be divisible by hidden_dim
-                embed_hd_dim = hidden_dim * 8  # Ensures divisibility
+                # PHASE 500+: Use the passed hd_dim from trial config (budget-filtered)
+                # Previously used hidden_dim * 8 which bypassed budget constraints
+                # Ensure divisibility: round up to nearest multiple of hidden_dim
+                embed_hd_dim = (
+                    hd_dim
+                    if hd_dim % hidden_dim == 0
+                    else ((hd_dim // hidden_dim) + 1) * hidden_dim
+                )
                 x = DualPathEmbedding(
                     vocab_size=vocab_size,
                     model_dim=hidden_dim,
@@ -910,8 +916,13 @@ def build_hsmn_model(
             else:
                 from highnoon.models.layers.hyperdimensional_layer import HyperdimensionalEmbedding
 
-                # hd_dim must be divisible by hidden_dim - compute dynamically
-                embed_hd_dim = hidden_dim * 8  # Ensures divisibility (e.g., 768*8=6144, 512*8=4096)
+                # PHASE 500+: Use the passed hd_dim from trial config (budget-filtered)
+                # Previously used hidden_dim * 8 which bypassed budget constraints
+                embed_hd_dim = (
+                    hd_dim
+                    if hd_dim % hidden_dim == 0
+                    else ((hd_dim // hidden_dim) + 1) * hidden_dim
+                )
                 x = HyperdimensionalEmbedding(
                     vocab_size=vocab_size,
                     model_dim=hidden_dim,
@@ -1012,6 +1023,9 @@ def create_optimizer(
         alpha=0.1,  # Final LR = 10% of initial
     )
 
+    # Phase 300+: HD Upgrade Parameters
+    hd_compression_ratio = config.get("hd_optimizer_compression_ratio")
+
     # Create optimizer
     if optimizer_name == "sophiag":
         # Import SophiaG if available
@@ -1029,6 +1043,7 @@ def create_optimizer(
                     model=model,
                     learning_rate=lr_schedule,
                     weight_decay=weight_decay,
+                    hd_compression_ratio=hd_compression_ratio,
                 )
         except ImportError:
             logger.warning("[HPO] SophiaG not available, falling back to AdamW")
@@ -1285,7 +1300,7 @@ def train_trial(
     trial_id: str,
     config_path: str,
     epochs: int = 5,
-    steps_per_epoch: int = 100,
+    steps_per_epoch: int = 1500,
 ) -> float:
     """
     Train a single HPO trial using epoch-based training.
@@ -1351,8 +1366,9 @@ def train_trial(
     # Get dimensions from config
     batch_size = trial_config.get("batch_size", 8)
     sequence_length = trial_config.get("sequence_length", 256)
-    # vocab_size can be tuned by HPO
-    vocab_size_override = trial_config.get("vocab_size")
+    # Phase 1 Tokenizer Fix: Use target_vocab_size (tokenizer target) instead of vocab_size
+    # Model vocab_size is ALWAYS derived from tokenizer.vocab_size after learning
+    target_vocab_size = trial_config.get("target_vocab_size", 32000)
     hidden_dim = trial_config.get("hidden_dim") or 256  # Default if None or missing
 
     # Get optional HuggingFace dataset name (set from curriculum or manually)
@@ -1397,14 +1413,18 @@ def train_trial(
         use_hd_streaming = trial_config.get("use_hd_streaming", True)  # Opt-in for now
         hd_reservoir_size = trial_config.get("hd_reservoir_size", 2000)
         hd_dim = trial_config.get("hd_dim", 1024)
+        hd_sample_length = trial_config.get("hd_sample_length", 512)  # Tunable HD sample length
 
         if use_hd_streaming:
-            logger.info(f"[HPO] HD Streaming Mode: reservoir={hd_reservoir_size}, hd_dim={hd_dim}")
+            logger.info(
+                f"[HPO] HD Streaming Mode: reservoir={hd_reservoir_size}, hd_dim={hd_dim}, "
+                f"sample_length={hd_sample_length}"
+            )
 
         train_dataset, tokenizer, merger = load_training_dataset(
             batch_size=batch_size,
             sequence_length=sequence_length,
-            vocab_size=vocab_size_override,  # Pass override if provided by HPO
+            vocab_size=target_vocab_size,  # Phase 1: Pass target_vocab_size to tokenizer
             hf_dataset_name=hf_dataset_name,
             prefetch_buffer_size=prefetch_buffer_size,
             use_adaptive_tokenizer=use_adaptive_tokenizer,
@@ -1414,29 +1434,13 @@ def train_trial(
             use_hd_streaming=use_hd_streaming,
             hd_reservoir_size=hd_reservoir_size,
             hd_dim=hd_dim,
+            hd_sample_length=hd_sample_length,  # Use tunable value from QAHPO
         )
 
-        # Phase 201.7: Respect config vocab_size if specified (budget-aware)
-        # The config vocab_size is computed based on param_budget to prevent oversized models
-        config_vocab_size = trial_config.get("vocab_size")
-        tokenizer_vocab_size = tokenizer.vocab_size
-
-        if config_vocab_size is not None and config_vocab_size > 0:
-            # Use config-specified vocab_size (budget-aware)
-            vocab_size = config_vocab_size
-            logger.info(
-                f"[HPO] Using config vocab_size={vocab_size} (tokenizer has {tokenizer_vocab_size})"
-            )
-            # Warn if tokenizer vocab exceeds config - tokens beyond vocab_size will map to UNK
-            if tokenizer_vocab_size > vocab_size:
-                logger.warning(
-                    f"[HPO] Tokenizer vocab ({tokenizer_vocab_size}) exceeds budget-aware limit ({vocab_size}). "
-                    f"Tokens beyond {vocab_size} will be treated as UNK."
-                )
-        else:
-            # No config vocab_size - use tokenizer's actual size
-            vocab_size = tokenizer_vocab_size
-            logger.info(f"[HPO] Tokenizer trained on curriculum: effective_vocab_size={vocab_size}")
+        # Phase 1 Tokenizer Fix: ALWAYS derive model vocab from tokenizer
+        # This ensures zero dead embeddings and eliminates loss floors at log(vocab_size)
+        vocab_size = tokenizer.vocab_size
+        logger.info(f"[HPO] Vocabulary aligned: target={target_vocab_size}, actual={vocab_size}")
 
         if merger is not None:
             logger.info(f"[HPO] SuperwordMerger active: {merger.superword_count} superwords")

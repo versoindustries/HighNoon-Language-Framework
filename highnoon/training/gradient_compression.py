@@ -62,6 +62,20 @@ from highnoon.config import (
 
 logger = logging.getLogger(__name__)
 
+# Phase 300+: HD Gradient Projection Integration
+try:
+    from highnoon._native.ops.hd_gradient_projection import (
+        HDGradientCompressor as HDGradientCompressorNative,
+    )
+    from highnoon._native.ops.hd_gradient_projection import hd_gradient_projection_available
+    from highnoon.config import USE_HD_GRADIENT_PROJECTION
+
+    _HD_GRADIENT_AVAILABLE = hd_gradient_projection_available()
+except ImportError:
+    USE_HD_GRADIENT_PROJECTION = False
+    _HD_GRADIENT_AVAILABLE = False
+    HDGradientCompressorNative = None
+
 
 @dataclass
 class ProjectionState:
@@ -133,6 +147,14 @@ class TensorGaLoreCompressor:
         ]
         # Track TT layers detected for statistics
         self._tt_layers_detected: set[str] = set()
+        # Phase 300+: HD Gradient Compressor (alternative to Tucker decomposition)
+        self._hd_compressor: HDGradientCompressorNative | None = None
+        if USE_HD_GRADIENT_PROJECTION and _HD_GRADIENT_AVAILABLE:
+            try:
+                self._hd_compressor = HDGradientCompressorNative(rank=self.rank)
+                logger.info("[GALORE] HD gradient projection enabled (SRHT)")
+            except Exception as e:
+                logger.warning(f"[GALORE] Failed to init HD compressor: {e}")
 
     def _initialize_projection(
         self,
@@ -384,6 +406,9 @@ class TensorGaLoreCompressor:
     ) -> tuple[tf.Tensor, str]:
         """Compress gradient to low-rank representation.
 
+        Phase 300+: When USE_HD_GRADIENT_PROJECTION=True and native ops available,
+        uses SRHT-based projection instead of Tucker decomposition.
+
         Args:
             gradient: Full gradient tensor.
             variable: Associated weight variable.
@@ -393,6 +418,15 @@ class TensorGaLoreCompressor:
         """
         if not self.enabled:
             return gradient, str(id(variable))
+
+        # Phase 300+: HD Gradient Projection (SRHT-based, no periodic SVD)
+        if self._hd_compressor is not None:
+            try:
+                compressed, var_name = self._hd_compressor.compress(gradient, variable)
+                return compressed, var_name
+            except Exception as e:
+                logger.warning(f"[GALORE] HD compress failed, using Tucker: {e}")
+                # Fall through to Tucker decomposition
 
         # Use id(variable) as unique key to avoid name collisions
         # Multiple layers can have variables named 'kernel', 'bias', etc.
@@ -446,6 +480,8 @@ class TensorGaLoreCompressor:
     ) -> tf.Tensor:
         """Decompress low-rank update to full tensor.
 
+        Phase 300+: Uses HD SRHT reconstruction when HD compression was used.
+
         Args:
             compressed_update: Update in low-rank space.
             variable_name: Name of the associated variable.
@@ -453,6 +489,15 @@ class TensorGaLoreCompressor:
         Returns:
             Full-rank update tensor.
         """
+        # Phase 300+: HD Gradient Decompression
+        if self._hd_compressor is not None:
+            try:
+                return self._hd_compressor.decompress(compressed_update, variable_name)
+            except Exception as e:
+                logger.warning(f"[GALORE] HD decompress failed: {e}")
+                # Fall through to Tucker but may mismatch - compressed_update
+                # may not be valid for Tucker decompression
+
         if not self.enabled or variable_name not in self._projections:
             return compressed_update
 

@@ -135,6 +135,15 @@ class HSMN(tf.keras.Model):
         if USE_HYPERDIMENSIONAL_EMBEDDING:
             from highnoon.models.layers.hyperdimensional_layer import DualPathEmbedding
 
+            # Phase 1 Fix: DualPathEmbedding is incompatible with weight tying
+            # because it doesn't expose a single 'embeddings' property
+            if tie_word_embeddings:
+                logger.warning(
+                    "[HSMN] DualPathEmbedding is incompatible with tie_word_embeddings. "
+                    "Using separate LM head for output projection."
+                )
+                tie_word_embeddings = False
+
             self.token_embedding = DualPathEmbedding(
                 vocab_size=vocab_size,
                 model_dim=embedding_dim,

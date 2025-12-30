@@ -1,6 +1,0 @@
-{"step": 10, "loss": 12.412145614624023, "perplexity": 245768.57365489865, "gradient_norm": 1193.1171875, "learning_rate": 8.587990338481413e-05, "epoch": 0, "memory_mb": 5437.13671875, "peak_memory_mb": 5437.13671875}
-{"step": 20, "loss": 12.411152839660645, "perplexity": 245524.70184313328, "gradient_norm": 1194.599365234375, "learning_rate": 8.343686254772795e-05, "epoch": 0, "memory_mb": 5543.78515625, "peak_memory_mb": 5543.78515625}
-{"step": 30, "loss": 12.410074234008789, "perplexity": 245260.0202812301, "gradient_norm": 1185.359619140625, "learning_rate": 8.43340126554938e-05, "epoch": 0, "memory_mb": 5502.8984375, "peak_memory_mb": 5543.78515625}
-{"step": 40, "loss": 12.409363746643066, "perplexity": 245085.82802353014, "gradient_norm": 202.61195373535156, "learning_rate": 8.513426618746508e-05, "epoch": 0, "memory_mb": 5692.23046875, "peak_memory_mb": 5692.23046875}
-{"step": 50, "loss": 12.408470153808594, "perplexity": 244866.9189061536, "gradient_norm": 92.50790405273438, "learning_rate": 8.585410958103624e-05, "epoch": 0, "memory_mb": 5646.23828125, "peak_memory_mb": 5692.23046875}
-{"step": 60, "loss": 12.407984733581543, "perplexity": 244748.08439545197, "gradient_norm": 38.6593017578125, "learning_rate": 8.646413651220614e-05, "epoch": 1, "memory_mb": 5582.04296875, "peak_memory_mb": 5692.23046875}

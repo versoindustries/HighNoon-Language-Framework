@@ -1,5 +1,0 @@
-{"step": 10, "loss": 12.622154235839844, "perplexity": 303201.91110275633, "gradient_norm": 9702.607421875, "learning_rate": 1.424811220191774e-05, "epoch": 0, "memory_mb": 3670.046875, "peak_memory_mb": 3670.046875}
-{"step": 20, "loss": 12.618696212768555, "perplexity": 302155.24264374195, "gradient_norm": 10936.044921875, "learning_rate": 1.4509069635518217e-05, "epoch": 0, "memory_mb": 3672.85546875, "peak_memory_mb": 3672.85546875}
-{"step": 30, "loss": 12.618856430053711, "perplexity": 302203.65701472, "gradient_norm": 11763.0537109375, "learning_rate": 1.4592162837384864e-05, "epoch": 0, "memory_mb": 3673.9140625, "peak_memory_mb": 3673.9140625}
-{"step": 40, "loss": 12.618578910827637, "perplexity": 302119.8013260296, "gradient_norm": 10553.67578125, "learning_rate": 1.4619137394079964e-05, "epoch": 0, "memory_mb": 3602.01953125, "peak_memory_mb": 3673.9140625}
-{"step": 50, "loss": 12.61363410949707, "perplexity": 300629.56642468774, "gradient_norm": 10862.716796875, "learning_rate": 1.4627848225131783e-05, "epoch": 0, "memory_mb": 3605.16015625, "peak_memory_mb": 3673.9140625}

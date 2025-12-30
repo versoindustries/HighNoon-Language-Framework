@@ -356,6 +356,17 @@ set(HIGHNOON_OPS_SOURCES
     ops/holographic_loss_op.cc        # Holographic Cross-Entropy Loss
     # Phase 200+: SAQC - Spectrally-Aware Quantum Curriculum (quantum_enhancement_analysis.md)
     ops/quantum_curriculum_op.cc      # FFT-domain spectral complexity for curriculum
+    # Phase 300+: HD Upgrade Integration (hd_upgrade.md)
+    ops/hd_state_buffer_op.cc         # HD optimizer state compression (SophiaG, QIAO, SympFlow)
+    ops/hd_spectral_entropy_op.cc     # FFT-based spectral entropy for QULS
+    ops/hd_gradient_projection_op.cc  # HD random projection for gradient compression
+    ops/hd_holographic_similarity_op.cc  # FFT-based attention similarity
+    ops/hd_kv_cache_op.cc             # HD compressed KV cache for inference
+    ops/hd_thought_trace_op.cc        # HD thought trace for COCONUT reasoning
+    # Phase 500+: VQC-HD Integration Enhancements
+    ops/hd_fisher_compression_op.cc   # HD Fisher compression for VQC meta-optimizer
+    ops/quantum_lm_head_hd_op.cc      # Entropy-aware QuantumLMHead
+    ops/qwt_continuous_op.cc          # Continuous QWT→HD gradient path
 )
 
 # Controller sources (requires spdlog: apt install libspdlog-dev)

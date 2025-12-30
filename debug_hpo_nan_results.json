@@ -1,8 +1,0 @@
-[
-  {
-    "trial_id": 0,
-    "loss": null,
-    "error": "cannot access local variable 'trainer' where it is not associated with a value",
-    "traceback": "Traceback (most recent call last):\n  File \"/home/mike/Documents/Github/HighNoon-Language-Framework/scripts/debug_hpo_nan.py\", line 661, in run_trial\n    \"nan_count\": trainer.nan_count,\n                 ^^^^^^^\nUnboundLocalError: cannot access local variable 'trainer' where it is not associated with a value\n"
-  }
-]

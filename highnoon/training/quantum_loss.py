@@ -73,6 +73,24 @@ from highnoon import config as hn_config
 
 logger = logging.getLogger(__name__)
 
+# Phase 300+: HD Spectral Entropy Integration
+try:
+    from highnoon._native.ops.hd_spectral_entropy import (
+        hd_spectral_entropy as hd_spectral_entropy_native,
+    )
+    from highnoon._native.ops.hd_spectral_entropy import hd_spectral_entropy_available
+    from highnoon._native.ops.hd_spectral_entropy import (
+        hd_spectral_flatness as hd_spectral_flatness_native,
+    )
+    from highnoon.config import USE_HD_SPECTRAL_ENTROPY
+
+    _HD_SPECTRAL_AVAILABLE = hd_spectral_entropy_available()
+except ImportError:
+    USE_HD_SPECTRAL_ENTROPY = False
+    _HD_SPECTRAL_AVAILABLE = False
+    hd_spectral_entropy_native = None
+    hd_spectral_flatness_native = None
+
 
 # =============================================================================
 # Cached Eigenvalue Computation (Merged from quantum_loss_v2.py)
@@ -511,6 +529,9 @@ def spectral_entropy(
     full eigendecomposition O(n³). The spectral entropy measures the
     "uniformity" of the eigenvalue spectrum.
 
+    Phase 300+: When USE_HD_SPECTRAL_ENTROPY=True and native ops are available,
+    uses O(d log d) FFT-based spectral analysis instead of O(d²) power iteration.
+
     Mathematical formulation:
         Σ = (1/N) Σᵢ (hᵢ - μ)(hᵢ - μ)ᵀ   (covariance)
         H = -Σⱼ λⱼ log(λⱼ)                 (spectral entropy)
@@ -528,6 +549,15 @@ def spectral_entropy(
     Returns:
         Spectral entropy scalar (mean over batch).
     """
+    # Phase 300+: HD Spectral Entropy (O(d log d) via FFT)
+    if USE_HD_SPECTRAL_ENTROPY and _HD_SPECTRAL_AVAILABLE:
+        try:
+            return hd_spectral_entropy_native(hidden_states, epsilon)
+        except Exception as e:
+            logger.warning(f"HD spectral entropy failed, using fallback: {e}")
+            # Fall through to power iteration
+
+    # Fallback: Power iteration eigenvalue computation (O(d²))
     h = tf.cast(hidden_states, tf.float32)
 
     # Handle different input shapes
@@ -639,6 +669,9 @@ def spectral_flatness_loss(
         SF = (Πᵢ λᵢ)^(1/k) / (Σᵢ λᵢ / k)
            = geometric_mean / arithmetic_mean
 
+    Phase 300+: When USE_HD_SPECTRAL_ENTROPY=True and native ops are available,
+    uses O(d log d) FFT-based spectral flatness computation.
+
     Values:
     - SF → 1: Flat spectrum (all eigenvalues equal)
     - SF → 0: Peaked spectrum (few dominant eigenvalues)
@@ -653,6 +686,17 @@ def spectral_flatness_loss(
     Returns:
         Scalar spectral flatness loss.
     """
+    # Phase 300+: HD Spectral Flatness (O(d log d) via FFT)
+    if USE_HD_SPECTRAL_ENTROPY and _HD_SPECTRAL_AVAILABLE:
+        try:
+            flatness = hd_spectral_flatness_native(hidden_states, epsilon)
+            loss = tf.square(flatness - target_flatness)
+            return tf.reduce_mean(loss)  # Average over batch
+        except Exception as e:
+            logger.warning(f"HD spectral flatness failed, using fallback: {e}")
+            # Fall through to power iteration
+
+    # Fallback: Power iteration eigenvalue computation (O(d²))
     h = tf.cast(hidden_states, tf.float32)
 
     # Flatten to [N, dim]

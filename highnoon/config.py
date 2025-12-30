@@ -346,6 +346,21 @@ BARREN_PLATEAU_RECOVERY_LR_SCALE: float = 10.0  # LR scaling factor for recovery
 BARREN_PLATEAU_HYSTERESIS: float = 5.0  # Factor for exit threshold (exit = threshold * hysteresis)
 BARREN_PLATEAU_RECOVERY_WINDOW: int = 100  # Steps to maintain mitigation after detection
 
+# Phase 2-4: Gradient-Norm-Aware Dampening for Barren Plateau Recovery
+# Prevents LR explosion when BP scaling is applied with high gradients.
+# See PHASE2_4_SMART_TUNER_FIX.md for full design rationale.
+GRADIENT_DAMPENING_THRESHOLD: float = 100.0  # Grad norm above which dampening activates
+MIN_GRADIENT_DAMPENING: float = 0.001  # Floor for dampening factor (prevent stalls)
+
+# OPTIMIZER LR CAPS (Fallback when optimizer max_safe_lr trait unavailable)
+# These caps prevent catastrophic LR during barren plateau recovery.
+OPTIMIZER_LR_CAPS: dict[str, float] = {
+    "sympflowqngoptimizer": 1e-3,
+    "sophiag": 5e-4,
+    "lion": 3e-4,
+    "qiao": 5e-4,
+}
+
 # Phase T2: Tensor-GaLore Gradient Compression (HIGH)
 # Reduces optimizer memory by 50-75% via Tucker decomposition
 USE_TENSOR_GALORE: bool = True  # Enable gradient low-rank projection
@@ -716,6 +731,57 @@ HD_PROJECTION_FREEZE_EPOCHS: int = 2  # Freeze HD projections for N epochs
 HD_REQUIRE_NATIVE_OPS: bool = True  # Raise error if C++ ops unavailable
 
 # =============================================================================
+# PHASE 300+: HD UPGRADE INTEGRATION (hd_upgrade.md)
+# =============================================================================
+# These flags enable the Phase 300+ HD upgrade integration, including optimizer
+# state compression, FFT-based spectral entropy for QULS, HD gradient projection,
+# holographic attention similarity, and HD KV cache for inference.
+
+# Phase 1: HD Optimizer State Compression
+# Compresses optimizer states (momentum, Hessian, QFIM) via HD projection
+USE_HD_OPTIMIZER_STATES: bool = True  # Compress optimizer states (50-60% memory reduction)
+HD_OPTIMIZER_COMPRESSION_RATIO: int = 8  # Compression ratio for optimizer states
+HD_OPTIMIZER_USE_SPARSE: bool = True  # Use sparse random projection (faster)
+
+# Phase 2: HD QULS + Gradient Compression
+# FFT-based spectral entropy (O(d log d)) replaces power iteration (O(d²))
+USE_HD_SPECTRAL_ENTROPY: bool = True  # FFT-based spectral entropy for QULS
+# HD gradient projection replaces Tucker decomposition (no periodic SVD)
+USE_HD_GRADIENT_PROJECTION: bool = True  # Phase 300+: HD projection for GaLore
+HD_GRADIENT_RANK: int = 128  # Target rank for HD gradient projection
+
+# Phase 3: HD Attention Layers
+# Holographic Q·K similarity via FFT correlation (O(d log d) per pair)
+USE_HD_HOLOGRAPHIC_ATTENTION: bool = True  # FFT-based attention similarity
+# HD KV cache compression for inference (8-16x memory reduction)
+USE_HD_KV_CACHE: bool = True  # HD compressed KV cache for inference
+HD_KV_COMPRESSION_RATIO: int = 8  # Tokens per HD bundle for KV cache
+
+# Phase 4: HD Reasoning Enhancements
+# HD thought trace storage for COCONUT continuous reasoning
+USE_HD_THOUGHT_TRACE: bool = True  # HD thought trace for COCONUT
+
+# =============================================================================
+# PHASE 400: HD-ENHANCED META CONTROLLER INTEGRATION (implementation_plan.md)
+# =============================================================================
+# Deep integration of HD embeddings with Hamiltonian Meta Controller and Kalman
+# filters for improved control, stagnation detection, and memory efficiency.
+
+# HD Control Fingerprinting: Detect training stagnation via HD innovation similarity
+USE_HD_CONTROL_FINGERPRINTING: bool = True  # HD innovation fingerprinting in EKF/TNKF
+HD_CONTROL_FINGERPRINT_DIM: int = 256  # HD fingerprint dimension
+HD_STAGNATION_THRESHOLD: float = 0.95  # Similarity threshold for stagnation detection
+
+# HD Kalman State: HD-compressed state representation in Python KalmanBlock
+USE_HD_KALMAN_STATE: bool = True  # Enable HD state bundling in Python Kalman
+HD_KALMAN_STATE_COMPRESSION: int = 8  # Compression ratio for Kalman state
+
+# HD Online Tuning: HD-based evolution_time trend analysis and control smoothing
+USE_HD_EVOLUTION_TREND: bool = True  # Track evolution_time trends via HD unbinding
+HD_CONTROL_SMOOTHING: bool = True  # Apply HD low-pass filter to control actions
+
+
+# =============================================================================
 # QULS → QAHPO FEEDBACK (HIGHNOON_UPGRADE_ROADMAP.md Phase 1.2)
 # =============================================================================
 # Enables QULS telemetry export to QuantumAdaptiveHPO for barren plateau
@@ -750,7 +816,27 @@ SAQC_FFT_DIM: int = 64  # FFT dimension for spectral analysis
 SAQC_UPDATE_INTERVAL: int = 10  # Steps between curriculum state updates
 SAQC_MIN_STAGE_DURATION: int = 100  # Minimum steps before stage transition
 
-# Phase 48.1: Tensor-Ring MoE Gating
+# =============================================================================
+# PHASE 500+: VQC-HD INTEGRATION ENHANCEMENTS
+# =============================================================================
+# Three-phase integration to tighten VQC-HD connections for improved accuracy,
+# quality, expressiveness, and memory efficiency.
+
+# Phase 1: HD Fisher Compression in VQC Meta-Optimizer
+# Compresses layer-wise Fisher info via holographic bundling (10-50x memory reduction)
+USE_HD_FISHER_COMPRESSION: bool = True  # HD compression for VQC meta-opt
+HD_FISHER_COMPRESSION_DIM: int = 4096  # HD space dimension
+HD_FISHER_OUTPUT_DIM: int = 64  # Compressed output dimension
+
+# Phase 2: QuantumLMHead VQC-HD Feedback Loop
+# Injects HD spectral entropy as VQC rotation modulation (+2-5% rare token accuracy)
+QUANTUM_LM_HEAD_USE_HD_ENTROPY: bool = True  # HD entropy feedback
+QUANTUM_LM_HEAD_ENTROPY_SCALE: float = 0.1  # Scaling factor for entropy injection
+
+# Phase 3: QWT → HD Continuous Connection
+# QWT outputs continuous VQC amplitudes that modulate HD base vectors (gradient through tokenization)
+QWT_CONTINUOUS_HD_OUTPUT: bool = True  # Continuous QWT→HD path
+QWT_CONTINUOUS_VQC_DIM: int = 256  # VQC amplitude dimension for continuous output
 USE_TENSOR_RING_MOE: bool = True  # Enable Tensor-Ring decomposition for MoE gates
 TENSOR_RING_RANK: int = 8  # Ring rank for TR decomposition
 TENSOR_RING_NUM_CORES: int = 4  # Number of TR cores

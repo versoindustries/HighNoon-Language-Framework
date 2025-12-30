@@ -145,6 +145,12 @@ class UnifiedSmartTunerConfig:
     # Emergency thresholds
     emergency_grad_threshold: float = 1e6
 
+    # Phase 2-4: Gradient-norm-aware dampening for barren plateau recovery
+    # When gradients are high during BP recovery, reduce LR scaling to prevent explosion.
+    gradient_dampening_threshold: float = 100.0  # Grad norm above which dampening activates
+    min_gradient_dampening: float = 0.001  # Floor for dampening factor
+    low_lr_recovery_steps: int = 50  # Steps below threshold to boost LR (over-dampening recovery)
+
     # =========================================================================
     # QUANTUM-NATIVE SETTINGS (Part 6 Enhancement)
     # =========================================================================
@@ -668,6 +674,26 @@ class UnifiedSmartTuner:
                 lr_scale,
             )
 
+        # =====================================================================
+        # PHASE 2-4: GRADIENT-NORM-AWARE DAMPENING
+        # =====================================================================
+        # When gradients are high, dampening prevents LR explosion.
+        # This is critical for SympFlowQNG and other sensitive optimizers.
+        grad_dampening = 1.0
+        if gradient_norm > self.config.gradient_dampening_threshold:
+            grad_dampening = min(1.0, self.config.gradient_dampening_threshold / gradient_norm)
+            grad_dampening = max(self.config.min_gradient_dampening, grad_dampening)
+            logger.info(
+                "[SmartTuner] Gradient dampening: grad=%.1f, dampening=%.3f, "
+                "lr_scale=%.2f -> %.2f",
+                gradient_norm,
+                grad_dampening,
+                lr_scale,
+                lr_scale * grad_dampening,
+            )
+
+        lr_scale *= grad_dampening
+
         # Compute coordinated LR
         base_lr = self._lr_controller.get_learning_rate(
             step=self._global_step,
@@ -675,6 +701,20 @@ class UnifiedSmartTuner:
             current_loss=None,  # Don't use loss trend during BP
         )
         effective_lr = base_lr * lr_scale
+
+        # =====================================================================
+        # PHASE 2-4: OPTIMIZER LR CAP VIA TRAIT
+        # =====================================================================
+        # Use optimizer's max_safe_lr property if available (type-safe)
+        max_safe_lr = getattr(self.optimizer, "max_safe_lr", None)
+        if max_safe_lr is not None and effective_lr > max_safe_lr:
+            logger.warning(
+                "[SmartTuner] Capping LR via optimizer trait: %.2e -> %.2e",
+                effective_lr,
+                max_safe_lr,
+            )
+            effective_lr = max_safe_lr
+
         effective_lr = max(self.config.lr_min, min(self.config.lr_max, effective_lr))
 
         # COORDINATION: Increase GaLore rank to preserve gradient information
@@ -703,6 +743,7 @@ class UnifiedSmartTuner:
                 "bp_detected": True,
                 "bp_lr_scale": lr_scale,
                 "gradient_entropy": entropy,
+                "grad_dampening": grad_dampening,
                 "vqc_computed": vqc_decisions.vqc_computed if vqc_decisions else False,
             },
         )

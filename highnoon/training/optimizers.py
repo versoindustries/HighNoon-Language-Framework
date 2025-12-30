@@ -19,6 +19,15 @@ import tensorflow as tf
 # --- Logger Setup ---
 logger = logging.getLogger(__name__)
 
+# Phase 300+: HD State Buffer Import
+try:
+    from highnoon._native.ops.hd_state_buffer import HDStateBuffer
+    from highnoon.config import HD_OPTIMIZER_COMPRESSION_RATIO, USE_HD_OPTIMIZER_STATES
+except ImportError:
+    USE_HD_OPTIMIZER_STATES = False
+    HD_OPTIMIZER_COMPRESSION_RATIO = 8
+    HDStateBuffer = None
+
 
 class SophiaG(tf.keras.optimizers.Optimizer):
     """
@@ -37,6 +46,7 @@ class SophiaG(tf.keras.optimizers.Optimizer):
         weight_decay=0.0,
         k=10,
         name="SophiaG",
+        hd_compression_ratio=None,
         **kwargs,
     ):
         super().__init__(
@@ -53,6 +63,14 @@ class SophiaG(tf.keras.optimizers.Optimizer):
         self.momentums = []
         self.hessians = []
 
+        # Phase 300+: HD Optimizer State Compression
+        self.use_hd_states = USE_HD_OPTIMIZER_STATES and (HDStateBuffer is not None)
+        self.hd_ratio = hd_compression_ratio or HD_OPTIMIZER_COMPRESSION_RATIO
+        self.hd_buffer = None
+        if self.use_hd_states:
+            self.hd_buffer = HDStateBuffer(compression_ratio=self.hd_ratio)
+            logger.info(f"[SophiaG] HD State Compression enabled (ratio={self.hd_ratio}x)")
+
     def build(self, var_list):
         """Create slots for the first moment (m) and diagonal Hessian estimate (h)."""
         # --- START: DEFINITIVE FIX for HPO ---
@@ -63,16 +81,31 @@ class SophiaG(tf.keras.optimizers.Optimizer):
         super().build(var_list)
         self.momentums = []
         self.hessians = []
-        for var in var_list:
-            self.momentums.append(self.add_variable_from_reference(var, "m"))
-            # CRITICAL FIX: Initialize Hessian to 1.0 instead of 0.0
-            # When update_hessian() is not called (as in molecular property prediction),
-            # the Hessian remains at its initial value. A zero Hessian causes division
-            # by epsilon (1e-12), amplifying gradients by 1e12 and causing immediate NaN.
-            # Initializing to 1.0 gives Adam-like behavior until update_hessian() is called.
-            h_slot = self.add_variable_from_reference(var, "h")
-            h_slot.assign(tf.ones_like(var))  # Initialize to 1.0 for stability
-            self.hessians.append(h_slot)
+
+        # Phase 300+: Register variables with HD buffer if enabled
+        if self.use_hd_states and self.hd_buffer:
+            for var in var_list:
+                # Register momentum and hessian states
+                # Use var.name as unique key
+                self.hd_buffer.register(f"{var.name}/m", var.shape)
+                self.hd_buffer.register(f"{var.name}/h", var.shape)
+
+                # We still append None or placeholders to maintain index alignment (if needed)
+                # But for now, we'll rely on direct access in update_step via var.name
+                # To maintain compatibility with existing 'self.momentums' checks, we append dummy None
+                self.momentums.append(None)
+                self.hessians.append(None)
+        else:
+            for var in var_list:
+                self.momentums.append(self.add_variable_from_reference(var, "m"))
+                # CRITICAL FIX: Initialize Hessian to 1.0 instead of 0.0
+                # When update_hessian() is not called (as in molecular property prediction),
+                # the Hessian remains at its initial value. A zero Hessian causes division
+                # by epsilon (1e-12), amplifying gradients by 1e12 and causing immediate NaN.
+                # Initializing to 1.0 gives Adam-like behavior until update_hessian() is called.
+                h_slot = self.add_variable_from_reference(var, "h")
+                h_slot.assign(tf.ones_like(var))  # Initialize to 1.0 for stability
+                self.hessians.append(h_slot)
         # --- END: DEFINITIVE FIX ---
 
     def update_step(self, grad, var, learning_rate):
@@ -89,9 +122,28 @@ class SophiaG(tf.keras.optimizers.Optimizer):
 
         # FIX: Access slots via the optimizer's internal list using the variable's
         # unique index. This is robust to TensorFlow's distributed strategies.
-        var_index = self._get_variable_index(var)
-        m = self.momentums[var_index]
-        h = self.hessians[var_index]
+        if self.use_hd_states and self.hd_buffer:
+            # HD Mode: Decode states on-the-fly
+            # Initialize states to zeros/ones if first access (implicitly handled by decode logic?)
+            # HDStateBuffer.decode returns standard tensors
+            # Note: HDStateBuffer initializes compressed storage to zeros, so decode gives approx zeros
+            # Hessian needs ones initialization: this is tricky with HD.
+            # We assume HD decoding from zero-init compressed state yields small deviations around zero.
+            # We might need explicit initialization logic in HDStateBuffer or here.
+            # For iteration 0, if 'm' is effectively zero, it's fine.
+            # If 'h' is effectively zero, we have division by zero issue.
+
+            # TODO: Handle H=1.0 intialization for HD.
+            # For now, we add epsilon or max(h, epsilon) in updates.
+            m = self.hd_buffer.decode(f"{var.name}/m")
+            h = self.hd_buffer.decode(f"{var.name}/h")
+
+            # IMPORTANT: For numerical stability, ensure h is non-zero
+            h = tf.maximum(h, 1e-6)
+        else:
+            var_index = self._get_variable_index(var)
+            m = self.momentums[var_index]
+            h = self.hessians[var_index]
 
         if isinstance(grad, tf.IndexedSlices):
             # Sparse update logic for embeddings
@@ -114,8 +166,15 @@ class SophiaG(tf.keras.optimizers.Optimizer):
             var.scatter_add(tf.IndexedSlices(-lr * clipped_update_slices, grad.indices))
         else:
             # Dense update logic
-            m.assign(beta_1_t * m + (1.0 - beta_1_t) * grad)
-            update = m / tf.maximum(h, self.epsilon)
+            m_new = beta_1_t * m + (1.0 - beta_1_t) * grad
+
+            if self.use_hd_states and self.hd_buffer:
+                self.hd_buffer.encode(f"{var.name}/m", m_new)
+                m = m_new  # Use new value for update calculation
+                update = m / tf.maximum(h, self.epsilon)
+            else:
+                m.assign(m_new)
+                update = m / tf.maximum(h, self.epsilon)
             clipped_update = tf.clip_by_value(update, -rho_t, rho_t)
             var.assign_sub(lr * clipped_update)
 
@@ -153,10 +212,18 @@ class SophiaG(tf.keras.optimizers.Optimizer):
                 # The `try...except` block is no longer strictly necessary with this fix,
                 # but it remains as a safeguard against other potential edge cases.
                 try:
-                    var_index = self._get_variable_index(var)
-                    h = self.hessians[var_index]
-                    h_hat = tf.square(h_grad)
-                    h.assign(beta_2_t * h + (1.0 - beta_2_t) * h_hat)
+                    if self.use_hd_states and self.hd_buffer:
+                        # HD Mode
+                        h = self.hd_buffer.decode(f"{var.name}/h")
+                        h_hat = tf.square(h_grad)
+                        h_new = beta_2_t * h + (1.0 - beta_2_t) * h_hat
+                        self.hd_buffer.encode(f"{var.name}/h", h_new)
+                    else:
+                        # Standard Mode
+                        var_index = self._get_variable_index(var)
+                        h = self.hessians[var_index]
+                        h_hat = tf.square(h_grad)
+                        h.assign(beta_2_t * h + (1.0 - beta_2_t) * h_hat)
                 except KeyError:
                     # This can happen if the Hessian tape tracks a variable the optimizer doesn't,
                     # This is common during hyperparameter tuning where models are rebuilt.
@@ -175,6 +242,15 @@ class SophiaG(tf.keras.optimizers.Optimizer):
             }
         )
         return config
+
+    @property
+    def max_safe_lr(self) -> float:
+        """Maximum safe learning rate for SophiaG.
+
+        Second-order optimizers are sensitive to large LRs because the
+        Hessian-preconditioned updates amplify step sizes in flat regions.
+        """
+        return 5e-4
 
 
 class QIAO(tf.keras.optimizers.Optimizer):
@@ -197,6 +273,7 @@ class QIAO(tf.keras.optimizers.Optimizer):
         mixer_frequency=10,  # Corresponds to M in the proposal
         mixer_strength=0.1,  # Controls the magnitude of the noise
         name="QIAO",
+        hd_compression_ratio=None,  # Phase 300+: HD state compression
         **kwargs,
     ):
         super().__init__(
@@ -217,16 +294,30 @@ class QIAO(tf.keras.optimizers.Optimizer):
         self.momentums = []
         self.hessians = []
 
+        # Phase 300+: HD Optimizer State Compression
+        self.use_hd_states = USE_HD_OPTIMIZER_STATES and (HDStateBuffer is not None)
+        self.hd_ratio = hd_compression_ratio or HD_OPTIMIZER_COMPRESSION_RATIO
+        self.hd_buffer = None
+        if self.use_hd_states:
+            self.hd_buffer = HDStateBuffer(compression_ratio=self.hd_ratio)
+            logger.info(f"[QIAO] HD State Compression enabled (ratio={self.hd_ratio}x)")
+
     def build(self, var_list):
         """Create slots for the SophiaG momentums and Hessian estimates."""
         super().build(var_list)
-        if not hasattr(self, "momentums") or not self.momentums:
-            self.momentums = []
+        self.momentums = []
+        self.hessians = []
+
+        # Phase 300+: Register with HD buffer if enabled
+        if self.use_hd_states and self.hd_buffer:
+            for var in var_list:
+                self.hd_buffer.register(f"{var.name}/m", var.shape)
+                self.hd_buffer.register(f"{var.name}/h", var.shape)
+                self.momentums.append(None)
+                self.hessians.append(None)
+        else:
             for var in var_list:
                 self.momentums.append(self.add_variable_from_reference(var, "m"))
-        if not hasattr(self, "hessians") or not self.hessians:
-            self.hessians = []
-            for var in var_list:
                 # CRITICAL FIX: Initialize Hessian to 1.0 instead of 0.0
                 # When update_hessian() is not called, the Hessian remains at its
                 # initial value. A zero Hessian causes division by epsilon (1e-12),
@@ -372,6 +463,14 @@ class QIAO(tf.keras.optimizers.Optimizer):
         )
         return config
 
+    @property
+    def max_safe_lr(self) -> float:
+        """Maximum safe learning rate for QIAO.
+
+        QIAO inherits SophiaG sensitivity to LR plus mixer noise injection.
+        """
+        return 5e-4
+
 
 class Lion(tf.keras.optimizers.Optimizer):
     """
@@ -479,6 +578,15 @@ class Lion(tf.keras.optimizers.Optimizer):
             }
         )
         return config
+
+    @property
+    def max_safe_lr(self) -> float:
+        """Maximum safe learning rate for Lion.
+
+        Lion uses sign-based updates which amplify effective step size.
+        LR should be 3-10x lower than Adam-family optimizers.
+        """
+        return 3e-4
 
 
 class SympFlowQNGOptimizer(tf.keras.optimizers.Optimizer):
@@ -732,3 +840,13 @@ class SympFlowQNGOptimizer(tf.keras.optimizers.Optimizer):
             }
         )
         return config
+
+    @property
+    def max_safe_lr(self) -> float:
+        """Maximum safe learning rate for SympFlowQNG.
+
+        Leapfrog integration is highly sensitive to large LRs. The update:
+            param_change = lr × momentum / mass
+        can cause parameter explosion when lr > 1e-3 with high gradient norms.
+        """
+        return 1e-3

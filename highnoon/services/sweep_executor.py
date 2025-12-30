@@ -95,8 +95,8 @@ class SweepConfig:
     time_budget_hours: float | None = None
     objective: str = "composite"
     direction: str = "minimize"
-    epochs_per_trial: int = 20  # Increased from 5 for longer trials (system ID needs more data)
-    steps_per_epoch: int = 500  # Increased from 100 for better QAHPO convergence
+    epochs_per_trial: int = 3  # 3 epochs × 500 steps = 1500 steps (HPO_MAX_TRIAL_STEPS limit)
+    steps_per_epoch: int = 500  # Per-epoch step count for multi-epoch HPO trials
     min_epochs: int = 1
     max_epochs: int = 100
     search_strategy: str = "bayesian"

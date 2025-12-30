@@ -51,6 +51,23 @@ from highnoon.config import (
 
 logger = logging.getLogger(__name__)
 
+# Phase 300+: HD Holographic Attention Integration
+try:
+    from highnoon._native.ops.hd_holographic_attention import (
+        HDKVCache,
+        hd_holographic_attention_available,
+        holographic_attention_scores,
+    )
+    from highnoon.config import USE_HD_HOLOGRAPHIC_ATTENTION, USE_HD_KV_CACHE
+
+    _HD_ATTENTION_AVAILABLE = hd_holographic_attention_available()
+except ImportError:
+    USE_HD_HOLOGRAPHIC_ATTENTION = False
+    USE_HD_KV_CACHE = False
+    _HD_ATTENTION_AVAILABLE = False
+    holographic_attention_scores = None
+    HDKVCache = None
+
 
 class QuantumGQA(layers.Layer):
     """Quantum-Enhanced Grouped-Query Attention.
@@ -329,6 +346,9 @@ class QuantumGQA(layers.Layer):
     ) -> tf.Tensor:
         """Compute attention using quantum kernel.
 
+        Phase 300+: When USE_HD_HOLOGRAPHIC_ATTENTION=True and native ops available,
+        uses FFT-based holographic similarity O(d log d) instead of O(d²).
+
         Attention is computed using quantum kernel similarity:
             K(q, k) = |⟨φ(q)|φ(k)⟩|² = (φ(q) · φ(k))²
 
@@ -342,6 +362,25 @@ class QuantumGQA(layers.Layer):
         Returns:
             Attention output [batch, heads, seq, head_dim].
         """
+        # Phase 300+: Holographic Attention (O(d log d) via FFT)
+        if USE_HD_HOLOGRAPHIC_ATTENTION and _HD_ATTENTION_AVAILABLE:
+            try:
+                # holographic_attention_scores returns [batch, heads, seq_q, seq_k]
+                scores = holographic_attention_scores(q_features, k_features, temperature=1.0)
+                # Apply causal mask if needed
+                if self.causal:
+                    seq_len = tf.shape(scores)[-1]
+                    mask = tf.linalg.band_part(
+                        tf.ones([seq_len, seq_len], dtype=scores.dtype), -1, 0
+                    )
+                    scores = scores * mask[tf.newaxis, tf.newaxis, :, :]
+                    scores = scores - (1.0 - mask[tf.newaxis, tf.newaxis, :, :]) * 1e9
+                attn_weights = tf.nn.softmax(scores, axis=-1)
+                return tf.matmul(attn_weights, v)
+            except Exception as e:
+                logger.warning(f"Holographic attention failed, using quantum kernel: {e}")
+                # Fall through to quantum kernel
+
         if self.causal:
             # Causal attention with quantum kernel
             # Use cumulative sum formulation for O(n)

@@ -292,7 +292,6 @@ class StartHPORequest(BaseModel):
     batch_sizes: list[int] = Field(default=[16, 32, 64])
     optimizers: list[str] = Field(default=["sophiag"])
 
-    # Model configuration
     # NOTE: vocab_size is DEPRECATED - kept for backward compatibility only
     # The actual vocabulary is determined by IntelligentVocabController
     vocab_size: int | None = Field(
@@ -300,7 +299,14 @@ class StartHPORequest(BaseModel):
         ge=1000,
         le=256000,
         deprecated=True,
-        description="DEPRECATED: vocab_size is now automatically determined by the tokenizer",
+        description="DEPRECATED: Use target_vocab_size instead",
+    )
+    # Phase 1 Tokenizer Fix: Target vocab for tokenizer learning
+    target_vocab_size: int = Field(
+        default=32000,
+        ge=1000,
+        le=300000,
+        description="Target vocabulary size for tokenizer learning (model uses actual learned size)",
     )
     context_window: int = Field(default=4096, ge=128, le=5000000)
     embedding_dim: int | None = Field(default=512)  # Make optional with default
@@ -2496,9 +2502,9 @@ def create_app(debug: bool = False) -> FastAPI:
         # Build model config for executor
         model_config = {
             "sweep_id": sweep_id,
-            # Core architecture
-            # Note: vocab_size intentionally omitted if not specified
-            # Trial runner will use tokenizer.vocab_size from trained tokenizer
+            # Phase 1 Tokenizer Fix: Use target_vocab_size for tokenizer, model derives from it
+            "target_vocab_size": payload.target_vocab_size,
+            # Legacy vocab_size (deprecated) - only pass if explicitly set
             **({"vocab_size": payload.vocab_size} if payload.vocab_size else {}),
             "hidden_dim": payload.embedding_dim or 512,
             "num_reasoning_blocks": payload.num_reasoning_blocks or 8,

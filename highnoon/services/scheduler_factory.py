@@ -88,8 +88,9 @@ def create_scheduler(
     model_config = getattr(config, "model_config", None) or {}
 
     # Extract user-defined constraints from config
+    # Note: vocab_size is NOT extracted here - per PHASE1 tokenizer fix, model vocab_size
+    # is derived from tokenizer.vocab_size after corpus learning, not from user config.
     param_budget = getattr(config, "param_budget", None) or model_config.get("param_budget")
-    vocab_size = model_config.get("vocab_size")
     context_window = model_config.get("sequence_length") or model_config.get("context_window")
 
     # Extract optimizer from model_config to set in search space
@@ -101,9 +102,12 @@ def create_scheduler(
     # Note: Feature flags (use_hyperdimensional_embedding, use_quantum_lm_head, use_td_moe)
     # are NOT passed here - they are pulled from global config.py at runtime by model components.
     # This follows the design principle documented in HPOSearchSpace (lines 369-377).
-    # The model_config.hd_dim is used later for parameter estimation, not for HPO search space
+    #
+    # PHASE1 Tokenizer Fix: vocab_size is no longer passed here. HPOSearchSpace tunes
+    # target_vocab_size (how large the tokenizer should learn), and model vocab_size
+    # is derived from tokenizer.vocab_size after corpus learning. This ensures zero
+    # dead embeddings and proper vocabulary alignment.
     hpo_search_space = HPOSearchSpace(
-        vocab_size=vocab_size,
         context_window=context_window,
         param_budget=param_budget,
     )

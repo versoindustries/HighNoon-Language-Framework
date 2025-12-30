@@ -90,6 +90,7 @@ def load_training_dataset(
     use_hd_streaming: bool = False,
     hd_reservoir_size: int = 2000,
     hd_dim: int = 1024,
+    hd_sample_length: int = 512,  # Max tokens per HD sample (affects position keys memory)
 ) -> tuple[tf.data.Dataset, QWTTextTokenizer, SuperwordMerger | None]:
     """Load a training dataset with tokenization and optional superword merging.
 
@@ -172,6 +173,14 @@ def load_training_dataset(
             learn_vocab_samples=min(5000, max_samples or 5000),
         )
 
+        # PHASE 500+: Use hd_sample_length for HD corpus position keys
+        # CRITICAL: Individual HD samples should be bounded (e.g., 128-2048 tokens), NOT full context_window
+        # Long context is achieved through bundling across MANY samples in the reservoir,
+        # not by allocating [context_window × hd_dim] for position keys (which would be 48GB for 1M × 12288!)
+        # The context_window param refers to model's attention window, not HD sample length.
+        # hd_sample_length is tunable through QAHPO/WebUI, defaults to 512
+        hd_max_seq_len = min(hd_sample_length, sequence_length)  # Don't exceed sequence_length
+
         corpus = hd_streamer.process_stream(
             hf_dataset_name=hf_dataset_name,
             tokenizer=tokenizer,
@@ -179,7 +188,7 @@ def load_training_dataset(
             split=split,
             reservoir_size=hd_reservoir_size,
             hd_dim=hd_dim,
-            max_seq_len=sequence_length,
+            max_seq_len=hd_max_seq_len,  # Use tunable hd_sample_length, not context_window
             max_samples=max_samples,
             vocab_size=tokenizer.vocab_size,
             learn_vocab=use_adaptive_tokenizer,

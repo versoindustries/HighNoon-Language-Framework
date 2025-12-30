@@ -372,10 +372,17 @@ class HPOSearchSpace:
     #
     # hd_dim is defined in PHASE 200+ section as list[int] for HPO sampling
     # For budget estimation, use hd_dim from config or calculate from embedding_dim * 8
-    # Phase 200+: vocab_size is now TUNABLE with curriculum-aware range
-    # Range from 16k (small models) to 300k (large tokenizers)
-    vocab_size: list[int] = field(
+    #
+    # Phase 1 Tokenizer Fix: target_vocab_size replaces vocab_size
+    # This is the TARGET size for the tokenizer to learn. The actual model vocab_size
+    # is derived from tokenizer.vocab_size after learning, ensuring zero dead embeddings.
+    target_vocab_size: list[int] = field(
         default_factory=lambda: [
+            1000,
+            2000,
+            4000,
+            8000,
+            12000,
             16000,
             24000,
             32000,
@@ -383,8 +390,7 @@ class HPOSearchSpace:
             64000,
             96000,
             128000,
-            160000,
-            200000,
+            192000,
             256000,
             300000,
         ]
@@ -612,12 +618,52 @@ class HPOSearchSpace:
         default_factory=lambda: [250, 500, 750, 1000, 1500, 2000, 3000, 4000, 5000, 8000, 10000]
     )
     hd_dim: list[int] = field(
-        default_factory=lambda: [128, 192, 256, 384, 512, 768, 1024, 1536, 2048, 3072, 4096]
+        default_factory=lambda: [
+            128,
+            192,
+            256,
+            384,
+            512,
+            768,
+            1024,
+            1536,
+            2048,
+            3072,
+            4096,
+            5120,
+            6144,
+            7168,
+            8192,  # Extended range for SOTA competitiveness
+            10240,
+            12288,
+            14336,
+            16384,  # Ultra-high capacity HD computing
+        ]
     )
     # Vocab sample size for tokenizer learning (lower = less memory)
     vocab_sample_size: list[int] = field(
         default_factory=lambda: [500, 1000, 2000, 3000, 5000, 8000, 10000, 15000, 20000]
     )
+    # HD sample length: max tokens per individual HD sample (affects position keys memory)
+    # IMPORTANT: This is separate from context_window (model's attention context).
+    # HD achieves long context via bundling MANY samples, not huge individual samples.
+    # Memory: position_keys = hd_sample_length × hd_dim × 4 bytes
+    # E.g., 512 × 12288 × 4 = 24 MB vs 1M × 12288 × 4 = 48 GB
+    hd_sample_length: list[int] = field(
+        default_factory=lambda: [128, 192, 256, 384, 512, 768, 1024, 1536, 2048]
+    )
+
+    # =========================================================================
+    # PHASE 300+: HD UPGRADE PARAMETERS
+    # =========================================================================
+    # Phase 1: Optimizer Compression
+    hd_optimizer_compression_ratio: list[int] = field(default_factory=lambda: [4, 8, 16])
+
+    # Phase 2: Gradient Projection (replacing GaLore when HD enabled)
+    hd_gradient_rank: list[int] = field(default_factory=lambda: [32, 64, 128, 256])
+
+    # Phase 3: KV Cache Compression
+    hd_kv_compression_ratio: list[int] = field(default_factory=lambda: [4, 8, 16])
 
     # =========================================================================
     # PHASE 201: QUANTUM MEMORY OPTIMIZATION PARAMETERS
@@ -708,7 +754,8 @@ class HPOSearchSpace:
     # Barren plateau gradient norm threshold for detection
     barren_plateau_threshold: tuple[float, float] = (1e-7, 1e-5)
     # LR scaling factor during barren plateau recovery
-    barren_plateau_recovery_lr_scale: tuple[float, float] = (5.0, 20.0)
+    # Phase 2-4: Reduced max from 20 to 15 since dampening provides safety net
+    barren_plateau_recovery_lr_scale: tuple[float, float] = (2.0, 15.0)
     # QNG damping for QFIM regularization
     qng_damping: tuple[float, float] = (1e-5, 1e-3)
     # GaLore gradient projection rank
@@ -802,12 +849,12 @@ class HPOSearchSpace:
         Returns:
             Tuple of (max_blocks, max_experts, max_dim) that fit within budget.
         """
-        # CRITICAL: self.vocab_size is a list[int] in HPOSearchSpace
+        # CRITICAL: self.target_vocab_size is a list[int] in HPOSearchSpace
         # Use conservative (min) value for budget estimation
         vocab_size = (
-            min(self.vocab_size)
-            if isinstance(self.vocab_size, list) and self.vocab_size
-            else (self.vocab_size if isinstance(self.vocab_size, int) else 32000)
+            min(self.target_vocab_size)
+            if isinstance(self.target_vocab_size, list) and self.target_vocab_size
+            else (self.target_vocab_size if isinstance(self.target_vocab_size, int) else 32000)
         )
 
         # Start with minimum viable config
@@ -879,9 +926,9 @@ class HPOSearchSpace:
                     setattr(instance, key, value)
 
         # Sync model-specific limits/flags for parameter estimation
-        # If vocab_size is not in search_space, use default from model_config
-        if not hasattr(instance, "vocab_size") or instance.vocab_size is None:
-            instance.vocab_size = model_config.get("vocab_size")
+        # If target_vocab_size is not in search_space, use default from model_config
+        if not hasattr(instance, "target_vocab_size") or instance.target_vocab_size is None:
+            instance.target_vocab_size = model_config.get("target_vocab_size", [32000])
 
         instance.context_window = model_config.get("sequence_length") or model_config.get(
             "context_window"
@@ -1004,6 +1051,56 @@ class HPOSearchSpace:
         filtered_dims = [d for d in self.embedding_dim if d <= max_dim] or [256]
         filtered_batch = [b for b in self.batch_size if b <= max_batch] or [8]
 
+        # =====================================================================
+        # PHASE 500+: BUDGET-AWARE HD_DIM AND VOCAB FILTERING
+        # With HQE: embed_params = vocab_size × hd_dim + hd_dim × embedding_dim
+        # These dominate parameter count and MUST be budget-constrained.
+        # =====================================================================
+        if self.param_budget is not None and self.hd_dim:
+            # Compute max affordable hd_dim for this budget
+            # Reserve 50% for model layers, 50% for embeddings (conservative)
+            embedding_budget = int(target_budget * 0.5)
+            selected_dim = max(filtered_dims)  # Use max filtered dim for estimation
+
+            # Filter hd_dim: embed_params = vocab × hd + hd × dim
+            # For budget V, max hd ≈ V / (vocab + dim) with V = embedding_budget
+            # Use min vocab for max hd_dim estimation
+            min_vocab = min(self.target_vocab_size) if self.target_vocab_size else 8000
+            max_hd_for_budget = (
+                embedding_budget // (min_vocab + selected_dim)
+                if (min_vocab + selected_dim) > 0
+                else 1024
+            )
+
+            filtered_hd_dim = [h for h in self.hd_dim if h <= max_hd_for_budget] or [
+                min(self.hd_dim)
+            ]
+
+            # Now filter vocab based on selected max hd_dim
+            max_filtered_hd = max(filtered_hd_dim)
+            # max_vocab ≈ (embedding_budget - hd × dim) / hd
+            max_vocab_for_budget = (
+                (embedding_budget - max_filtered_hd * selected_dim) // max_filtered_hd
+                if max_filtered_hd > 0
+                else 32000
+            )
+            max_vocab_for_budget = max(
+                8000, min(max_vocab_for_budget, 300000)
+            )  # Clamp to reasonable range
+
+            filtered_vocab = [v for v in self.target_vocab_size if v <= max_vocab_for_budget] or [
+                min(self.target_vocab_size)
+            ]
+
+            logger.debug(
+                f"[SmartTuner] HD budget filter: target_budget={target_budget/1e6:.0f}M, "
+                f"max_hd={max_hd_for_budget}, max_vocab={max_vocab_for_budget}, "
+                f"filtered_hd_dim={filtered_hd_dim[:3]}..., filtered_vocab={filtered_vocab[:3]}..."
+            )
+        else:
+            filtered_hd_dim = self.hd_dim if self.hd_dim else [512, 1024]
+            filtered_vocab = self.target_vocab_size if self.target_vocab_size else [32000]
+
         # Select optimizer first so we can derive LR range
         selected_optimizer = random.choice(self.optimizer)
 
@@ -1017,18 +1114,14 @@ class HPOSearchSpace:
         lr_log_max = math.log10(lr_range[1])
         sampled_lr = 10 ** random.uniform(lr_log_min, lr_log_max)
 
-        # Sample vocab_size if it's a list or tuple
-        sampled_vocab_size = self.vocab_size
-        if isinstance(self.vocab_size, (list, tuple)):
-            if len(self.vocab_size) == 2 and all(isinstance(x, int) for x in self.vocab_size):
-                sampled_vocab_size = random.randint(*self.vocab_size)
-            else:
-                sampled_vocab_size = random.choice(self.vocab_size)
+        # Phase 1 Tokenizer Fix: Sample target_vocab_size from FILTERED list
+        # Model vocab_size is derived from tokenizer.vocab_size in trial runner
+        sampled_target_vocab = random.choice(filtered_vocab)
 
         config = {
             # Metadata for internal tracking
             "_trial_id": trial_id,
-            "vocab_size": sampled_vocab_size,
+            "target_vocab_size": sampled_target_vocab,
             "param_budget": self.param_budget,
             # Training hyperparameters (LR auto-derived from optimizer)
             "learning_rate": sampled_lr,
@@ -1194,9 +1287,11 @@ class HPOSearchSpace:
             # =================================================================
             "hd_reservoir_size": random.choice(self.hd_reservoir_size),
             # Defensive null handling: use default [512, 1024] if hd_dim is None
-            "hd_dim": random.choice(self.hd_dim if self.hd_dim else [512, 1024]),
+            "hd_dim": random.choice(filtered_hd_dim),
             "vocab_sample_size": random.choice(self.vocab_sample_size),
-            # =================================================================
+            # HD sample length: controls max tokens per individual HD sample
+            # This is separate from context_window and directly affects position keys memory
+            "hd_sample_length": random.choice(self.hd_sample_length),
             # PHASE 201: Quantum Memory Optimization Parameters
             # Note: use_tt_ffn, use_latent_kv pulled from global config.py
             # =================================================================
@@ -1252,7 +1347,7 @@ class HPOSearchSpace:
         }
 
         # Add user-set tokenizer/context config if provided
-        # Note: vocab_size is now TUNABLE (sampled at line 880), no longer fixed
+        # Note: target_vocab_size is sampled above; model vocab derived from tokenizer
         if self.context_window is not None:
             config["context_window"] = self.context_window
         if self.position_embedding is not None:

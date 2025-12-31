@@ -213,4 +213,6 @@ def create_scheduler(
         min_budget=min_budget,
         search_space_sampler=budget_aware_sampler,
         config=qahpo_config,
+        # Phase 500: Pass HPOSearchSpace for faNOVA-adaptive progression
+        hpo_search_space=hpo_search_space,
     )

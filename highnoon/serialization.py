@@ -54,6 +54,7 @@ from typing import Any
 import tensorflow as tf
 
 import highnoon
+from highnoon.hd_serialization import HDSerializationConfig, HDWeightCompressor, VQCStateSerializer
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,8 @@ def save_model(
     tokenizer: Any = None,
     include_optimizer: bool = False,
     overwrite: bool = False,
+    use_hd_compression: bool = False,
+    compression_config: dict | HDSerializationConfig | None = None,
 ) -> Path:
     """Save model with full training configuration.
 
@@ -145,6 +148,47 @@ def save_model(
     with open(metadata_path, "w") as f:
         json.dump(metadata, f, indent=2)
     logger.info(f"[Serialization] Saved metadata to {metadata_path}")
+
+    # 5. HD Compression & VQC Serialization
+    if use_hd_compression:
+        logger.info("[Serialization] Applying Quantum-Enhanced Serialization...")
+
+        # Parse config
+        if isinstance(compression_config, dict):
+            hd_config = HDSerializationConfig.from_dict(compression_config)
+        else:
+            hd_config = compression_config or HDSerializationConfig()
+
+        # Compress weights
+        compressor = HDWeightCompressor(hd_config)
+        bundles, hd_metadata = compressor.compress_model(model)
+
+        hd_path = path / "weights_hd.npz"
+        compressor.save_compressed(bundles, hd_metadata, hd_path)
+        logger.info(f"[Serialization] Saved HD weights to {hd_path}")
+
+        # Serialize VQC states (Phase Preservation)
+        vqc_path = path / "vqc_state.json"
+        vqc_serializer = VQCStateSerializer(preserve_phase=hd_config.preserve_vqc_phase)
+        vqc_states = {}
+
+        # Scan for VQC layers
+        for layer in model.layers:
+            # Check recursively if needed, but for now top-level or flattened
+            if hasattr(layer, "metrics") and "HybridVQCLayer" in str(type(layer)):
+                vqc_states[layer.name] = vqc_serializer.serialize(layer)
+            # Also check submodules/layers (safely - some layers like InputLayer don't have submodules)
+            if hasattr(layer, "submodules"):
+                for sublayer in layer.submodules:
+                    if "HybridVQCLayer" in str(type(sublayer)):
+                        vqc_states[sublayer.name] = vqc_serializer.serialize(sublayer)
+
+        if vqc_states:
+            with open(vqc_path, "w") as f:
+                # Need custom encoder for complex/numpy types if not handled by serializer
+                # VQCStateSerializer output uses standard lists/floats, so json dump is fine.
+                json.dump(vqc_states, f, indent=2)
+            logger.info(f"[Serialization] Saved VQC states to {vqc_path}")
 
     logger.info(f"[Serialization] Model saved successfully to {path}")
     return path
@@ -224,6 +268,49 @@ def load_model(
         custom_objects=all_custom_objects,
     )
     logger.info(f"[Serialization] Loaded model from {model_path}")
+
+    # 3.5 Restore HD Compressed Weights / VQC State
+    hd_path = path / "weights_hd.npz"
+    vqc_path = path / "vqc_state.json"
+
+    if hd_path.exists():
+        logger.info(f"[Serialization] Found HD weights at {hd_path}, restoring...")
+        try:
+            compressor = HDWeightCompressor()  # Config loaded from file metadata
+            bundles, _ = compressor.load_compressed(hd_path)
+            compressor.decompress_model(bundles, model)
+            logger.info("[Serialization] HD weights restored successfully")
+        except Exception as e:
+            logger.error(f"[Serialization] Failed to restore HD weights: {e}")
+
+    if vqc_path.exists():
+        logger.info(f"[Serialization] Found VQC state at {vqc_path}, restoring...")
+        try:
+            with open(vqc_path) as f:
+                vqc_states = json.load(f)
+
+            vqc_serializer = VQCStateSerializer()
+            restored_count = 0
+
+            # Helper to find layer by name
+            def find_layer(m, name):
+                for l in m.layers:
+                    if l.name == name:
+                        return l
+                    for sl in l.submodules:
+                        if sl.name == name:
+                            return sl
+                return None
+
+            for name, state in vqc_states.items():
+                target_layer = find_layer(model, name)
+                if target_layer:
+                    vqc_serializer.deserialize(state, target_layer)
+                    restored_count += 1
+
+            logger.info(f"[Serialization] Restored state for {restored_count} VQC layers")
+        except Exception as e:
+            logger.error(f"[Serialization] Failed to restore VQC state: {e}")
 
     # 4. Load configuration
     config_path = path / "config.json"

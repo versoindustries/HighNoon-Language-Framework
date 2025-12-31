@@ -196,10 +196,11 @@ class QAHPOConfig:
     meta_warm_start_count: int = 4
 
     # fANOVA: Importance-guided mutation
+    # Phase 500: Aggressive settings for faster layer importance learning
     enable_fanova_guidance: bool = True
-    fanova_refit_interval: int = 10  # Refit importance every N trials
-    fanova_min_trials: int = 10  # Min trials before using importance
-    fanova_importance_boost: float = 2.0  # Multiply mutation for important params
+    fanova_refit_interval: int = 5  # Refit importance every N trials (was 10)
+    fanova_min_trials: int = 5  # Min trials before using importance (was 10)
+    fanova_importance_boost: float = 3.0  # Multiply mutation for important params (was 2.0)
     fanova_importance_dampen: float = 0.3  # Multiply mutation for unimportant params
     fanova_importance_threshold: float = 0.1  # Below this = unimportant
 
@@ -236,6 +237,7 @@ class QuantumAdaptiveHPOScheduler(HPOSchedulerBase):
         search_space_sampler: Callable[[int], dict[str, Any]] | None = None,
         config: QAHPOConfig | None = None,
         task_hash: str | None = None,
+        hpo_search_space: Any | None = None,  # Phase 500: HPOSearchSpace for adaptive progression
     ) -> None:
         """Initialize the Quantum Adaptive HPO Scheduler.
 
@@ -245,11 +247,13 @@ class QuantumAdaptiveHPOScheduler(HPOSchedulerBase):
             search_space_sampler: Function to sample hyperparameters.
             config: QAHPO configuration. Uses defaults if not provided.
             task_hash: Task hash for meta-learning (optional).
+            hpo_search_space: HPOSearchSpace instance for faNOVA-adaptive progression.
         """
         super().__init__(max_budget, min_budget, search_space_sampler)
 
         self.config = config or QAHPOConfig()
         self._task_hash = task_hash
+        self._hpo_search_space = hpo_search_space  # For importance score sharing
 
         # Population of quantum states
         self.population: list[QuantumState] = []
@@ -532,12 +536,22 @@ class QuantumAdaptiveHPOScheduler(HPOSchedulerBase):
         This ensures that embedding_dim % num_heads == 0 and other
         constraints are met, preventing ValueError in model layers.
 
+        Phase 2.1 Update: Delegates to HPOSearchSpace._validate_and_fix_constraints
+        for comprehensive checking (ordering, divisibility, memory budget).
+
         Args:
             config: Configuration dictionary to validate/adjust.
 
         Returns:
             Configuration with snapped architecture parameters.
         """
+        # Phase 2.1: Use comprehensive validator from HPOSearchSpace if available
+        if self._hpo_search_space is not None and hasattr(
+            self._hpo_search_space, "_validate_and_fix_constraints"
+        ):
+            # This handles ordering, divisibility, proportionality, and memory budget
+            config = self._hpo_search_space._validate_and_fix_constraints(config)
+
         # 1. Snap embedding and hidden dimensions to multiples of 8
         for key in ["embedding_dim", "hidden_dim", "compressed_dim", "latent_kv_dim"]:
             if key in config:
@@ -1200,6 +1214,11 @@ class QuantumAdaptiveHPOScheduler(HPOSchedulerBase):
             if result is not None:
                 # Update importance scores dict
                 self._importance_scores = {p.name: p.importance for p in result.individual}
+
+                # Phase 500: Share importance with HPOSearchSpace for adaptive progression
+                if self._hpo_search_space is not None:
+                    if hasattr(self._hpo_search_space, "update_importance_scores"):
+                        self._hpo_search_space.update_importance_scores(self._importance_scores)
 
                 # Log top importance
                 top_params = sorted(result.individual, key=lambda x: x.importance, reverse=True)[:3]

@@ -134,6 +134,39 @@ def create_model(name_or_config, **kwargs):
     model_config = config.model.to_dict()
     model_config.update(kwargs)
 
+    # =========================================================================
+    # LITE EDITION LIMIT VALIDATION
+    # Validates configuration against scale limits (20B params, 5M context, etc.)
+    # Pro/Enterprise editions skip this validation via is_lite() check.
+    # =========================================================================
+    from types import SimpleNamespace
+
+    from highnoon._native._limits import (
+        is_lite,
+        validate_model_config,
+        validate_param_count,
+        warn_near_limits,
+    )
+
+    # Create a namespace object for validation functions
+    config_ns = SimpleNamespace(
+        num_reasoning_blocks=model_config.get("num_reasoning_blocks", 4),
+        num_moe_experts=model_config.get("num_moe_experts", 8),
+        embedding_dim=model_config.get("embedding_dim", 768),
+        max_seq_length=model_config.get("max_seq_length", 4096),
+        vocab_size=model_config.get("vocab_size", 32000),
+    )
+
+    # Validate against Lite edition limits (raises LimitExceededError if exceeded)
+    validate_model_config(config_ns)
+    validate_param_count(config_ns)
+
+    # Warn if approaching limits (helpful for users near the edge)
+    if is_lite():
+        warnings = warn_near_limits(config_ns)
+        if warnings:
+            log.warning(f"Configuration approaching Lite edition limits: {warnings}")
+
     # Create model
     model = HSMN(
         vocab_size=model_config.get("vocab_size", 32000),

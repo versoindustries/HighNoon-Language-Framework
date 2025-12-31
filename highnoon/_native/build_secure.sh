@@ -54,6 +54,7 @@ PRODUCTION_BUILD="OFF"
 ENABLE_ANTIDEBUG="OFF"
 STRIP_SYMBOLS="ON"
 ENABLE_LTO="ON"
+ENABLE_OLLVM="OFF"  # Phase 2: Obfuscator-LLVM (requires O-LLVM toolchain)
 TARGET_PLATFORM="${HSMN_TARGET_PLATFORM:-general}"
 ARM_TOOLCHAIN_PREFIX="${HSMN_ARM_TOOLCHAIN_PREFIX:-aarch64-linux-gnu-}"
 
@@ -110,6 +111,11 @@ while [[ $# -gt 0 ]]; do
             ENABLE_LTO="OFF"
             shift
             ;;
+        --ollvm)
+            ENABLE_OLLVM="ON"
+            echo "🛡️ O-LLVM: Enabled (requires Clang with O-LLVM patches)"
+            shift
+            ;;
         --clean)
             echo "Cleaning build artifacts..."
             rm -rf "${BUILD_DIR}"
@@ -129,6 +135,7 @@ while [[ $# -gt 0 ]]; do
             echo "Build Options:"
             echo "  --production    Enable anti-debugging and full hardening"
             echo "  --debug         Debug build with no hardening"
+            echo "  --ollvm         Enable Obfuscator-LLVM (requires O-LLVM clang)"
             echo "  --clean         Remove build artifacts"
             echo "  --help          Show this help message"
             echo ""
@@ -462,6 +469,7 @@ cmake "${SCRIPT_DIR}" \
     -DSTRIP_SYMBOLS="${STRIP_SYMBOLS}" \
     -DPRODUCTION_BUILD="${PRODUCTION_BUILD}" \
     -DENABLE_ANTIDEBUG="${ENABLE_ANTIDEBUG}" \
+    -DENABLE_OLLVM="${ENABLE_OLLVM}" \
     -DCHAIN_SECRET_HIGH="${CHAIN_SECRET_HIGH}" \
     -DCHAIN_SECRET_LOW="${CHAIN_SECRET_LOW}" \
     -DHN_CRYPTO_KEY="${HN_CRYPTO_KEY}" \

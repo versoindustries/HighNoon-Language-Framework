@@ -135,7 +135,25 @@ def load_training_dataset(
         - dataset yields (input_ids, labels)
         - tokenizer is the QWTTextTokenizer or AdaptiveQWTTokenizer instance
         - merger is the trained SuperwordMerger (or None if using adaptive tokenizer/HD streaming)
+
+    Raises:
+        LimitExceededError: If sequence_length exceeds Lite edition limit (5M tokens).
     """
+    # =========================================================================
+    # LITE EDITION LIMIT VALIDATION
+    # Validates context length against scale limits before loading data.
+    # Pro/Enterprise editions skip this via is_lite() check.
+    # =========================================================================
+    from highnoon._native._limits import MAX_CONTEXT_LENGTH, LimitExceededError, is_lite
+
+    if is_lite() and sequence_length > MAX_CONTEXT_LENGTH:
+        raise LimitExceededError(
+            f"sequence_length ({sequence_length:,}) exceeds Lite edition limit "
+            f"({MAX_CONTEXT_LENGTH:,} / 5M tokens).\n\n"
+            "Upgrade to Pro or Enterprise for unlimited context:\n"
+            "  https://versoindustries.com/upgrade",
+            violations=[f"sequence_length: {sequence_length:,} > {MAX_CONTEXT_LENGTH:,}"],
+        )
 
     # Phase 200+: HD Streaming Mode (Quantum-Enhanced Memory Optimization)
     # This mode uses HolographicCorpus to compress samples into fixed-size HD bundles

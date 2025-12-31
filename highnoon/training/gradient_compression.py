@@ -63,6 +63,19 @@ from highnoon.config import (
 logger = logging.getLogger(__name__)
 
 # Phase 300+: HD Gradient Projection Integration
+# FFT-based compression is now preferred over SRHT projection
+try:
+    from highnoon._native.ops.hd_gradient_compression import (
+        HDGradientCompressor as HDGradientCompressorFFT,
+    )
+    from highnoon._native.ops.hd_gradient_compression import hd_gradient_compression_available
+
+    _HD_FFT_AVAILABLE = hd_gradient_compression_available()
+except ImportError:
+    _HD_FFT_AVAILABLE = False
+    HDGradientCompressorFFT = None
+
+# Legacy SRHT-based projection (deprecated, kept for backward compatibility)
 try:
     from highnoon._native.ops.hd_gradient_projection import (
         HDGradientCompressor as HDGradientCompressorNative,
@@ -147,12 +160,27 @@ class TensorGaLoreCompressor:
         ]
         # Track TT layers detected for statistics
         self._tt_layers_detected: set[str] = set()
-        # Phase 300+: HD Gradient Compressor (alternative to Tucker decomposition)
+        # Phase 300+: HD Gradient Compressor (FFT-based, replaces Tucker decomposition)
+        # FFT-based compression is preferred over SRHT
+        self._hd_fft_compressor: HDGradientCompressorFFT | None = None
         self._hd_compressor: HDGradientCompressorNative | None = None
-        if USE_HD_GRADIENT_PROJECTION and _HD_GRADIENT_AVAILABLE:
+
+        if _HD_FFT_AVAILABLE and HDGradientCompressorFFT is not None:
+            # Use FFT-based compression (preferred)
+            try:
+                self._hd_fft_compressor = HDGradientCompressorFFT(
+                    bandwidth=self.rank * 2,  # Map rank to bandwidth
+                    enabled=self.enabled,
+                    scale=self.scale,
+                )
+                logger.info("[GALORE] HD FFT gradient compression enabled (native)")
+            except Exception as e:
+                logger.warning(f"[GALORE] Failed to init HD FFT compressor: {e}")
+        elif USE_HD_GRADIENT_PROJECTION and _HD_GRADIENT_AVAILABLE:
+            # Fallback to SRHT (deprecated)
             try:
                 self._hd_compressor = HDGradientCompressorNative(rank=self.rank)
-                logger.info("[GALORE] HD gradient projection enabled (SRHT)")
+                logger.info("[GALORE] HD gradient projection enabled (SRHT, deprecated)")
             except Exception as e:
                 logger.warning(f"[GALORE] Failed to init HD compressor: {e}")
 
@@ -419,7 +447,20 @@ class TensorGaLoreCompressor:
         if not self.enabled:
             return gradient, str(id(variable))
 
-        # Phase 300+: HD Gradient Projection (SRHT-based, no periodic SVD)
+        # Phase 300+: HD FFT Gradient Compression (preferred)
+        if self._hd_fft_compressor is not None:
+            try:
+                compressed, metadata = self._hd_fft_compressor.compress(gradient, variable)
+                # Store metadata for decompression using variable id as key
+                var_id = str(id(variable))
+                self._fft_metadata = getattr(self, "_fft_metadata", {})
+                self._fft_metadata[var_id] = metadata
+                return compressed, var_id
+            except Exception as e:
+                logger.warning(f"[GALORE] HD FFT compress failed: {e}")
+                # Fall through to SRHT or Tucker
+
+        # Phase 300+: HD Gradient Projection (SRHT-based, deprecated)
         if self._hd_compressor is not None:
             try:
                 compressed, var_name = self._hd_compressor.compress(gradient, variable)
@@ -480,7 +521,7 @@ class TensorGaLoreCompressor:
     ) -> tf.Tensor:
         """Decompress low-rank update to full tensor.
 
-        Phase 300+: Uses HD SRHT reconstruction when HD compression was used.
+        Phase 300+: Uses HD FFT reconstruction (preferred), then SRHT, then Tucker.
 
         Args:
             compressed_update: Update in low-rank space.
@@ -489,14 +530,23 @@ class TensorGaLoreCompressor:
         Returns:
             Full-rank update tensor.
         """
-        # Phase 300+: HD Gradient Decompression
+        # Phase 300+: HD FFT Gradient Decompression (preferred)
+        fft_metadata = getattr(self, "_fft_metadata", {})
+        if self._hd_fft_compressor is not None and variable_name in fft_metadata:
+            try:
+                metadata = fft_metadata[variable_name]
+                return self._hd_fft_compressor.decompress(compressed_update, metadata)
+            except Exception as e:
+                logger.warning(f"[GALORE] HD FFT decompress failed: {e}")
+                # Fall through to SRHT or Tucker
+
+        # Phase 300+: HD Gradient Decompression (SRHT, deprecated)
         if self._hd_compressor is not None:
             try:
                 return self._hd_compressor.decompress(compressed_update, variable_name)
             except Exception as e:
                 logger.warning(f"[GALORE] HD decompress failed: {e}")
-                # Fall through to Tucker but may mismatch - compressed_update
-                # may not be valid for Tucker decompression
+                # Fall through to Tucker but may mismatch
 
         if not self.enabled or variable_name not in self._projections:
             return compressed_update

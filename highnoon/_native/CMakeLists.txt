@@ -38,6 +38,42 @@ option(ENABLE_OPENMP "Enable OpenMP for parallelization" ON)
 option(BUILD_TESTS "Build native op tests" OFF)
 
 # =============================================================================
+# Phase 2: Obfuscator-LLVM (O-LLVM) Options
+# =============================================================================
+# These require the ollvm compiler toolchain (https://github.com/obfuscator-llvm/obfuscator)
+# Install with: ./build.sh && export CC=/path/to/obfuscator/build/bin/clang CXX=/path/to/obfuscator/build/bin/clang++
+# Or use Hikari/Armariris which are modern O-LLVM forks.
+option(ENABLE_OLLVM "Enable Obfuscator-LLVM features (requires O-LLVM toolchain)" OFF)
+option(ENABLE_CONTROL_FLOW_FLATTENING "Enable Control Flow Flattening (CFG destroyed)" ON)
+option(ENABLE_INSTRUCTION_SUBSTITUTION "Enable Instruction Substitution (arithmetic obfuscation)" ON)
+option(ENABLE_BOGUS_CONTROL_FLOW "Enable Bogus Control Flow (opaque predicates)" ON)
+
+# O-LLVM compiler flags (only applied if ENABLE_OLLVM is ON and clang is detected)
+set(OLLVM_FLAGS "")
+if(ENABLE_OLLVM)
+    # Check if compiler is clang (required for O-LLVM)
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+        message(STATUS "O-LLVM: Clang detected, enabling obfuscation passes")
+        if(ENABLE_CONTROL_FLOW_FLATTENING)
+            list(APPEND OLLVM_FLAGS -mllvm -fla)  # Control Flow Flattening
+            message(STATUS "  - Control Flow Flattening: ON")
+        endif()
+        if(ENABLE_INSTRUCTION_SUBSTITUTION)
+            list(APPEND OLLVM_FLAGS -mllvm -sub)  # Instruction Substitution
+            message(STATUS "  - Instruction Substitution: ON")
+        endif()
+        if(ENABLE_BOGUS_CONTROL_FLOW)
+            list(APPEND OLLVM_FLAGS -mllvm -bcf)  # Bogus Control Flow
+            message(STATUS "  - Bogus Control Flow: ON")
+        endif()
+    else()
+        message(WARNING "O-LLVM: Requires Clang compiler. Current compiler: ${CMAKE_CXX_COMPILER_ID}")
+    endif()
+else()
+    message(STATUS "O-LLVM: Disabled (use -DENABLE_OLLVM=ON with Clang)")
+endif()
+
+# =============================================================================
 # Chain Secret Configuration
 # =============================================================================
 # Generate or use provided chain secrets for binary authentication.
@@ -359,6 +395,7 @@ set(HIGHNOON_OPS_SOURCES
     # Phase 300+: HD Upgrade Integration (hd_upgrade.md)
     ops/hd_state_buffer_op.cc         # HD optimizer state compression (SophiaG, QIAO, SympFlow)
     ops/hd_spectral_entropy_op.cc     # FFT-based spectral entropy for QULS
+    ops/hd_gradient_compression_op.cc # HD gradient compression (GaLore-native FFT)
     ops/hd_gradient_projection_op.cc  # HD random projection for gradient compression
     ops/hd_holographic_similarity_op.cc  # FFT-based attention similarity
     ops/hd_kv_cache_op.cc             # HD compressed KV cache for inference
@@ -485,6 +522,7 @@ target_compile_options(highnoon_core PRIVATE
     ${SIMD_FLAGS}
     ${LTO_FLAGS}
     ${ANTIDEBUG_FLAGS}
+    ${OLLVM_FLAGS}
 )
 
 # OpenMP support

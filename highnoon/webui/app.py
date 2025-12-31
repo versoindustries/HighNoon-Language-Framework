@@ -2425,6 +2425,58 @@ def create_app(debug: bool = False) -> FastAPI:
         not just a single trial. Uses SweepExecutor for enterprise-grade
         orchestration with retry logic, checkpointing, and scheduler integration.
         """
+        # =====================================================================
+        # LITE EDITION LIMIT VALIDATION
+        # Pre-flight validation of HPO config against scale limits.
+        # Returns HTTP 400 with clear error message if limits exceeded.
+        # Pro/Enterprise editions skip this via is_lite() check.
+        # =====================================================================
+        from highnoon._native._limits import (
+            MAX_CONTEXT_LENGTH,
+            MAX_EMBEDDING_DIM,
+            MAX_MOE_EXPERTS,
+            MAX_REASONING_BLOCKS,
+            MAX_TOTAL_PARAMS,
+            is_lite,
+        )
+
+        if is_lite():
+            violations = []
+
+            # Check context window
+            if payload.context_window and payload.context_window > MAX_CONTEXT_LENGTH:
+                violations.append(
+                    f"context_window: {payload.context_window:,} > {MAX_CONTEXT_LENGTH:,}"
+                )
+
+            # Check embedding dimension
+            if payload.embedding_dim and payload.embedding_dim > MAX_EMBEDDING_DIM:
+                violations.append(f"embedding_dim: {payload.embedding_dim} > {MAX_EMBEDDING_DIM}")
+
+            # Check reasoning blocks
+            if payload.num_reasoning_blocks and payload.num_reasoning_blocks > MAX_REASONING_BLOCKS:
+                violations.append(
+                    f"num_reasoning_blocks: {payload.num_reasoning_blocks} > {MAX_REASONING_BLOCKS}"
+                )
+
+            # Check MoE experts
+            if payload.num_moe_experts and payload.num_moe_experts > MAX_MOE_EXPERTS:
+                violations.append(f"num_moe_experts: {payload.num_moe_experts} > {MAX_MOE_EXPERTS}")
+
+            # Check param budget
+            if payload.param_budget and payload.param_budget > MAX_TOTAL_PARAMS:
+                violations.append(f"param_budget: {payload.param_budget:,} > {MAX_TOTAL_PARAMS:,}")
+
+            if violations:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": "Configuration exceeds Lite edition limits",
+                        "violations": violations,
+                        "upgrade_url": "https://versoindustries.com/upgrade",
+                    },
+                )
+
         sweep_id = str(uuid.uuid4())[:8]
 
         # Determine max_trials: if auto_stop_on_convergence is enabled and no explicit max,

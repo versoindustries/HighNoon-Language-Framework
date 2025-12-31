@@ -1041,6 +1041,46 @@ class TrainingEngine:
         self.model = model
         self.optimizer = optimizer
 
+        # =====================================================================
+        # LITE EDITION LIMIT VALIDATION
+        # Validates model architecture against scale limits before training.
+        # Pro/Enterprise editions skip this via is_lite() check.
+        # =====================================================================
+        from types import SimpleNamespace
+
+        from highnoon._native._limits import (
+            LimitExceededError,
+            is_lite,
+            validate_model_config,
+            validate_param_count,
+            warn_near_limits,
+        )
+
+        if is_lite():
+            # Extract model configuration for validation
+            model_config_ns = SimpleNamespace(
+                num_reasoning_blocks=getattr(model, "num_reasoning_blocks", 0),
+                num_moe_experts=(
+                    getattr(model, "num_experts", 0)
+                    if hasattr(model, "num_experts")
+                    else getattr(getattr(model, "reasoning_module", None), "num_experts", 8)
+                ),
+                embedding_dim=getattr(model, "embedding_dim", 768),
+                max_seq_length=getattr(model, "max_seq_length", 4096),
+                vocab_size=getattr(model, "vocab_size", 32000),
+            )
+
+            # Validate model configuration (raises LimitExceededError if exceeded)
+            validate_model_config(model_config_ns)
+            validate_param_count(model_config_ns)
+
+            # Log warnings for configurations approaching limits
+            warnings = warn_near_limits(model_config_ns)
+            if warnings:
+                logger.warning(
+                    f"[TrainingEngine] Model approaching Lite edition limits: {warnings}"
+                )
+
         # Normalize config to EnterpriseTrainingConfig
         if config is None:
             self.config = EnterpriseTrainingConfig()

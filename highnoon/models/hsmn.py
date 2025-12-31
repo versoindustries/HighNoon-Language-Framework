@@ -116,14 +116,51 @@ class HSMN(tf.keras.Model):
         use_quantum_holographic_memory: bool = False,
         **kwargs,
     ):
-        super().__init__(**kwargs)
+        # =====================================================================
+        # LITE EDITION LIMIT VALIDATION
+        # Comprehensive validation of all scale limits (20B, 5M, 24 blocks, etc.)
+        # Pro/Enterprise editions skip these checks via is_lite().
+        # =====================================================================
+        from highnoon._native._limits import (
+            MAX_CONTEXT_LENGTH,
+            MAX_EMBEDDING_DIM,
+            MAX_MOE_EXPERTS,
+            MAX_REASONING_BLOCKS,
+            LimitExceededError,
+            is_lite,
+        )
 
-        # Validate Lite edition limits
-        if num_reasoning_blocks > LITE_MAX_REASONING_BLOCKS:
-            raise ValueError(
-                f"Lite edition supports max {LITE_MAX_REASONING_BLOCKS} reasoning blocks, "
-                f"got {num_reasoning_blocks}. Upgrade to Enterprise for unlimited."
-            )
+        if is_lite():
+            violations = []
+
+            # Check reasoning blocks
+            if num_reasoning_blocks > MAX_REASONING_BLOCKS:
+                violations.append(
+                    f"num_reasoning_blocks: {num_reasoning_blocks} > {MAX_REASONING_BLOCKS}"
+                )
+
+            # Check embedding dimension
+            if embedding_dim > MAX_EMBEDDING_DIM:
+                violations.append(f"embedding_dim: {embedding_dim} > {MAX_EMBEDDING_DIM}")
+
+            # Check context length
+            if max_seq_length > MAX_CONTEXT_LENGTH:
+                violations.append(f"max_seq_length: {max_seq_length:,} > {MAX_CONTEXT_LENGTH:,}")
+
+            # Check MoE experts
+            if num_experts > MAX_MOE_EXPERTS:
+                violations.append(f"num_experts: {num_experts} > {MAX_MOE_EXPERTS}")
+
+            if violations:
+                raise LimitExceededError(
+                    "Configuration exceeds Lite edition limits:\n  - "
+                    + "\n  - ".join(violations)
+                    + "\n\nUpgrade to Pro or Enterprise for unlimited scale:\n"
+                    "  https://versoindustries.com/upgrade",
+                    violations=violations,
+                )
+
+        super().__init__(**kwargs)
 
         self.vocab_size = vocab_size
         self.embedding_dim = embedding_dim

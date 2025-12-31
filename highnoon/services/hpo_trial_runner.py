@@ -744,6 +744,42 @@ def build_hsmn_model(
     num_heads = config.get("num_heads", 8)
     config.get("dropout_rate", 0.1)
 
+    # =========================================================================
+    # LITE EDITION LIMIT VALIDATION
+    # Validates HPO trial config against scale limits BEFORE model construction.
+    # This enables fail-fast behavior to save compute on overlimit trials.
+    # Pro/Enterprise editions skip this via is_lite() check.
+    # =========================================================================
+    from types import SimpleNamespace
+
+    from highnoon._native._limits import (
+        LimitExceededError,
+        is_lite,
+        validate_model_config,
+        validate_param_count,
+    )
+
+    # MoE parameters (extracted early for validation)
+    moe_num_experts = config.get("num_moe_experts", 8)
+
+    if is_lite():
+        config_ns = SimpleNamespace(
+            num_reasoning_blocks=num_reasoning_blocks,
+            num_moe_experts=moe_num_experts,
+            embedding_dim=hidden_dim,
+            max_seq_length=config.get("context_window", 4096),
+            vocab_size=vocab_size,
+        )
+
+        # Validate model configuration (raises LimitExceededError if exceeded)
+        validate_model_config(config_ns)
+        validate_param_count(config_ns)
+
+        logger.info(
+            f"[HPO] Lite edition validation passed: blocks={num_reasoning_blocks}, "
+            f"experts={moe_num_experts}, dim={hidden_dim}, vocab={vocab_size}"
+        )
+
     # FFN dimension computed from hidden_dim and expansion factor
     ff_expansion = config.get("ff_expansion", 4)
     ff_dim = config.get("ff_dim", hidden_dim * ff_expansion)
@@ -951,6 +987,81 @@ def build_hsmn_model(
             name="token_embedding",
         )(input_layer)
 
+    # Phase 2.1: Extract expanded architecture parameters for ReasoningModule
+    expanded_params = {
+        # Chunking
+        "chunk_size": config.get("chunk_size", 128),
+        "chunk_stride": config.get("chunk_stride", 64),
+        # Attention
+        "local_attention_window": config.get("local_attention_window", 256),
+        "local_attention_window_min": config.get("local_attention_window_min", 64),
+        "local_attention_window_max": config.get("local_attention_window_max", 512),
+        "local_attention_sigmoid_temp": config.get("local_attention_sigmoid_temp", 0.1),
+        "local_attention_sparsity_ratio": config.get("local_attention_sparsity_ratio", 0.5),
+        # Flash Linear
+        "flash_linear_chunk_size": config.get("flash_linear_chunk_size", 64),
+        "flash_linear_train_chunk_size": config.get("flash_linear_train_chunk_size", 64),
+        "flash_linear_hybrid_window": config.get("flash_linear_hybrid_window", 128),
+        "flash_linear_hybrid_alpha": config.get("flash_linear_hybrid_alpha", 0.5),
+        "flash_linear_augment_rank": config.get("flash_linear_augment_rank", 32),
+        "flash_linear_gate_init_bias": config.get("flash_linear_gate_init_bias", -3.0),
+        # State Bus
+        "state_bus_dim": config.get("state_bus_dim", 64),
+        "state_bus_slots": config.get("state_bus_slots", 16),
+        "state_bus_max_slots": config.get("state_bus_max_slots", 64),
+        "state_bus_num_types": config.get("state_bus_num_types", 4),
+        "state_bus_bond_dim": config.get("state_bus_bond_dim", 8),
+        # Memory
+        "memory_slots": config.get("memory_slots", 128),
+        "memory_slot_dim": config.get("memory_slot_dim", 64),
+        "memory_surprise_threshold": config.get("memory_surprise_threshold", 0.8),
+        "memory_product_k": config.get("memory_product_k", 4),
+        "memory_num_heads": config.get("memory_num_heads", 4),
+        "memory_mps_bond_dim": config.get("memory_mps_bond_dim", 8),
+        # CPU/HD Params
+        "cache_tile_size": config.get("cache_tile_size", 64),
+        "prefetch_distance": config.get("prefetch_distance", 2),
+        "ssd_chunk_size": config.get("ssd_chunk_size", 128),
+        "superposition_micro_batch_size": config.get("superposition_micro_batch_size", 4),
+        # VQC Extended
+        "vqc_qubits": config.get("vqc_qubits", 4),
+        "vqc_feature_rotation_depth": config.get("vqc_feature_rotation_depth", 2),
+        "neumann_cayley_terms": config.get("neumann_cayley_terms", 6),
+        "neumann_series_terms": config.get("neumann_series_terms", 6),
+        # DTC Extended
+        "dtc_coupling_j": config.get("dtc_coupling_j", 1.0),
+        "dtc_disorder_w": config.get("dtc_disorder_w", 0.5),
+        "dtc_num_cycles": config.get("dtc_num_cycles", 10),
+        # QSG
+        "qsg_bond_dim": config.get("qsg_bond_dim", 8),
+        "qsg_coherence_range": config.get("qsg_coherence_range", 0.5),
+        "qsg_grover_iterations": config.get("qsg_grover_iterations", 1),
+        "qsg_jacobi_iterations": config.get("qsg_jacobi_iterations", 5),
+        "qsg_hopfield_beta": config.get("qsg_hopfield_beta", 10.0),
+        "qsg_amplification_strength": config.get("qsg_amplification_strength", 1.5),
+        # QHPM
+        "qhpm_holographic_dim": config.get("qhpm_holographic_dim", 1024),
+        "qhpm_mps_bond_dim": config.get("qhpm_mps_bond_dim", 16),
+        "qhpm_hopfield_beta": config.get("qhpm_hopfield_beta", 10.0),
+        "qhpm_max_crystallized_directions": config.get("qhpm_max_crystallized_directions", 128),
+        # HD Extended
+        "hd_optimizer_compression_ratio": config.get("hd_optimizer_compression_ratio", 0.5),
+        "hd_gradient_rank": config.get("hd_gradient_rank", 16),
+        "hd_gradient_bandwidth": config.get("hd_gradient_bandwidth", 128),
+        "hd_kv_compression_ratio": config.get("hd_kv_compression_ratio", 2.0),
+        "hd_control_fingerprint_dim": config.get("hd_control_fingerprint_dim", 64),
+        "hd_stagnation_threshold": config.get("hd_stagnation_threshold", 0.1),
+        "hd_kalman_state_compression": config.get("hd_kalman_state_compression", 4),
+        "hd_projection_freeze_epochs": config.get("hd_projection_freeze_epochs", 2),
+        "hqe_ctqw_steps": config.get("hqe_ctqw_steps", 3),
+        "hd_active_vocab_size": config.get("hd_active_vocab_size", 5000),
+        # Unified Bus
+        "unified_bus_entanglement_init": config.get("unified_bus_entanglement_init", 0.5),
+        "unified_bus_propagation_rate": config.get("unified_bus_propagation_rate", 0.1),
+        # QASA
+        "qasa_feature_rotation_depth": config.get("qasa_feature_rotation_depth", 2),
+    }
+
     # Build the full HSMN reasoning module with hybrid block pattern
     # Note: Quantum parameters are read from global config by ReasoningModule
     # CRITICAL: Pass hd_dim so HD Activation Checkpointing uses trial-specific value
@@ -963,6 +1074,7 @@ def build_hsmn_model(
         wlam_num_heads=wlam_num_heads,
         wlam_kernel_size=wlam_kernel_size,
         hd_activation_dim=hd_dim if is_hd_mode else None,  # Pass trial's hd_dim
+        **expanded_params,
     )
 
     x = reasoning_module(x)
@@ -1412,7 +1524,10 @@ def train_trial(
         # Uses HolographicCorpus for amplitude-based reservoir sampling
         use_hd_streaming = trial_config.get("use_hd_streaming", True)  # Opt-in for now
         hd_reservoir_size = trial_config.get("hd_reservoir_size", 2000)
-        hd_dim = trial_config.get("hd_dim", 1024)
+        hd_dim = trial_config.get("hd_dim")
+        if hd_dim is None:
+            # Phase 1.1 Fix: Respect SmartTuner reduction (hd = hidden * 8)
+            hd_dim = hidden_dim * 8
         hd_sample_length = trial_config.get("hd_sample_length", 512)  # Tunable HD sample length
 
         if use_hd_streaming:

@@ -419,6 +419,29 @@ class HybridVQCLayer(ControlVarMixin, tf.keras.layers.Layer):
             return tf.math.tanh(projected_angles + param_norm)
 
     # ------------------------------------------------------------------
+    # Serialization
+    # ------------------------------------------------------------------
+
+    def get_config(self):
+        config = super().get_config()
+        config.update(
+            {
+                "num_layers": self.num_layers,
+                "min_output": self.min_output,
+                "max_output": self.max_output,
+                "zne_scales": self.zne_scales,
+                "enable_zne": self.enable_zne,
+                "num_qubits": self.num_qubits,
+                "entanglement": self.entanglement,
+                "shots": self.shots,
+                "backend_preference": self.backend_preference,
+                "enable_sampling_during_training": self.enable_sampling_during_training,
+                "measurement_terms": self.measurement_terms,
+            }
+        )
+        return config
+
+    # ------------------------------------------------------------------
     # Public call
     # ------------------------------------------------------------------
 
@@ -544,6 +567,18 @@ class EvolutionTimeVQCLayer(HybridVQCLayer):
             modulator: Callable returning modulation factor in [0.5, 1.5].
         """
         self._floquet_modulator = modulator
+
+    def get_config(self):
+        """Get layer configuration."""
+        config = super().get_config()
+        config.update(
+            {
+                "min_time": self.min_time,
+                "max_time": self.max_time,
+                # Note: floquet_modulator cannot be serialized via config
+            }
+        )
+        return config
 
     def call(
         self,

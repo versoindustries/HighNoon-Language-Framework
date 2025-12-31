@@ -748,7 +748,9 @@ HD_OPTIMIZER_USE_SPARSE: bool = True  # Use sparse random projection (faster)
 USE_HD_SPECTRAL_ENTROPY: bool = True  # FFT-based spectral entropy for QULS
 # HD gradient projection replaces Tucker decomposition (no periodic SVD)
 USE_HD_GRADIENT_PROJECTION: bool = True  # Phase 300+: HD projection for GaLore
-HD_GRADIENT_RANK: int = 128  # Target rank for HD gradient projection
+HD_GRADIENT_RANK: int = 128  # Target rank for HD gradient projection (legacy)
+# Phase 300+ HD-native: Frequency bandwidth for gradient compression
+HD_GRADIENT_BANDWIDTH: int = 256  # Top-K frequencies to retain in FFT compression
 
 # Phase 3: HD Attention Layers
 # Holographic Q·K similarity via FFT correlation (O(d log d) per pair)

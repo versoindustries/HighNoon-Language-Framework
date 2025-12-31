@@ -3485,6 +3485,8 @@ def create_app(debug: bool = False) -> FastAPI:
                 job["gradient_norm"] = log_entry["gradient_norm"]
             if log_entry.get("perplexity") is not None:
                 job["perplexity"] = log_entry["perplexity"]
+            if log_entry.get("mean_confidence") is not None:
+                job["mean_confidence"] = log_entry["mean_confidence"]
             # Track trial number from sweep
             if sweep:
                 job["current_trial"] = sweep.get("completed_trials", 0) + 1
@@ -4499,6 +4501,11 @@ def create_app(debug: bool = False) -> FastAPI:
                             "step": job.get("global_step", 0),
                             "learning_rate": job.get("learning_rate", 0.0),
                             "throughput_samples_sec": job.get("throughput", 0.0),
+                        },
+                        # Quality metrics for CockpitHUD display
+                        "quality": {
+                            "perplexity": job.get("perplexity"),
+                            "mean_confidence": job.get("mean_confidence"),
                         },
                     }
                     await websocket.send_json(telemetry)

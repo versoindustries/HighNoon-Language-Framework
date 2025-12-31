@@ -59,6 +59,11 @@ interface QULSTelemetry {
         learning_rate: number;
         throughput_samples_sec: number;
     };
+    // Quality metrics for CockpitHUD gauges
+    quality?: {
+        perplexity: number | null;
+        mean_confidence: number | null;
+    };
 }
 
 interface CockpitHUDProps {
@@ -197,12 +202,13 @@ export function CockpitHUD({
             completedCount: completedTrials.length,
             totalTrials: sweepStatus?.max_trials ?? 0,
             bestLoss: sweepStatus?.best_loss ?? bestTrial?.loss ?? null,
-            bestPerplexity: sweepStatus?.best_perplexity ?? bestTrial?.perplexity ?? null,
-            bestConfidence: sweepStatus?.best_confidence ?? bestTrial?.mean_confidence ?? null,
+            // Use real-time telemetry quality metrics, fallback to sweep/trial values
+            bestPerplexity: telemetry?.quality?.perplexity ?? sweepStatus?.best_perplexity ?? bestTrial?.perplexity ?? null,
+            bestConfidence: telemetry?.quality?.mean_confidence ?? sweepStatus?.best_confidence ?? bestTrial?.mean_confidence ?? null,
             bestComposite: sweepStatus?.best_composite_score ?? bestTrial?.composite_score ?? null,
             currentTrial: trials.find(t => t.status === 'running'),
         };
-    }, [trials, sweepStatus]);
+    }, [trials, sweepStatus, telemetry]);
 
     // Elapsed time
     const elapsedTime = useMemo(() => {

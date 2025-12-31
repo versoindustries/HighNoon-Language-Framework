@@ -1060,6 +1060,18 @@ class SweepExecutor:
 
         # Run trial subprocess with complete environment
         trial_runner_module = "highnoon.services.hpo_trial_runner"
+
+        # Determine project root for PYTHONPATH and cwd
+        project_root = Path(__file__).parent.parent.parent
+
+        # Build subprocess environment with explicit PYTHONPATH
+        # This ensures benchmarks and other project modules can be imported
+        # even when running as an isolated subprocess
+        existing_pythonpath = __import__("os").environ.get("PYTHONPATH", "")
+        new_pythonpath = str(project_root)
+        if existing_pythonpath:
+            new_pythonpath = f"{project_root}{__import__('os').pathsep}{existing_pythonpath}"
+
         env = {
             **dict(__import__("os").environ.items()),
             "HPO_SWEEP_ID": self.sweep_id,
@@ -1067,10 +1079,8 @@ class SweepExecutor:
             "HPO_TRIAL_DIR": str(trial_dir),  # Explicit trial directory
             "HPO_ROOT": str(self.storage_path),  # HPO artifacts root
             "HPO_API_HOST": "127.0.0.1:8000",
+            "PYTHONPATH": new_pythonpath,  # Ensure project root is importable
         }
-
-        # Determine project root
-        project_root = Path(__file__).parent.parent.parent
 
         process = await asyncio.create_subprocess_exec(
             sys.executable,

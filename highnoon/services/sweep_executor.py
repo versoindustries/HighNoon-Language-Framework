@@ -1195,8 +1195,16 @@ class SweepExecutor:
             f"optimizer={config.get('optimizer')}, max_grad_norm={config.get('max_grad_norm')}"
         )
         print(
-            f"[HPO DEBUG] Model: hidden_dim={config.get('hidden_dim')}, "
-            f"blocks={config.get('num_reasoning_blocks')}, experts={config.get('num_moe_experts')}"
+            f"[HPO DEBUG] Model Architecture: "
+            f"hidden_dim={config.get('hidden_dim')}, "
+            f"embedding_dim={config.get('embedding_dim')}, "
+            f"hd_dim={config.get('hd_dim')}"
+        )
+        print(
+            f"[HPO DEBUG] Model Structure: "
+            f"blocks={config.get('num_reasoning_blocks')}, "
+            f"experts={config.get('num_moe_experts')}, "
+            f"vocab={config.get('target_vocab_size')}"
         )
         print(f"[HPO DEBUG] Loss: {loss}")
         if error:

@@ -204,6 +204,13 @@ class QAHPOConfig:
     fanova_importance_dampen: float = 0.3  # Multiply mutation for unimportant params
     fanova_importance_threshold: float = 0.1  # Below this = unimportant
 
+    # Enhancement: Earlier population evolution (Phase 600)
+    # Evolve population more frequently for faster adaptation
+    evolution_interval: int = 4  # Evolve every N trials (was population_size)
+
+    # Enhancement: Aggressive meta-learning warm-start
+    meta_warm_start_ratio: float = 0.5  # Fill 50% of population with warm-start configs
+
 
 class QuantumAdaptiveHPOScheduler(HPOSchedulerBase):
     """Quantum-Inspired Adaptive HPO Scheduler.
@@ -267,6 +274,11 @@ class QuantumAdaptiveHPOScheduler(HPOSchedulerBase):
         self.trial_history: list[TrialResult] = []
         self._config_history: list[dict[str, Any]] = []  # For surrogate training
         self._used_fingerprints: set[str] = set()  # Global tracking for duplicate prevention
+
+        # Fingerprint collision metrics (Enhancement: observability)
+        self._fingerprint_collisions: int = 0
+        self._fingerprint_retries: int = 0
+        self._total_fingerprint_checks: int = 0
 
         # Convergence detection state
         self._convergence_window: list[float] = []
@@ -375,6 +387,10 @@ class QuantumAdaptiveHPOScheduler(HPOSchedulerBase):
         configuration starts with equal amplitude. Learning rate is
         clamped to optimizer-specific bounds after sampling.
 
+        Enhancement (Phase 600): Aggressive meta-learning warm-start.
+        Uses prior sweep results to seed a portion of the population,
+        giving proven configs a head start.
+
         Budget-aware: Uses spread trial IDs (0, 5, 10, 15...) to ensure
         HPOSearchSpace.sample() produces a range of config sizes from
         the progressive budget logic (10-70% of param_budget).
@@ -382,14 +398,57 @@ class QuantumAdaptiveHPOScheduler(HPOSchedulerBase):
         logger.info("[QAHPO] Initializing population of %d configs", self.config.population_size)
 
         self.population = []
-        for i in range(self.config.population_size):
+        warm_start_configs: list[dict[str, Any]] = []
+
+        # === Enhancement: Meta-learning warm-start ===
+        if self._meta_cache is not None and self._task_hash:
+            warm_start_count = int(self.config.population_size * self.config.meta_warm_start_ratio)
+            warm_start_count = min(warm_start_count, self.config.meta_warm_start_count)
+
+            if warm_start_count > 0:
+                warm_start_configs = self._meta_cache.get_warm_start_configs(
+                    self._task_hash, n_configs=warm_start_count
+                )
+                logger.info(
+                    f"[QAHPO] Meta-learning: loaded {len(warm_start_configs)} warm-start configs "
+                    f"(requested {warm_start_count})"
+                )
+
+        # Fill population with warm-start configs first (with higher amplitude)
+        for i, warm_config in enumerate(warm_start_configs):
+            config = warm_config.copy()
+
+            # Clamp LR to optimizer-specific bounds
+            config = self._clamp_learning_rate(config)
+            config = self._enforce_architecture_constraints(config)
+
+            # Warm-start configs get higher amplitude (proven performers)
+            warm_amplitude = 1.5 / math.sqrt(self.config.population_size)
+            phase = random.uniform(0, 2 * math.pi)
+
+            state = QuantumState(
+                config=config,
+                amplitude=warm_amplitude,
+                phase=phase,
+                generation=0,
+            )
+            self.population.append(state)
+            logger.debug(
+                f"[QAHPO] Population[{i}] from warm-start (amplitude={warm_amplitude:.3f})"
+            )
+
+        # Fill remaining slots with fresh samples
+        remaining = self.config.population_size - len(self.population)
+        for i in range(remaining):
             if self.search_space_sampler:
                 # Use spread trial IDs to get budget-aware configs
                 # Early IDs (0-7 at step 5 = 0,5,10,15,20,25,30,35) → diverse budget targets
                 # This ensures population has a mix of small and medium configs
                 trial_id = i * 5  # Spread across progressive budget tiers
                 config = self.search_space_sampler(trial_id)
-                logger.debug(f"[QAHPO] Population[{i}] sampled with trial_id={trial_id}")
+                logger.debug(
+                    f"[QAHPO] Population[{len(self.population)}] sampled with trial_id={trial_id}"
+                )
             else:
                 config = {}
 
@@ -1101,8 +1160,12 @@ class QuantumAdaptiveHPOScheduler(HPOSchedulerBase):
             if self.total_trials - self._last_fanova_fit >= self.config.fanova_refit_interval:
                 self._refit_fanova()
 
-        # Evolve population periodically
-        if self.total_trials % self.config.population_size == 0:
+        # Evolve population more frequently for faster adaptation (Phase 600 enhancement)
+        evolution_interval = self.config.evolution_interval or self.config.population_size
+        if self.total_trials > 0 and self.total_trials % evolution_interval == 0:
+            logger.info(
+                f"[QAHPO] Evolution triggered at trial {self.total_trials} (interval={evolution_interval})"
+            )
             self._evolve_population()
 
     def report_budget_violation(
@@ -1358,18 +1421,31 @@ class QuantumAdaptiveHPOScheduler(HPOSchedulerBase):
 
             # === FIX: Prevent duplicates globally across all trials ===
             fingerprint = self._config_fingerprint(config)
+            self._total_fingerprint_checks += 1
             retry_count = 0
             max_retries = 5
+            initial_collision = fingerprint in self._used_fingerprints
+            if initial_collision:
+                self._fingerprint_collisions += 1
+
             while fingerprint in self._used_fingerprints and retry_count < max_retries:
                 logger.info(
                     f"[QAHPO] Duplicate detected (attempt {retry_count + 1}), mutating for {trial_id}"
                 )
+                self._fingerprint_retries += 1
                 # Use progressively stronger mutation on each retry
                 config = self._mutate_config(
                     config, self.config.mutation_strength * (1.5 + 0.5 * retry_count)
                 )
                 fingerprint = self._config_fingerprint(config)
                 retry_count += 1
+
+            if retry_count > 0:
+                logger.info(
+                    f"[QAHPO] Fingerprint resolved after {retry_count} retries "
+                    f"(total collisions: {self._fingerprint_collisions}, "
+                    f"total retries: {self._fingerprint_retries})"
+                )
 
             self._used_fingerprints.add(fingerprint)
             config["_trial_id"] = trial_id
@@ -1385,6 +1461,16 @@ class QuantumAdaptiveHPOScheduler(HPOSchedulerBase):
                 stage=1,
             )
             trials.append(trial)
+
+            # Log trial config with explicit dimension info
+            logger.info(
+                f"[QAHPO] Trial {trial_id} config: "
+                f"hidden_dim={config.get('hidden_dim')}, "
+                f"embedding_dim={config.get('embedding_dim')}, "
+                f"hd_dim={config.get('hd_dim')}, "
+                f"blocks={config.get('num_reasoning_blocks')}, "
+                f"experts={config.get('num_moe_experts')}"
+            )
 
             # Update state with trial ID and mark as used
             state.config["_trial_id"] = trial_id
@@ -1585,7 +1671,7 @@ class QuantumAdaptiveHPOScheduler(HPOSchedulerBase):
 
         return {
             "scheduler": "QAHPO",
-            "scheduler_version": "2.0.0",  # Enterprise version
+            "scheduler_version": "2.1.0",  # Enhanced version with diversity fix
             "generation": self.generation,
             "total_trials": self.total_trials,
             "trial_counter": self._trial_counter,
@@ -1600,6 +1686,17 @@ class QuantumAdaptiveHPOScheduler(HPOSchedulerBase):
                 "mutation_strength": self.config.mutation_strength,
                 "crossover_rate": self.config.crossover_rate,
                 "elite_fraction": self.config.elite_fraction,
+                "evolution_interval": self.config.evolution_interval,
+            },
+            # Fingerprint collision metrics (Phase 600 observability)
+            "fingerprint_metrics": {
+                "total_checks": self._total_fingerprint_checks,
+                "collisions": self._fingerprint_collisions,
+                "retries": self._fingerprint_retries,
+                "collision_rate": (
+                    self._fingerprint_collisions / max(1, self._total_fingerprint_checks)
+                ),
+                "unique_fingerprints": len(self._used_fingerprints),
             },
         }
 

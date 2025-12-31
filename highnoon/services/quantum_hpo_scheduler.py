@@ -266,6 +266,7 @@ class QuantumAdaptiveHPOScheduler(HPOSchedulerBase):
         self.best_config: dict[str, Any] | None = None
         self.trial_history: list[TrialResult] = []
         self._config_history: list[dict[str, Any]] = []  # For surrogate training
+        self._used_fingerprints: set[str] = set()  # Global tracking for duplicate prevention
 
         # Convergence detection state
         self._convergence_window: list[float] = []
@@ -1289,14 +1290,44 @@ class QuantumAdaptiveHPOScheduler(HPOSchedulerBase):
             trials.append(trial_data)
         return trials
 
+    def _config_fingerprint(self, config: dict[str, Any]) -> str:
+        """Create fingerprint for architecture-defining parameters.
+
+        Used to detect duplicate configurations within a batch or across trials.
+        The fingerprint captures the key parameters that define model architecture
+        and training behavior.
+
+        Args:
+            config: Configuration dictionary to fingerprint.
+
+        Returns:
+            String fingerprint suitable for set membership testing.
+        """
+        arch_keys = [
+            "num_reasoning_blocks",
+            "num_moe_experts",
+            "embedding_dim",
+            "hidden_dim",
+            "hd_dim",
+            "target_vocab_size",
+            "batch_size",
+            "learning_rate",
+        ]
+        return "|".join(f"{k}={config.get(k)}" for k in sorted(arch_keys) if k in config)
+
     def get_next_trials(self, n_trials: int) -> list[TrialConfig]:
         """Generate next batch of trial configurations.
+
+        Ensures configuration diversity by:
+        1. Applying mutation to configs that have already been run in prior trials
+        2. Detecting and mutating duplicate configs within the same batch
+        3. Tracking which quantum states have been used via trial_count
 
         Args:
             n_trials: Number of trials to generate.
 
         Returns:
-            List of trial configurations.
+            List of trial configurations with guaranteed diversity.
         """
         # Initialize population if needed
         if not self.population:
@@ -1304,13 +1335,43 @@ class QuantumAdaptiveHPOScheduler(HPOSchedulerBase):
 
         trials = []
         selected = self._select_by_amplitude(n_trials)
+        # Use global fingerprint history for cross-sweep duplicate prevention
+        # (self._used_fingerprints persists across get_next_trials() calls)
 
         for state in selected:
             self._trial_counter += 1
             trial_id = f"qahpo_g{self.generation}_t{self._trial_counter}"
 
-            # Store trial ID in config for tracking
+            # Start with a copy of the state's config
             config = state.config.copy()
+
+            # === FIX: Apply mutation if this config was already used in a prior trial ===
+            if state.trial_count > 0:
+                logger.info(
+                    f"[QAHPO] Config reused {state.trial_count}x, applying mutation for {trial_id}"
+                )
+                # Use progressively stronger mutation for heavily reused configs
+                mutation_multiplier = min(1.0 + 0.25 * state.trial_count, 2.0)
+                config = self._mutate_config(
+                    config, self.config.mutation_strength * mutation_multiplier
+                )
+
+            # === FIX: Prevent duplicates globally across all trials ===
+            fingerprint = self._config_fingerprint(config)
+            retry_count = 0
+            max_retries = 5
+            while fingerprint in self._used_fingerprints and retry_count < max_retries:
+                logger.info(
+                    f"[QAHPO] Duplicate detected (attempt {retry_count + 1}), mutating for {trial_id}"
+                )
+                # Use progressively stronger mutation on each retry
+                config = self._mutate_config(
+                    config, self.config.mutation_strength * (1.5 + 0.5 * retry_count)
+                )
+                fingerprint = self._config_fingerprint(config)
+                retry_count += 1
+
+            self._used_fingerprints.add(fingerprint)
             config["_trial_id"] = trial_id
 
             budget = self.get_trial_budget(trial_id)
@@ -1325,8 +1386,9 @@ class QuantumAdaptiveHPOScheduler(HPOSchedulerBase):
             )
             trials.append(trial)
 
-            # Update state with trial ID
+            # Update state with trial ID and mark as used
             state.config["_trial_id"] = trial_id
+            state.trial_count += 1  # Mark this state as having been used
 
         return trials
 

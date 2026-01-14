@@ -294,6 +294,7 @@ SPARSE_ATTENTION_UPPER_BANDS = 64  # Upper bandwidth (tokens to look forward)
 # =============================================================================
 ACTIVE_VOCAB_SIZE = 32000  # Default active vocabulary size (frequently used tokens)
 TOTAL_VOCAB_SIZE = 300000  # Total vocabulary cap (including rare tokens via HD)
+LM_HEAD_ACTIVE_SIZE = 16384  # Phase 33.1: Path A (Dense) slice size for forward pass
 CHUNK_SIZE = 128  # Chunk size for processing
 CHUNK_STRIDE = 64  # Stride between chunks
 EMBEDDING_DIM = 512  # Embedding dimension
@@ -828,7 +829,7 @@ UNIFIED_BUS_BOND_DIM: int = 32  # Base bond dimension (adapted dynamically if ad
 USE_HYPERDIMENSIONAL_EMBEDDING: bool = True  # Enable HQE holographic bundling
 HQE_CTQW_STEPS: int = 3  # CTQW spreading walk steps
 HD_EMBEDDING_DIM: int = 4096  # Hyperdimensional embedding dimension
-HD_EMBEDDING_DIM_MAX: int = 12288  # Maximum HD dimension (Phase 1010: layer-independent tuning)
+HD_EMBEDDING_DIM_MAX: int = 4096  # Maximum HD dimension (capped to prevent L3 cache thrashing)
 HD_ACTIVE_VOCAB_SIZE: int = 10000  # Active vocabulary for DualPathEmbedding
 
 # =============================================================================

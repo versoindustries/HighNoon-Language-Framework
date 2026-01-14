@@ -1985,6 +1985,7 @@ class QuantumLMHead(tf.keras.layers.Layer):
     def __init__(
         self,
         active_vocab_size: int,
+        total_vocab_size: int,
         hidden_dim: int,
         vqc_layers: int = 2,
         vqc_qubits: int = 8,
@@ -1994,16 +1995,35 @@ class QuantumLMHead(tf.keras.layers.Layer):
         """Initialize QuantumLMHead.
 
         Args:
-            active_vocab_size: Active vocabulary size for output.
+            active_vocab_size: Path A slice size for dense forward logits.
+            total_vocab_size: Path B full universe size for sparse loss.
             hidden_dim: Input hidden dimension from model.
             vqc_layers: Number of VQC rotation layers.
             vqc_qubits: Number of virtual qubits.
             use_dense_fallback: Use dense projection for grad stability.
             **kwargs: Additional Keras layer arguments.
         """
+        # Phase 1: Factored Output & Sampled Softmax
+        self.use_factored_output = kwargs.pop(
+            "use_factored_output", getattr(config, "USE_FACTORED_LM_HEAD", True)
+        )
+        self.factored_rank = kwargs.pop(
+            "factored_rank", getattr(config, "LM_HEAD_FACTORIZATION_RANK", 32)
+        )
+        self.num_sampled = kwargs.pop(
+            "num_sampled", getattr(config, "SAMPLED_SOFTMAX_NUM_SAMPLED", 8192)
+        )
+
+        # Phase 2: Chunked Loss (Memory Optimization)
+        self.use_chunked_loss = kwargs.pop(
+            "use_chunked_loss", getattr(config, "USE_CHUNKED_LOSS", True)
+        )
+        self.chunk_size = kwargs.pop("chunk_size", getattr(config, "LM_HEAD_CHUNK_SIZE", 1024))
+
         super().__init__(**kwargs)
 
         self.active_vocab_size = active_vocab_size
+        self.total_vocab_size = total_vocab_size
         self.hidden_dim = hidden_dim
         self.vqc_layers = vqc_layers
         self.vqc_qubits = vqc_qubits
@@ -2012,29 +2032,9 @@ class QuantumLMHead(tf.keras.layers.Layer):
         # VQC intermediate dimension
         self._vqc_dim = 2**vqc_qubits  # 256 for 8 qubits
 
-        # Phase 1: Factored Output & Sampled Softmax
-        self.use_factored_output = kwargs.get(
-            "use_factored_output", getattr(config, "USE_FACTORED_LM_HEAD", True)
-        )
-        self.factored_rank = kwargs.get(
-            "factored_rank", getattr(config, "LM_HEAD_FACTORIZATION_RANK", 32)
-        )
-        self.use_sampled_loss = kwargs.get(
-            "use_sampled_loss", getattr(config, "USE_SAMPLED_SOFTMAX", True)
-        )
-        self.num_sampled = kwargs.get(
-            "num_sampled", getattr(config, "SAMPLED_SOFTMAX_NUM_SAMPLED", 8192)
-        )
-
-        # Ensure num_sampled < active_vocab_size
-        if self.num_sampled >= self.active_vocab_size:
-            self.num_sampled = self.active_vocab_size - 1
-
-        # Phase 2: Chunked Loss (Memory Optimization)
-        self.use_chunked_loss = kwargs.get(
-            "use_chunked_loss", getattr(config, "USE_CHUNKED_LOSS", True)
-        )
-        self.chunk_size = kwargs.get("chunk_size", getattr(config, "LM_HEAD_CHUNK_SIZE", 1024))
+        # Ensure num_sampled < total_vocab_size (since we sample Path B)
+        if self.num_sampled >= self.total_vocab_size:
+            self.num_sampled = self.total_vocab_size - 1
 
     def build(self, input_shape: tf.TensorShape) -> None:
         """Build layer weights."""
@@ -2065,10 +2065,11 @@ class QuantumLMHead(tf.keras.layers.Layer):
         if self.use_factored_output:
             logger.info(
                 f"[QuantumLMHead] Using Factored Output Head (rank={self.factored_rank}). "
-                f"Memory efficient O(1) training enabled."
+                f"Full universe Path B: {self.total_vocab_size} tokens."
             )
+            # Build for total_vocab_size to support full universe loss
             self.output_proj = FactoredVocabEmbedding(
-                vocab_size=self.active_vocab_size,
+                vocab_size=self.total_vocab_size,
                 dim=self._vqc_dim,
                 rank=self.factored_rank,
                 name="output_proj_factored",
@@ -2076,15 +2077,18 @@ class QuantumLMHead(tf.keras.layers.Layer):
             # Explicitly build to create U and V weights needed for compute_logits
             self.output_proj.build((None, self._vqc_dim))
         else:
-            logger.info("[QuantumLMHead] Using Standard Dense Output Head.")
+            logger.info(
+                f"[QuantumLMHead] Using Standard Dense Output Head. Universe: {self.total_vocab_size}"
+            )
             self.output_proj = tf.keras.layers.Dense(
-                self.active_vocab_size,
+                self.total_vocab_size,
                 use_bias=True,
                 name="output_proj",
             )
 
         # Optional dense fallback for stability
         if self.use_dense_fallback:
+            # Fallback only covers Path A for efficiency
             self.dense_fallback = tf.keras.layers.Dense(
                 self.active_vocab_size,
                 use_bias=True,
@@ -2127,14 +2131,30 @@ class QuantumLMHead(tf.keras.layers.Layer):
         # Normalize (should already be normalized, but ensure)
         probs = probs / (tf.reduce_sum(probs, axis=-1, keepdims=True) + 1e-10)
 
-        # Project to vocab size
+        # Project to active vocab size (Path A: Hard-Slice Enforcement)
         if self.use_factored_output:
             # Factored output requires special projection method (reverse of embedding)
             # Ensure dtype compliance (VQC might output float64)
             probs = tf.cast(probs, self.output_proj.dtype)
-            logits = self.output_proj.compute_logits(probs)
+
+            # Phase 33.1: Active-First Slicing
+            # compute_logits normally does: inputs @ V^T @ U^T
+            # We slice U to active_vocab_size BEFORE computing logits to hit 250 GFLOPS target.
+            u_active = self.output_proj.U[: self.active_vocab_size, :]  # [active_V, rank]
+            v_inv = (
+                self.output_proj.V
+            )  # [rank, dim] — FactoredVocabEmbedding stores V as [rank, dim]
+
+            # logits = probs @ V^T @ U_active^T
+            # probs: [B, L, dim], V^T: [dim, rank] -> [B, L, rank]
+            projected = tf.matmul(probs, v_inv, transpose_b=True)
+            # projected: [B, L, rank], U_active^T: [rank, active_V] -> [B, L, active_V]
+            logits = tf.matmul(projected, u_active, transpose_b=True)
         else:
-            logits = self.output_proj(probs)  # [batch, seq, vocab_size]
+            # Dense fallback: Slice the kernel
+            kernel_active = self.output_proj.kernel[:, : self.active_vocab_size]
+            bias_active = self.output_proj.bias[: self.active_vocab_size]
+            logits = tf.matmul(probs, kernel_active) + bias_active
 
         # Blend with dense fallback for gradient stability
         if self.use_dense_fallback:
@@ -2216,18 +2236,19 @@ class QuantumLMHead(tf.keras.layers.Layer):
             inputs_rank = tf.matmul(inputs_flat, self.output_proj.V, transpose_b=True)
 
             # 2. Use U as the weights for sampled softmax
-            # U is [vocab_size, rank]. sampled_softmax expects weights [vocab, dim]
+            # U is [total_vocab_size, rank]. sampled_softmax expects weights [vocab, dim]
             # Here "dim" is "rank".
             loss = tf.nn.sampled_softmax_loss(
                 weights=self.output_proj.U,
-                biases=tf.zeros([self.active_vocab_size]),  # Factored layer has no bias usually
+                # Path B uses the full universe biases if available
+                biases=tf.zeros([self.total_vocab_size]),
                 labels=labels_flat,
                 inputs=inputs_rank,
                 num_sampled=num_sampled,
-                num_classes=self.active_vocab_size,
+                num_classes=self.total_vocab_size,
             )
         else:
-            # Dense Case: Standard sampled softmax
+            # Dense Case: Standard sampled softmax over total_vocab_size
             output_weights = tf.transpose(self.output_proj.kernel)  # [vocab, vqc_dim]
             output_biases = self.output_proj.bias
 
@@ -2237,7 +2258,7 @@ class QuantumLMHead(tf.keras.layers.Layer):
                 labels=labels_flat,
                 inputs=inputs_flat,
                 num_sampled=num_sampled,
-                num_classes=self.active_vocab_size,
+                num_classes=self.total_vocab_size,
             )
 
         return tf.reduce_mean(loss)

@@ -42,8 +42,8 @@ from highnoon.config import (
     REASONING_BLOCK_PATTERN,
     REASONING_LAYERS,
     TOP_K,
+    TOTAL_VOCAB_SIZE,
     USE_QUANTUM_HOLOGRAPHIC_MEMORY,
-    VOCAB_SIZE,
 )
 
 
@@ -239,7 +239,8 @@ class ModelConfig:
     """
 
     # Import defaults from central config for consistency
-    vocab_size: int = VOCAB_SIZE
+    active_vocab_size: int = 32000  # Default active vocab
+    total_vocab_size: int = TOTAL_VOCAB_SIZE
     # CRITICAL: embedding_dim MUST match HD_DIM_MOE for SuperposedExpert C++ ops
     # See enterprise_training_engine_audit.py lines 1018-1025 for validation
     embedding_dim: int = HD_DIM_MOE  # 512 - matches validated audit script config

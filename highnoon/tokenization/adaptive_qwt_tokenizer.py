@@ -54,7 +54,7 @@ class AdaptiveQWTTokenizer(QWTTextTokenizer):
     rather than being limited to ~288 byte tokens.
 
     Attributes:
-        target_vocab_size: The user-configured target vocabulary size.
+        active_vocab_size: The user-configured active vocabulary size.
         codebook_capacity: Maximum n-grams that can be learned.
         merger: SuperwordMerger instance for n-gram learning.
 
@@ -103,7 +103,7 @@ class AdaptiveQWTTokenizer(QWTTextTokenizer):
         )
 
         # Store target configuration
-        self._target_vocab_size = vocab_size
+        self._active_vocab_size = vocab_size
         self._base_vocab_size = base_vocab
         self._codebook_capacity = max(0, vocab_size - base_vocab)
 
@@ -129,7 +129,7 @@ class AdaptiveQWTTokenizer(QWTTextTokenizer):
         logger.info(
             "[AdaptiveQWT] Initialized: base_vocab=%d, target=%d, codebook_capacity=%d%s",
             self._base_vocab_size,
-            self._target_vocab_size,
+            self._active_vocab_size,
             self._codebook_capacity,
             f" (capped at {max_vocab_size})" if max_vocab_size else "",
         )
@@ -146,9 +146,9 @@ class AdaptiveQWTTokenizer(QWTTextTokenizer):
         return self._base_vocab_size
 
     @property
-    def target_vocab_size(self) -> int:
-        """Return the target vocabulary size from config."""
-        return self._target_vocab_size
+    def active_vocab_size(self) -> int:
+        """Return the active vocabulary size from config."""
+        return self._active_vocab_size
 
     @property
     def codebook_capacity(self) -> int:
@@ -200,7 +200,7 @@ class AdaptiveQWTTokenizer(QWTTextTokenizer):
             )
         return True
 
-    def ensure_trained_or_fallback(self, target_vocab_size: int) -> int:
+    def ensure_trained_or_fallback(self, active_vocab_size: int) -> int:
         """Ensure tokenizer is trained or return safe fallback vocab size.
 
         This method MUST be called before building the model to prevent
@@ -208,34 +208,33 @@ class AdaptiveQWTTokenizer(QWTTextTokenizer):
 
         Phase 1.2.3: Gradient Instability Fix - When the tokenizer hasn't been
         trained yet, its vocab_size returns only the base vocab (~362), but
-        QAHPO may have sampled target_vocab_size=15000+. Using untrained vocab
+        QAHPO may have sampled active_vocab_size=15000+. Using untrained vocab
         causes 95%+ dead embeddings and loss stuck at log(vocab_size).
 
         Args:
-            target_vocab_size: The target vocab size from QAHPO sampling.
+            active_vocab_size: The active vocab size from QAHPO sampling.
 
         Returns:
             The actual vocab size to use for model construction:
             - tokenizer.vocab_size if trained (aligned with actual tokens)
-            - target_vocab_size if untrained (prevents dead embeddings)
+            - active_vocab_size if untrained (prevents dead embeddings)
         """
         if self.is_trained:
             actual = self.vocab_size
-            if actual < target_vocab_size * 0.5:
+            if actual < active_vocab_size * 0.5:
                 logger.warning(
-                    f"[Tokenizer] Trained vocab ({actual}) is <50%% of target "
-                    f"({target_vocab_size}). Consider increasing corpus size "
+                    f"[Tokenizer] Learned vocab ({actual}) is much smaller than requested "
+                    f"({active_vocab_size}). Consider increasing corpus size "
                     "or decreasing min_freq threshold for better compression."
                 )
             return actual
 
         # Not trained - use target as fallback to prevent dead embeddings
-        logger.warning(
-            f"[Tokenizer] Not trained, using target_vocab_size={target_vocab_size} "
-            "as fallback. Model will be built with target vocab; ensure tokenizer "
-            "is trained before inference to avoid index-out-of-bounds."
+        logger.info(
+            f"[Tokenizer] Not trained, using active_vocab_size={active_vocab_size} "
+            f"for dimension consistency."
         )
-        return target_vocab_size
+        return active_vocab_size
 
     def learn_from_corpus(
         self,
@@ -267,7 +266,7 @@ class AdaptiveQWTTokenizer(QWTTextTokenizer):
         if self._codebook_capacity <= 0:
             logger.warning(
                 "[AdaptiveQWT] No codebook capacity (vocab_size=%d <= base=%d)",
-                self._target_vocab_size,
+                self._active_vocab_size,
                 self._base_vocab_size,
             )
             return 0
@@ -520,7 +519,7 @@ class AdaptiveQWTTokenizer(QWTTextTokenizer):
         """
         stats = {
             "base_vocab_size": self._base_vocab_size,
-            "target_vocab_size": self._target_vocab_size,
+            "active_vocab_size": self._active_vocab_size,
             "current_vocab_size": self.vocab_size,
             "codebook_capacity": self._codebook_capacity,
             "remaining_capacity": self.codebook_capacity,

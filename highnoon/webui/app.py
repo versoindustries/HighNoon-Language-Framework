@@ -389,14 +389,13 @@ class StartHPORequest(BaseModel):
         ge=1000,
         le=256000,
         deprecated=True,
-        description="DEPRECATED: Use target_vocab_size instead",
     )
-    # Phase 1 Tokenizer Fix: Target vocab for tokenizer learning
-    target_vocab_size: int = Field(
+    # Phase 1 Tokenizer Fix: Active vocab for tokenizer learning
+    active_vocab_size: int = Field(
         default=32000,
         ge=1000,
         le=300000,
-        description="Target vocabulary size for tokenizer learning (model uses actual learned size)",
+        description="Active vocabulary size for tokenizer learning (model uses actual learned size)",
     )
     # Phase 200: Minimum 8K context (industry baseline)
     context_window: int = Field(default=128_000, ge=8_192, le=5_000_000)
@@ -3393,8 +3392,8 @@ def create_app(debug: bool = False) -> FastAPI:
         # Build model config for executor
         model_config = {
             "sweep_id": sweep_id,
-            # Phase 1 Tokenizer Fix: Use target_vocab_size for tokenizer, model derives from it
-            "target_vocab_size": payload.target_vocab_size,
+            # Phase 1 Tokenizer Fix: Use active_vocab_size for tokenizer, model derives from it
+            "active_vocab_size": payload.active_vocab_size,
             # Legacy vocab_size (deprecated) - only pass if explicitly set
             **({"vocab_size": payload.vocab_size} if payload.vocab_size else {}),
             "hidden_dim": payload.embedding_dim or 512,

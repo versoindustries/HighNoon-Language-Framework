@@ -187,3 +187,8 @@ class StreamingHSMN:
         new_position_ids = position_ids + 1
 
         return logits, (new_states_list, new_position_ids)
+
+
+# Aliases for backward compatibility and standardized naming (Phase 13.8)
+StreamingInferenceWrapper = StreamingHSMN
+StreamingState = tuple  # (states_list, position_ids)

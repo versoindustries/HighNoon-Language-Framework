@@ -480,11 +480,10 @@ def estimate_model_params(config: dict[str, Any]) -> int:
     max_seq_len = config.get("max_seq_len") or config.get("context_window") or 4096
 
     # Phase 1 Tokenizer Fix: active_vocab_size is the primary tunable for model size.
-    # It replaces the old 'vocab_size' or 'target_vocab_size' in most contexts.
+    # It replaces the old 'vocab_size' or 'active_vocab_size' in most contexts.
     # The total system vocab (300k) is managed separately but doesn't affect param count.
     active_vocab_size = (
         config.get("active_vocab_size")
-        or config.get("target_vocab_size")
         or config.get("vocab_size")
         or getattr(hn_config, "ACTIVE_VOCAB_SIZE", 32000)
     )
@@ -1553,10 +1552,6 @@ class HPOSearchSpace:
             2048,
             3072,
             4096,
-            6144,
-            8192,
-            10240,
-            12288,
         ]
     )
     hd_dim_spatial: list[int] = field(
@@ -1571,10 +1566,6 @@ class HPOSearchSpace:
             2048,
             3072,
             4096,
-            6144,
-            8192,
-            10240,
-            12288,
         ]
     )
     hd_dim_timecrystal: list[int] = field(
@@ -1589,10 +1580,6 @@ class HPOSearchSpace:
             2048,
             3072,
             4096,
-            6144,
-            8192,
-            10240,
-            12288,
         ]
     )
     hd_dim_moe: list[int] = field(
@@ -1607,10 +1594,6 @@ class HPOSearchSpace:
             2048,
             3072,
             4096,
-            6144,
-            8192,
-            10240,
-            12288,
         ]
     )
     # Vocab sample size for tokenizer learning (lower = less memory)
@@ -2094,12 +2077,12 @@ class HPOSearchSpace:
         Returns:
             Tuple of (max_blocks, max_experts, max_dim) that fit within budget.
         """
-        # CRITICAL: self.target_vocab_size is a list[int] in HPOSearchSpace
+        # CRITICAL: self.active_vocab_size is a list[int] in HPOSearchSpace
         # Use conservative (min) value for budget estimation
         vocab_size = (
-            min(self.target_vocab_size)
-            if isinstance(self.target_vocab_size, list) and self.target_vocab_size
-            else (self.target_vocab_size if isinstance(self.target_vocab_size, int) else 32000)
+            min(self.active_vocab_size)
+            if isinstance(self.active_vocab_size, list) and self.active_vocab_size
+            else (self.active_vocab_size if isinstance(self.active_vocab_size, int) else 32000)
         )
 
         # Start with minimum viable config
@@ -2204,9 +2187,9 @@ class HPOSearchSpace:
                     setattr(instance, key, value)
 
         # Sync model-specific limits/flags for parameter estimation
-        # If target_vocab_size is not in search_space, use default from model_config
-        if not hasattr(instance, "target_vocab_size") or instance.target_vocab_size is None:
-            instance.target_vocab_size = model_config.get("target_vocab_size", [32000])
+        # If active_vocab_size is not in search_space, use default from model_config
+        if not hasattr(instance, "active_vocab_size") or instance.active_vocab_size is None:
+            instance.active_vocab_size = model_config.get("active_vocab_size", [32000])
 
         # Phase 200: Unified to context_window (minimum 8K)
         # Phase 900.1: Default reduced to 4K for HPO exploration - 128K was causing 25GB+ memory
@@ -2344,7 +2327,7 @@ class HPOSearchSpace:
             # Filter hd_dim: embed_params = vocab × hd + hd × dim
             # For budget V, max hd ≈ V / (vocab + dim) with V = embedding_budget
             # Use min vocab for max hd_dim estimation
-            min_vocab = min(self.target_vocab_size) if self.target_vocab_size else 8000
+            min_vocab = min(self.active_vocab_size) if self.active_vocab_size else 8000
             max_hd_for_budget = (
                 embedding_budget // (min_vocab + selected_dim)
                 if (min_vocab + selected_dim) > 0
@@ -2367,8 +2350,8 @@ class HPOSearchSpace:
                 8000, min(max_vocab_for_budget, 300000)
             )  # Clamp to reasonable range
 
-            filtered_vocab = [v for v in self.target_vocab_size if v <= max_vocab_for_budget] or [
-                min(self.target_vocab_size)
+            filtered_vocab = [v for v in self.active_vocab_size if v <= max_vocab_for_budget] or [
+                min(self.active_vocab_size)
             ]
 
             logger.debug(
@@ -2378,7 +2361,7 @@ class HPOSearchSpace:
             )
         else:
             filtered_hd_dim = self.hd_dim if self.hd_dim else [512, 1024]
-            filtered_vocab = self.target_vocab_size if self.target_vocab_size else [32000]
+            filtered_vocab = self.active_vocab_size if self.active_vocab_size else [32000]
 
         # Select optimizer first so we can derive LR range
         selected_optimizer = random.choice(self.optimizer)
@@ -2393,7 +2376,7 @@ class HPOSearchSpace:
         lr_log_max = math.log10(lr_range[1])
         sampled_lr = 10 ** random.uniform(lr_log_min, lr_log_max)
 
-        # Phase 1 Tokenizer Fix: Sample target_vocab_size from FILTERED list
+        # Phase 1 Tokenizer Fix: Sample active_vocab_size from FILTERED list
         # Model vocab_size is derived from tokenizer.vocab_size in trial runner
         sampled_target_vocab = random.choice(filtered_vocab)
 
@@ -2417,7 +2400,7 @@ class HPOSearchSpace:
 
             if sampled_target_vocab > max_vocab:
                 logger.info(
-                    f"[QAHPO] Clamping target_vocab_size: {sampled_target_vocab} → {max_vocab} "
+                    f"[QAHPO] Clamping active_vocab_size: {sampled_target_vocab} → {max_vocab} "
                     f"(budget={self.param_budget / 1e6:.0f}M params, embed_dim={sampled_embedding_dim})"
                 )
                 sampled_target_vocab = max_vocab
@@ -2433,7 +2416,7 @@ class HPOSearchSpace:
         config = {
             # Metadata for internal tracking
             "_trial_id": trial_id,
-            "target_vocab_size": sampled_target_vocab,
+            "active_vocab_size": sampled_target_vocab,
             "param_budget": self.param_budget,
             # Training hyperparameters (LR auto-derived from optimizer)
             "learning_rate": sampled_lr,
@@ -2775,7 +2758,7 @@ class HPOSearchSpace:
             "hd_kalman_state_compression": random.choice(self.hd_kalman_state_compression),
             "hd_projection_freeze_epochs": random.choice(self.hd_projection_freeze_epochs),
             "hqe_ctqw_steps": random.choice(self.hqe_ctqw_steps),
-            # Phase 500.1: Filter hd_active_vocab_size <= target_vocab_size at sample time
+            # Phase 500.1: Filter hd_active_vocab_size <= active_vocab_size at sample time
             # This ensures active vocab (dense embeddings) never exceeds total vocab
             "hd_active_vocab_size": random.choice(
                 [v for v in self.hd_active_vocab_size if v <= sampled_target_vocab]
@@ -2831,7 +2814,7 @@ class HPOSearchSpace:
         }
 
         # Add user-set tokenizer/context config if provided
-        # Note: target_vocab_size is sampled above; model vocab derived from tokenizer
+        # Note: active_vocab_size is sampled above; model vocab derived from tokenizer
         if self.context_window is not None:
             config["context_window"] = self.context_window
         if self.position_embedding is not None:
@@ -3163,12 +3146,12 @@ class HPOSearchSpace:
         # 5. VOCAB SIZE CONSTRAINTS (Phase 500.1)
         # ===================================================================
 
-        # hd_active_vocab_size ≤ target_vocab_size
+        # hd_active_vocab_size ≤ active_vocab_size
         # Active vocab is the set of tokens using dense embeddings; remaining tokens
         # use character-level HD encoding. Cannot exceed total vocabulary.
-        if "hd_active_vocab_size" in config and "target_vocab_size" in config:
-            if config["hd_active_vocab_size"] > config["target_vocab_size"]:
-                max_active = config["target_vocab_size"]
+        if "hd_active_vocab_size" in config and "active_vocab_size" in config:
+            if config["hd_active_vocab_size"] > config["active_vocab_size"]:
+                max_active = config["active_vocab_size"]
                 valid = [v for v in self.hd_active_vocab_size if v <= max_active]
                 original = config["hd_active_vocab_size"]
                 # Use largest valid size, or 10% of target if none available
@@ -3177,7 +3160,7 @@ class HPOSearchSpace:
                 )
                 logger.info(
                     f"[Constraint] hd_active_vocab_size {original} -> "
-                    f"{config['hd_active_vocab_size']} (≤ target_vocab_size={max_active})"
+                    f"{config['hd_active_vocab_size']} (≤ active_vocab_size={max_active})"
                 )
 
         return config

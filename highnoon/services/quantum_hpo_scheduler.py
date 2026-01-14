@@ -1930,7 +1930,7 @@ class QuantumAdaptiveHPOScheduler(HPOSchedulerBase):
             "embedding_dim",
             "hidden_dim",
             "hd_dim",
-            "target_vocab_size",
+            "active_vocab_size",
             "batch_size",
             "learning_rate",
         ]

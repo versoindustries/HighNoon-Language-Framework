@@ -199,7 +199,7 @@ def run_qsg_generation_throughput(
     prompt_lengths = prompt_lengths or [64, 128, 256, 512]
     generate_tokens = generate_tokens or harness.config.throughput.generation_tokens
     model = harness.get_model()
-    vocab_size = harness.config.model.vocab_size
+    vocab_size = harness.config.model.total_vocab_size
 
     results = []
     logger.info(f"Running QSG generation throughput: {len(prompt_lengths)} configurations")

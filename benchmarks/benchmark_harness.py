@@ -242,7 +242,8 @@ class BenchmarkHarness:
             # Build model using validated construction path
             self._model = build_hsmn_model(
                 trial_config,
-                vocab_size=model_config.vocab_size,
+                active_vocab_size=model_config.active_vocab_size,
+                total_vocab_size=model_config.total_vocab_size,
                 hidden_dim_override=model_config.embedding_dim,
                 hd_dim_embedding=model_config.hd_dim_embedding,
                 hd_dim_spatial=model_config.hd_dim_spatial,
@@ -276,7 +277,7 @@ class BenchmarkHarness:
         Returns:
             Random integer tensor of shape [batch_size, seq_length].
         """
-        vocab_size = vocab_size or self.config.model.vocab_size
+        vocab_size = vocab_size or self.config.model.total_vocab_size
         return tf.random.uniform(
             [batch_size, seq_length],
             minval=0,
@@ -563,7 +564,7 @@ class BenchmarkHarness:
         wrapper.reset()
 
         # Create input chunks
-        vocab_size = self.config.model.vocab_size
+        vocab_size = self.config.model.total_vocab_size
 
         # Warmup
         for _ in range(warmup_chunks):
@@ -619,7 +620,7 @@ class BenchmarkHarness:
         bridge = self.get_native_ops_bridge()
         optimizer = tf.keras.optimizers.Adam(learning_rate=1e-4)
 
-        vocab_size = self.config.model.vocab_size
+        vocab_size = self.config.model.total_vocab_size
 
         # Warmup
         for _ in range(warmup):
@@ -671,7 +672,7 @@ class BenchmarkHarness:
             Input tensor chunks of shape [1, chunk_size].
         """
         chunk_size = chunk_size or self.config.benchmark_mode.streaming_chunk_size
-        vocab_size = self.config.model.vocab_size
+        vocab_size = self.config.model.total_vocab_size
 
         num_chunks = (total_length + chunk_size - 1) // chunk_size
 

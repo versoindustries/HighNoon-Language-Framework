@@ -37,6 +37,7 @@ from highnoon.config import (
     HD_ACTIVE_VOCAB_SIZE,
     HD_EMBEDDING_DIM,
     HQE_CTQW_STEPS,
+    LM_HEAD_ACTIVE_SIZE,
     MAMBA2_CONV_DIM,
     MAMBA2_STATE_DIM,
     NUM_EXPERTS,
@@ -100,7 +101,7 @@ class HSMN(tf.keras.Model):
 
     def __init__(
         self,
-        active_vocab_size: int = ACTIVE_VOCAB_SIZE,
+        active_vocab_size: int = LM_HEAD_ACTIVE_SIZE,
         total_vocab_size: int = TOTAL_VOCAB_SIZE,
         embedding_dim: int = EMBEDDING_DIM,
         max_seq_length: int = 4096,
@@ -256,6 +257,7 @@ class HSMN(tf.keras.Model):
 
                 self.lm_head = QuantumLMHead(
                     active_vocab_size=active_vocab_size,
+                    total_vocab_size=total_vocab_size,
                     hidden_dim=embedding_dim,
                     vqc_layers=QUANTUM_LM_HEAD_LAYERS,
                     name="lm_head_quantum",

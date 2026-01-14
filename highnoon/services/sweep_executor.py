@@ -1244,7 +1244,7 @@ class SweepExecutor:
             f"[HPO DEBUG] Model Structure: "
             f"blocks={config.get('num_reasoning_blocks')}, "
             f"experts={config.get('num_moe_experts')}, "
-            f"vocab={config.get('target_vocab_size')}"
+            f"vocab={config.get('active_vocab_size')}"
         )
         print(f"[HPO DEBUG] Loss: {loss}")
         if error:

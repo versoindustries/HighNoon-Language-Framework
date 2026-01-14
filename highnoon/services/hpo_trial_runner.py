@@ -1764,10 +1764,7 @@ def train_trial(
     # Phase 900.1: Default reduced to 4K for HPO exploration (128K was causing 25GB+ memory)
     # Users should explicitly set context_window in sweep config for larger contexts
     context_window = trial_config.get("context_window") or trial_config.get("sequence_length", 4096)
-    # Phase 1: active_vocab_size replaces target_vocab_size
-    active_vocab_target = trial_config.get("active_vocab_size") or trial_config.get(
-        "target_vocab_size", 32000
-    )
+    active_vocab_target = trial_config.get("active_vocab_size", 32000)
     total_vocab_size = trial_config.get("total_vocab_size", hn_config.TOTAL_VOCAB_SIZE)
     hidden_dim = trial_config.get("hidden_dim") or 256  # Default if None or missing
 
@@ -1888,7 +1885,7 @@ def train_trial(
 
         # Task 1.2.1: Enhanced vocab derivation with untrained tokenizer handling
         # When tokenizer isn't trained, vocab_size returns only base vocab (~362)
-        # but QAHPO may have sampled target_vocab_size=15000+. Using untrained
+        # but QAHPO may have sampled active_vocab_size=15000+. Using untrained
         # vocab causes 95%+ dead embeddings and loss stuck at log(vocab_size).
         if hasattr(tokenizer, "ensure_trained_or_fallback"):
             # Use the new safety method that handles untrained tokenizers

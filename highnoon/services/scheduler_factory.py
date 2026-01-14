@@ -106,7 +106,7 @@ def create_scheduler(
     # This follows the design principle documented in HPOSearchSpace (lines 369-377).
     #
     # PHASE1 Tokenizer Fix: vocab_size is no longer passed here. HPOSearchSpace tunes
-    # target_vocab_size (how large the tokenizer should learn), and model vocab_size
+    # active_vocab_size (how large the tokenizer should learn), and model vocab_size
     # is derived from tokenizer.vocab_size after corpus learning. This ensures zero
     # dead embeddings and proper vocabulary alignment.
     hpo_search_space = HPOSearchSpace(

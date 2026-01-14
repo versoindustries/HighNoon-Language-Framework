@@ -93,7 +93,7 @@ def qmamba_selective_scan(
     """
     if _ops is None:
         raise RuntimeError(
-            "QMamba C++ operators not available. " "Rebuild with: ./build_secure.sh --debug --lite"
+            "QMamba C++ operators not available. Rebuild with: ./build_secure.sh --debug --lite"
         )
 
     return _ops.qmamba_selective_scan(
@@ -134,7 +134,7 @@ def qmamba_entangle(
     """
     if _ops is None:
         raise RuntimeError(
-            "QMamba C++ operators not available. " "Rebuild with: ./build_secure.sh --debug --lite"
+            "QMamba C++ operators not available. Rebuild with: ./build_secure.sh --debug --lite"
         )
 
     return _ops.qmamba_entangle(
@@ -174,7 +174,7 @@ def qmamba_collapse(
     """
     if _ops is None:
         raise RuntimeError(
-            "QMamba C++ operators not available. " "Rebuild with: ./build_secure.sh --debug --lite"
+            "QMamba C++ operators not available. Rebuild with: ./build_secure.sh --debug --lite"
         )
 
     return _ops.qmamba_collapse(

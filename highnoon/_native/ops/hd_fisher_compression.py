@@ -29,7 +29,6 @@ Example:
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 import tensorflow as tf
 
@@ -181,8 +180,9 @@ def _hd_fisher_compress_tf(
 
         # Holographic bind via FFT circular convolution
         # bind(a, b) = IFFT(FFT(a) * FFT(b))
-        scaled_complex = tf.cast(scaled_vec, tf.complex64)
-        key_complex = tf.cast(key, tf.complex64)
+        # Phase 1.5: Use complex128 for quantum precision per GRADIENT_CONNECTIVITY_ROADMAP
+        scaled_complex = tf.cast(scaled_vec, tf.complex128)
+        key_complex = tf.cast(key, tf.complex128)
 
         scaled_freq = tf.signal.fft(scaled_complex)
         key_freq = tf.signal.fft(key_complex)
@@ -190,8 +190,8 @@ def _hd_fisher_compress_tf(
         # Element-wise multiplication in frequency domain
         bound_freq = scaled_freq * tf.expand_dims(key_freq, 0)
 
-        # Inverse FFT
-        bound = tf.math.real(tf.signal.ifft(bound_freq))
+        # Inverse FFT, cast back to float32 for downstream compatibility
+        bound = tf.cast(tf.math.real(tf.signal.ifft(bound_freq)), tf.float32)
 
         # Accumulate into bundle
         bundle = bundle + bound

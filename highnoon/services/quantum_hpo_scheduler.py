@@ -101,6 +101,76 @@ try:
 except ImportError:
     FANOVA_AVAILABLE = False
 
+# =============================================================================
+# ENTERPRISE HPO ENHANCEMENTS (Phase 1 & 4)
+# =============================================================================
+try:
+    from highnoon.services.hpo_surrogate_gp import (
+        GPYTORCH_AVAILABLE,
+        AcquisitionPortfolio,
+        DeepKernelGPConfig,
+        DeepKernelGPSurrogate,
+    )
+
+    DEEP_KERNEL_GP_AVAILABLE = True
+except ImportError:
+    DEEP_KERNEL_GP_AVAILABLE = False
+    GPYTORCH_AVAILABLE = False
+
+try:
+    from highnoon.services.hpo_shapley import SHAP_AVAILABLE, ShapleyImportanceAnalyzer
+
+    SHAPLEY_AVAILABLE = True
+except ImportError:
+    SHAPLEY_AVAILABLE = False
+    SHAP_AVAILABLE = False
+
+# =============================================================================
+# ENTERPRISE HPO ENHANCEMENTS (Phases 2, 3, 5, 6, 7)
+# =============================================================================
+try:
+    from highnoon.services.hpo_nas import DARTSSearcher, EarlyStoppingPredictor, ZeroCostProxy
+
+    NAS_AVAILABLE = True
+except ImportError:
+    NAS_AVAILABLE = False
+
+try:
+    from highnoon.services.hpo_asha import ASHAScheduler, FreezeThawBO, MOBSTERScheduler
+
+    ASHA_AVAILABLE = True
+except ImportError:
+    ASHA_AVAILABLE = False
+
+try:
+    from highnoon.services.hpo_pbt import MultiObjectivePBT, PBTBacktrackScheduler
+
+    PBT_ADVANCED_AVAILABLE = True
+except ImportError:
+    PBT_ADVANCED_AVAILABLE = False
+
+try:
+    from highnoon.services.hpo_fanova_advanced import (
+        CausalImportanceAnalyzer,
+        GraphfANOVA,
+        StreamingfANOVA,
+    )
+
+    FANOVA_ADVANCED_AVAILABLE = True
+except ImportError:
+    FANOVA_ADVANCED_AVAILABLE = False
+
+try:
+    from highnoon.services.hpo_theoretical import (
+        HPOExperimentFramework,
+        InformationGainAcquisition,
+        RegretTracker,
+    )
+
+    THEORETICAL_HPO_AVAILABLE = True
+except ImportError:
+    THEORETICAL_HPO_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -196,13 +266,39 @@ class QAHPOConfig:
     meta_warm_start_count: int = 4
 
     # fANOVA: Importance-guided mutation
-    # Phase 500: Aggressive settings for faster layer importance learning
+    # Phase 600+: Tuned for QHDSpatial/QHDHierarchical scaling
+    # QHD has fewer high-importance params (qhd_num_paths dominant)
     enable_fanova_guidance: bool = True
-    fanova_refit_interval: int = 5  # Refit importance every N trials (was 10)
-    fanova_min_trials: int = 5  # Min trials before using importance (was 10)
-    fanova_importance_boost: float = 3.0  # Multiply mutation for important params (was 2.0)
-    fanova_importance_dampen: float = 0.3  # Multiply mutation for unimportant params
-    fanova_importance_threshold: float = 0.1  # Below this = unimportant
+    fanova_refit_interval: int = 5  # Refit importance every N trials
+    fanova_min_trials: int = 5  # Min trials before using importance
+    fanova_importance_boost: float = 2.5  # Mutation boost for important params (was 3.0)
+    fanova_importance_dampen: float = 0.4  # Mutation dampen for unimportant (was 0.3)
+    fanova_importance_threshold: float = 0.05  # Lower threshold for QHD (was 0.1)
+
+    # =========================================================================
+    # Phase 600: Enhanced fANOVA Integration
+    # =========================================================================
+    # Boost mutation for parameters with significant interactions
+    enable_interaction_boost: bool = True
+    interaction_boost_factor: float = 1.5  # Additional boost for interacting params
+    # Use marginal curves to guide sampling toward optimal regions
+    enable_marginal_guidance: bool = True
+    marginal_guidance_weight: float = 0.4  # Blend weight (0=ignore, 1=full bias)
+    # Bootstrap importance estimation for early trials (before fanova_min_trials)
+    enable_bootstrap_importance: bool = True
+    bootstrap_min_trials: int = 3  # Min trials for bootstrap estimation
+
+    # =========================================================================
+    # Phase 600: DEHB-Inspired Subpopulation Tracking
+    # =========================================================================
+    # Track separate subpopulations per fidelity level
+    enable_fidelity_subpopulations: bool = True
+    # Fidelity levels as fractions of max budget
+    fidelity_levels: tuple[float, ...] = (0.25, 0.50, 0.75, 1.0)
+    # Rate at which mutations incorporate winners from lower fidelity
+    cross_fidelity_transfer_rate: float = 0.3
+    # Max configs to track per fidelity level
+    max_configs_per_fidelity: int = 16
 
     # Enhancement: Earlier population evolution (Phase 600)
     # Evolve population more frequently for faster adaptation
@@ -210,6 +306,120 @@ class QAHPOConfig:
 
     # Enhancement: Aggressive meta-learning warm-start
     meta_warm_start_ratio: float = 0.5  # Fill 50% of population with warm-start configs
+
+    # =========================================================================
+    # Phase 700: Adaptive Meta-Tuning
+    # These parameters control how QAHPO adapts its own behavior based on trial
+    # signals (convergence rate, stagnation, etc.)
+    # =========================================================================
+    enable_adaptive_meta_tuning: bool = True  # Enable self-adaptation
+
+    # Adaptation bounds (min, max) for each meta-parameter
+    # Widened for full exploration across small to frontier models
+    adaptive_mutation_range: tuple[float, float] = (0.1, 0.8)  # Was 0.6
+    adaptive_tunneling_range: tuple[float, float] = (0.05, 0.5)  # Was 0.4
+    adaptive_crossover_range: tuple[float, float] = (0.2, 0.8)  # Was 0.6
+    adaptive_evolution_interval_range: tuple[int, int] = (2, 15)  # Was 10
+    adaptive_population_size_range: tuple[int, int] = (6, 32)  # Was 26
+
+    # Adaptation triggers
+    stagnation_trials_threshold: int = 5  # Trials without improvement to trigger boost
+    fast_convergence_threshold: float = 0.1  # Loss improvement ratio for speedup
+
+    # =========================================================================
+    # ENTERPRISE PHASE 1: Deep Kernel GP Surrogate
+    # =========================================================================
+    # Enable GP-based surrogate with neural network feature extraction
+    enable_deep_kernel_gp: bool = True
+    # Use Deep Kernel GP instead of TPE when available
+    prefer_gp_over_tpe: bool = False  # Default: use TPE, GP is optional
+    # GP configuration
+    gp_hidden_dims: tuple[int, ...] = (64, 32)  # Feature extractor architecture
+    gp_n_epochs: int = 50  # Training epochs for GP fitting
+    gp_min_observations: int = 15  # Min observations before fitting GP
+
+    # =========================================================================
+    # ENTERPRISE PHASE 1: Acquisition Portfolio (EXP3)
+    # =========================================================================
+    # Enable ensemble acquisition function selection
+    enable_acquisition_portfolio: bool = True
+    # Acquisition functions in portfolio
+    portfolio_acquisitions: tuple[str, ...] = ("ei", "ucb", "pi")
+    # EXP3 learning rate for portfolio updates
+    portfolio_eta: float = 0.1
+    # Exploration probability
+    portfolio_gamma: float = 0.1
+
+    # =========================================================================
+    # ENTERPRISE PHASE 4: Shapley Importance Analysis
+    # =========================================================================
+    # Enable Shapley-value importance (alternative to fANOVA)
+    enable_shapley_importance: bool = True
+    # Number of Monte Carlo samples for Shapley estimation
+    shapley_n_samples: int = 500
+    # Blend weight: 0 = pure fANOVA, 1 = pure Shapley, 0.5 = average
+    shapley_blend_weight: float = 0.3  # Use fANOVA primarily, Shapley as supplement
+
+    # =========================================================================
+    # ENTERPRISE PHASE 2: Neural Architecture Search (NAS)
+    # =========================================================================
+    enable_nas_features: bool = True
+    # Enable DARTS for architecture search
+    enable_darts: bool = False  # Disabled by default (heavyweight)
+    # Enable zero-cost proxy pre-filtering
+    enable_zero_cost_proxy: bool = True
+    # Proxies to use: naswot, gradnorm, synflow
+    zero_cost_proxies: tuple[str, ...] = ("naswot", "synflow")
+    # Enable early stopping predictor
+    enable_early_stopping_predictor: bool = True
+    # Minimum curve points before prediction
+    early_stopping_min_points: int = 5
+
+    # =========================================================================
+    # ENTERPRISE PHASE 3: Advanced Multi-Fidelity Scheduling
+    # =========================================================================
+    # Scheduler type: hyperband, asha, mobster, freeze_thaw
+    multi_fidelity_scheduler: str = "hyperband"  # Default existing
+    # Enable ASHA async scheduling (requires Ray or async execution)
+    enable_asha: bool = False  # Disabled until Ray available
+    # Enable MOBSTER (Model-Based ASHA)
+    enable_mobster: bool = False
+    # ASHA grace period (min epochs before stopping)
+    asha_grace_period: int = 5
+    # ASHA reduction factor
+    asha_reduction_factor: int = 3
+
+    # =========================================================================
+    # ENTERPRISE PHASE 4: Advanced fANOVA
+    # =========================================================================
+    # fANOVA analyzer type: standard, graph, causal, streaming
+    fanova_analyzer_type: str = "standard"  # Default to existing
+    # Enable streaming fANOVA for O(1) updates
+    enable_streaming_fanova: bool = True
+    # Streaming window size (0 = unbounded)
+    streaming_fanova_window: int = 0
+
+    # =========================================================================
+    # ENTERPRISE PHASE 5: Advanced PBT
+    # =========================================================================
+    # Enable PBT with backtracking
+    enable_pbt_backtrack: bool = True
+    # Maximum checkpoint tree depth
+    pbt_max_tree_depth: int = 50
+    # Enable multi-objective PBT (Pareto optimization)
+    enable_multi_objective_pbt: bool = False
+    # Multi-objective names (if enabled)
+    pbt_objectives: tuple[str, ...] = ("loss",)
+
+    # =========================================================================
+    # ENTERPRISE PHASE 7: Theoretical Foundations
+    # =========================================================================
+    # Enable regret tracking
+    enable_regret_tracking: bool = True
+    # Enable information-gain acquisition (MES, GIBBON)
+    enable_information_gain_acquisition: bool = False  # Heavyweight
+    # Enable A/B testing framework for strategy comparison
+    enable_hpo_experiment_framework: bool = False
 
 
 class QuantumAdaptiveHPOScheduler(HPOSchedulerBase):
@@ -342,6 +552,38 @@ class QuantumAdaptiveHPOScheduler(HPOSchedulerBase):
         self._importance_scores: dict[str, float] = {}  # param_name -> importance
         self._last_fanova_fit: int = 0  # Trial count at last refit
 
+        # Phase 600+: QHD-Specific Prior Importance for Bootstrap
+        # Used before faNOVA has enough data (< fanova_min_trials)
+        # Reflects QHDSpatial/QHDHierarchical compute scaling
+        self._qhd_prior_importance: dict[str, float] = {
+            # === Primary Compute Drivers (linear multipliers) ===
+            "qhd_num_paths": 0.20,  # K× most critical
+            "num_reasoning_blocks": 0.15,  # Depth multiplier
+            # === Phase 1010: Per-Layer HD Dimensions ===
+            "hd_dim_embedding": 0.10,  # Vocabulary encoding capacity
+            "hd_dim_spatial": 0.08,  # FFT SSM dimension
+            "hd_dim_timecrystal": 0.05,  # Floquet modes × D
+            "hd_dim_moe": 0.03,  # Routing similarity (smallest)
+            "hd_dim": 0.02,  # DEPRECATED: Global fallback
+            # === Secondary (linear but cheaper) ===
+            "hd_hierarchical_levels": 0.08,
+            "hidden_dim": 0.06,
+            "embedding_dim": 0.05,
+            "mamba_state_dim": 0.03,
+            # === Sparse/Shared Activation ===
+            "num_moe_experts": 0.04,
+            "superposition_dim": 0.03,  # MoE sparse
+            # === Regularization/Training ===
+            "learning_rate": 0.03,
+            "weight_decay": 0.02,
+            "qhd_entanglement_depth": 0.02,  # VQC layers
+        }
+
+        # Initialize importance with priors for bootstrap (before faNOVA fits)
+        if self.config.enable_bootstrap_importance:
+            self._importance_scores = self._qhd_prior_importance.copy()
+            logger.info("[QAHPO] Initialized with QHD prior importance (bootstrap)")
+
         if self.config.enable_fanova_guidance and FANOVA_AVAILABLE:
             self._fanova = HyperparameterImportanceAnalyzer(
                 n_trees=50,  # Lighter than visualization (faster)
@@ -349,9 +591,23 @@ class QuantumAdaptiveHPOScheduler(HPOSchedulerBase):
             )
             logger.info("[QAHPO] fANOVA importance-guided mutation enabled")
 
+        # ====================================================================
+        # ENHANCEMENT 6: Phase 600 - DEHB Fidelity Subpopulations
+        # ====================================================================
+        self._fidelity_populations: dict[float, list[QuantumState]] = {}
+        self._interaction_importance: dict[tuple[str, str], float] = {}  # (p1, p2) -> importance
+
+        if self.config.enable_fidelity_subpopulations:
+            for fidelity in self.config.fidelity_levels:
+                self._fidelity_populations[fidelity] = []
+            logger.info(
+                "[QAHPO] DEHB fidelity subpopulations enabled: %s",
+                self.config.fidelity_levels,
+            )
+
         logger.info(
             "[QAHPO] Initialized with population_size=%d, T=[%.2f, %.2f], "
-            "mutation=%s, multi_fidelity=%s, tpe=%s, meta=%s, fanova=%s",
+            "mutation=%s, multi_fidelity=%s, tpe=%s, meta=%s, fanova=%s, dehb_subpop=%s",
             self.config.population_size,
             self.config.initial_temperature,
             self.config.final_temperature,
@@ -360,6 +616,7 @@ class QuantumAdaptiveHPOScheduler(HPOSchedulerBase):
             self.config.enable_tpe_surrogate,
             self.config.enable_meta_learning,
             self.config.enable_fanova_guidance,
+            self.config.enable_fidelity_subpopulations,
         )
 
     def _get_temperature(self) -> float:
@@ -563,6 +820,9 @@ class QuantumAdaptiveHPOScheduler(HPOSchedulerBase):
         for sensitive optimizers like SympFlowQNG which are prone to gradient
         explosions at high learning rates.
 
+        Phase 3.2.1 Enhancement: Added hard cap for SympFlowQNG and barren
+        plateau scale awareness to prevent LR explosion during recovery.
+
         Args:
             config: Configuration dictionary (may contain optimizer and learning_rate).
 
@@ -575,6 +835,27 @@ class QuantumAdaptiveHPOScheduler(HPOSchedulerBase):
         optimizer = config.get("optimizer", "").lower()
         lr_min, lr_max = OPTIMIZER_LR_RANGES.get(optimizer, DEFAULT_LR_RANGE)
         original_lr = config["learning_rate"]
+
+        # Phase 3.2.1: SympFlowQNG-specific hard cap (symplectic integrator sensitivity)
+        # SympFlowQNGOptimizer.max_safe_lr defines stability threshold
+        SYMPFLOWQNG_HARD_CAP = 1e-3
+        if optimizer == "sympflowqng":
+            lr_max = min(lr_max, SYMPFLOWQNG_HARD_CAP)
+
+            # Also account for barren plateau LR scale if present
+            # The UnifiedSmartTuner may boost LR during plateau recovery
+            barren_scale = config.get("barren_plateau_lr_scale", 1.0)
+            if barren_scale > 1.0:
+                # Reduce max_lr by the scale factor to keep effective LR bounded
+                # effective_lr = lr * barren_scale, so lr_max = cap / barren_scale
+                effective_max = SYMPFLOWQNG_HARD_CAP / barren_scale
+                lr_max = min(lr_max, effective_max)
+                logger.debug(
+                    "[QAHPO] SympFlowQNG with barren_scale=%.1f: lr_max reduced to %.2e",
+                    barren_scale,
+                    lr_max,
+                )
+
         clamped_lr = max(lr_min, min(lr_max, original_lr))
 
         if clamped_lr != original_lr:
@@ -671,11 +952,13 @@ class QuantumAdaptiveHPOScheduler(HPOSchedulerBase):
         return mutated
 
     def _gaussian_mutation(self, config: dict[str, Any], strength: float) -> dict[str, Any]:
-        """Apply Gaussian perturbation mutation with importance weighting.
+        """Apply Gaussian perturbation mutation with importance and interaction weighting.
 
+        Phase 600 Enhancement: Includes interaction-aware mutation boost.
         When fANOVA importance is available, mutation strength is scaled:
         - Important params (>threshold): boost mutation for more exploration
         - Unimportant params (<threshold): dampen mutation, less exploration
+        - Parameters with significant interactions: additional boost
 
         Args:
             config: Configuration to mutate.
@@ -689,6 +972,14 @@ class QuantumAdaptiveHPOScheduler(HPOSchedulerBase):
 
         # Scale mutation by temperature (more exploration when hot)
         base_strength = strength * (0.5 + 0.5 * temperature / self.config.initial_temperature)
+
+        # Build set of params with significant interactions for fast lookup
+        interacting_params: set[str] = set()
+        if self.config.enable_interaction_boost and self._interaction_importance:
+            for (p1, p2), imp in self._interaction_importance.items():
+                if imp > 0.01:  # Significant interaction threshold
+                    interacting_params.add(p1)
+                    interacting_params.add(p2)
 
         for key, value in config.items():
             if key.startswith("_"):
@@ -707,15 +998,150 @@ class QuantumAdaptiveHPOScheduler(HPOSchedulerBase):
                             # Unimportant param: explore less
                             param_strength *= self.config.fanova_importance_dampen
 
+                    # === Phase 600: Interaction Boost ===
+                    if self.config.enable_interaction_boost and key in interacting_params:
+                        param_strength *= self.config.interaction_boost_factor
+
                     if isinstance(value, float):
                         noise = random.gauss(0, param_strength * abs(value) + 1e-8)
                         mutated[key] = max(1e-8, value + noise)
                     else:
-                        # Integer: sometimes bump up or down
-                        delta = random.choice([-1, 0, 0, 1])
+                        # Integer: scale mutation by param_strength
+                        if param_strength > 0.5:
+                            # Stronger mutation for important/interacting int params
+                            delta = random.choice([-2, -1, 0, 1, 2])
+                        else:
+                            delta = random.choice([-1, 0, 0, 1])
                         mutated[key] = max(1, value + delta)
 
+        # === Phase 600: Cross-Fidelity Transfer ===
+        if self.config.enable_fidelity_subpopulations:
+            mutated = self._apply_cross_fidelity_transfer(mutated)
+
         return mutated
+
+    def _apply_cross_fidelity_transfer(self, config: dict[str, Any]) -> dict[str, Any]:
+        """Blend configuration with winning configs from lower fidelity levels.
+
+        DEHB-inspired enhancement: Uses information from low-fidelity trials
+        to guide high-fidelity exploration.
+
+        Args:
+            config: Base configuration to potentially modify.
+
+        Returns:
+            Configuration with cross-fidelity influence applied.
+        """
+        if not self._fidelity_populations:
+            return config
+
+        if random.random() > self.config.cross_fidelity_transfer_rate:
+            return config  # Skip transfer this time
+
+        # Find populated lower fidelity levels with results
+        populated_levels = [
+            level
+            for level, pop in self._fidelity_populations.items()
+            if pop and level < 1.0  # Only consider lower than full fidelity
+        ]
+
+        if not populated_levels:
+            return config
+
+        # Select random lower fidelity level
+        source_level = random.choice(populated_levels)
+        source_pop = self._fidelity_populations[source_level]
+
+        # Find best config from that level
+        best_state = min(source_pop, key=lambda s: s.loss)
+
+        # Blend: bias current config toward best from lower fidelity
+        blended = config.copy()
+        blend_weight = 0.3  # Light influence from lower fidelity
+
+        for key, val in best_state.config.items():
+            if key.startswith("_"):
+                continue
+            if key in blended and isinstance(val, (int, float)) and not isinstance(val, bool):
+                current_val = blended[key]
+                if isinstance(val, float):
+                    blended[key] = (1 - blend_weight) * current_val + blend_weight * val
+                elif isinstance(val, int):
+                    blended[key] = int(round((1 - blend_weight) * current_val + blend_weight * val))
+
+        logger.debug(
+            "[QAHPO] Cross-fidelity transfer from level=%.2f (loss=%.4f)",
+            source_level,
+            best_state.loss,
+        )
+
+        return blended
+
+    def _update_fidelity_population(self, result: TrialResult) -> None:
+        """Update fidelity subpopulations with completed trial result.
+
+        DEHB-inspired: Tracks best configs at each fidelity level to enable
+        cross-fidelity information transfer during mutation.
+
+        Args:
+            result: Completed trial result.
+        """
+        if not self._fidelity_populations:
+            return
+
+        # Find the config for this trial
+        trial_config = None
+        for state in self.population:
+            if state.config.get("_trial_id") == result.trial_id:
+                trial_config = state.config
+                break
+
+        if trial_config is None:
+            return
+
+        # Determine fidelity level from budget fraction
+        # Use param_budget or architecture size as proxy for fidelity
+        if self.config.param_budget:
+            from highnoon.services.hpo_manager import estimate_model_params
+
+            try:
+                estimated = estimate_model_params(trial_config)
+                fidelity = estimated / self.config.param_budget
+            except Exception:
+                fidelity = 0.5  # Default to mid-fidelity
+        else:
+            # Without param_budget, estimate fidelity from embedding_dim relative to max
+            dim = trial_config.get("embedding_dim", 256)
+            fidelity = min(1.0, dim / 2048)
+
+        # Snap to nearest defined fidelity level
+        fidelity_levels = list(self.config.fidelity_levels)
+        closest_level = min(fidelity_levels, key=lambda f: abs(f - fidelity))
+
+        # Create state for this result
+        new_state = QuantumState(
+            config=trial_config.copy(),
+            loss=result.loss,
+            generation=self.generation,
+        )
+
+        # Add to appropriate fidelity population
+        pop = self._fidelity_populations[closest_level]
+        pop.append(new_state)
+
+        # Limit population size per fidelity
+        max_per_fidelity = self.config.max_configs_per_fidelity
+        if len(pop) > max_per_fidelity:
+            # Keep best configs (lowest loss)
+            pop.sort(key=lambda s: s.loss)
+            self._fidelity_populations[closest_level] = pop[:max_per_fidelity]
+
+        logger.debug(
+            "[QAHPO] Added to fidelity=%.2f population (size=%d, loss=%.4f)",
+            closest_level,
+            len(self._fidelity_populations[closest_level]),
+            result.loss,
+        )
 
     def get_reduction_guidance(self) -> dict[str, float]:
         """Get guidance on which parameters to reduce based on fANOVA importance.
@@ -1028,6 +1454,10 @@ class QuantumAdaptiveHPOScheduler(HPOSchedulerBase):
 
         Stops trial if loss is much worse than best known.
         """
+        # Guard against None loss values from failed/crashed trials
+        if current_loss is None:
+            return False  # Don't stop trial if loss is unknown
+
         if self.best_loss == float("inf"):
             return False
 
@@ -1154,11 +1584,20 @@ class QuantumAdaptiveHPOScheduler(HPOSchedulerBase):
                     len(promoted),
                 )
 
+        # === Phase 600: DEHB Fidelity Subpopulation Tracking ===
+        if self.config.enable_fidelity_subpopulations and self._fidelity_populations:
+            self._update_fidelity_population(result)
+
         # === fANOVA: Refit importance scores periodically ===
         if self._fanova is not None and self.total_trials >= self.config.fanova_min_trials:
             # Check if we should refit
             if self.total_trials - self._last_fanova_fit >= self.config.fanova_refit_interval:
                 self._refit_fanova()
+
+        # === Phase 700: Adaptive Meta-Tuning ===
+        # Adapt QAHPO parameters based on trial signals
+        if self.config.enable_adaptive_meta_tuning:
+            self._adapt_meta_parameters()
 
         # Evolve population more frequently for faster adaptation (Phase 600 enhancement)
         evolution_interval = self.config.evolution_interval or self.config.population_size
@@ -1289,8 +1728,127 @@ class QuantumAdaptiveHPOScheduler(HPOSchedulerBase):
                 logger.info(
                     "[QAHPO-fANOVA] Updated importance (R²=%.2f): %s",
                     result.explained_variance,
-                    ", ".join(f"{p.name}={p.importance*100:.1f}%" for p in top_params),
+                    ", ".join(f"{p.name}={p.importance * 100:.1f}%" for p in top_params),
                 )
+
+                # === Phase 600: Cache interaction importance ===
+                if self.config.enable_interaction_boost and result.interactions:
+                    self._interaction_importance.clear()
+                    for interaction in result.interactions:
+                        key = (interaction.param1, interaction.param2)
+                        self._interaction_importance[key] = interaction.importance
+                    if result.interactions:
+                        top_int = result.interactions[0]
+                        logger.debug(
+                            "[QAHPO-fANOVA] Top interaction: %s×%s=%.1f%%",
+                            top_int.param1,
+                            top_int.param2,
+                            top_int.importance * 100,
+                        )
+
+    def _adapt_meta_parameters(self) -> None:
+        """Adapt QAHPO meta-parameters based on trial signals.
+
+        Phase 700: Self-adaptive meta-tuning. Adjusts mutation_strength,
+        tunneling_probability, and evolution_interval based on:
+        - Stagnation: Boost exploration when no improvement for N trials
+        - Fast convergence: Speed up evolution when making good progress
+        - Temperature: Already annealed via _get_temperature()
+
+        This is called after each trial result is reported.
+        """
+        if self.total_trials < 3:
+            return  # Need minimum history
+
+        # Get adaptation bounds from config
+        min_mut, max_mut = self.config.adaptive_mutation_range
+        min_tun, max_tun = self.config.adaptive_tunneling_range
+        min_evo, max_evo = self.config.adaptive_evolution_interval_range
+
+        # === Signal 1: Stagnation Detection ===
+        # Boost mutation and tunneling when stuck
+        if self._no_improvement_count >= self.config.stagnation_trials_threshold:
+            # Increase mutation strength
+            old_mutation = self.config.mutation_strength
+            self.config.mutation_strength = min(max_mut, old_mutation * 1.2)
+
+            # Increase tunneling probability
+            old_tunneling = self.config.tunneling_probability
+            self.config.tunneling_probability = min(max_tun, old_tunneling * 1.3)
+
+            if old_mutation != self.config.mutation_strength:
+                logger.info(
+                    "[QAHPO-Adapt] Stagnation detected (%d trials), boosting: "
+                    "mutation=%.2f→%.2f, tunneling=%.2f→%.2f",
+                    self._no_improvement_count,
+                    old_mutation,
+                    self.config.mutation_strength,
+                    old_tunneling,
+                    self.config.tunneling_probability,
+                )
+
+            # Also grow population for more diversity during stagnation
+            min_pop, max_pop = self.config.adaptive_population_size_range
+            if self.config.population_size < max_pop:
+                old_pop = self.config.population_size
+                self.config.population_size = min(max_pop, old_pop + 2)
+                if old_pop != self.config.population_size:
+                    logger.info(
+                        "[QAHPO-Adapt] Growing population for diversity: %d→%d",
+                        old_pop,
+                        self.config.population_size,
+                    )
+        else:
+            # Decay back toward defaults when making progress
+            target_mutation = 0.3  # Default
+            target_tunneling = 0.15  # Default
+            target_crossover = 0.4  # Default
+
+            self.config.mutation_strength = max(
+                min_mut, self.config.mutation_strength * 0.95 + target_mutation * 0.05
+            )
+            self.config.tunneling_probability = max(
+                min_tun, self.config.tunneling_probability * 0.95 + target_tunneling * 0.05
+            )
+            # Crossover also decays toward default
+            min_cross, max_cross = self.config.adaptive_crossover_range
+            self.config.crossover_rate = max(
+                min_cross,
+                min(max_cross, self.config.crossover_rate * 0.95 + target_crossover * 0.05),
+            )
+
+        # === Signal 2: Convergence Rate ===
+        # Speed up evolution when making good progress
+        if len(self._convergence_window) >= 3:
+            recent_losses = self._convergence_window[-3:]
+            if len(recent_losses) >= 3:
+                # Check improvement rate
+                first_loss = recent_losses[0]
+                last_loss = recent_losses[-1]
+                improvement = (first_loss - last_loss) / (abs(first_loss) + 1e-8)
+
+                if improvement > self.config.fast_convergence_threshold:
+                    # Good progress - speed up evolution
+                    old_interval = self.config.evolution_interval
+                    self.config.evolution_interval = max(min_evo, old_interval - 1)
+
+                    # Also increase crossover for faster mixing
+                    min_cross, max_cross = self.config.adaptive_crossover_range
+                    self.config.crossover_rate = min(max_cross, self.config.crossover_rate * 1.1)
+
+                    if old_interval != self.config.evolution_interval:
+                        logger.info(
+                            "[QAHPO-Adapt] Fast convergence (%.1f%% improvement), "
+                            "evolution_interval=%d→%d, crossover=%.2f",
+                            improvement * 100,
+                            old_interval,
+                            self.config.evolution_interval,
+                            self.config.crossover_rate,
+                        )
+                elif improvement < 0:
+                    # Getting worse - slow down evolution to stabilize
+                    old_interval = self.config.evolution_interval
+                    self.config.evolution_interval = min(max_evo, old_interval + 1)
 
     def has_converged(self) -> bool:
         """Check if the optimization has converged.

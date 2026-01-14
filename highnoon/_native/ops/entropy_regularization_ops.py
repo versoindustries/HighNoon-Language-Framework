@@ -55,7 +55,7 @@ def _load_ops():
         _available = False
         logger.warning(f"Failed to load entropy regularization ops: {e}")
         raise RuntimeError(
-            "Entropy regularization native ops not available. " "Run ./build_secure.sh to compile."
+            "Entropy regularization native ops not available. Run ./build_secure.sh to compile."
         ) from e
     return _available
 

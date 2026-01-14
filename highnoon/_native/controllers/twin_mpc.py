@@ -295,7 +295,7 @@ class TwinMPCController:
         }
 
         logger.debug(
-            f"MPC solved: cost={best_cost:.3f}, iterations={iteration+1}, "
+            f"MPC solved: cost={best_cost:.3f}, iterations={iteration + 1}, "
             f"time={solve_time_ms:.2f}ms, converged={converged}"
         )
 

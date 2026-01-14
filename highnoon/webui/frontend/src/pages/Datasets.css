@@ -279,6 +279,19 @@
     color: var(--text-primary);
 }
 
+.hf-gated-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    margin-left: auto;
+    font-size: var(--text-xs);
+    font-weight: var(--font-medium);
+    background: var(--color-warning-muted);
+    color: var(--color-warning);
+    border-radius: var(--radius-full);
+}
+
 .hf-result-description {
     font-size: var(--text-sm);
     color: var(--text-secondary);
@@ -374,4 +387,49 @@
 
 .spin {
     animation: spin 1s linear infinite;
+}
+
+/* Gated Warning Modal */
+.gated-warning-content {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: var(--spacing-md);
+    padding: var(--spacing-lg);
+}
+
+.gated-warning-icon {
+    color: var(--color-warning);
+}
+
+.gated-warning-content h3 {
+    margin: 0;
+    font-size: var(--text-xl);
+    color: var(--text-primary);
+}
+
+.gated-warning-content>p {
+    margin: 0;
+    color: var(--text-secondary);
+    line-height: 1.6;
+}
+
+.gated-warning-actions {
+    display: flex;
+    gap: var(--spacing-md);
+    margin-top: var(--spacing-sm);
+}
+
+.gated-warning-note {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-xs);
+    font-size: var(--text-sm);
+    color: var(--text-muted);
+    margin-top: var(--spacing-sm);
+}
+
+.gated-warning-note svg {
+    flex-shrink: 0;
 }

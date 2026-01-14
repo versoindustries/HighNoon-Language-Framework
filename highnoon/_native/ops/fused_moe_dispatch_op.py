@@ -161,7 +161,21 @@ def fused_moe_dispatch(
             grad_router_logits,
             None,
         )  # Grad for tokens, router_logits, expert_capacity
-        variable_grads_list = [None] * len(variables) if variables is not None else []
+
+        # GRADIENT FIX: Map C++ gradient outputs to tf.Variables by name pattern
+        # Instead of returning [None] * len(variables) which zeros out all gradients
+        if variables is not None and len(variables) > 0:
+            variable_grads_list = []
+            for v in variables:
+                name = v.name.lower()
+                if "router" in name or "logit" in name:
+                    variable_grads_list.append(grad_router_logits)
+                elif "token" in name or "embed" in name:
+                    variable_grads_list.append(grad_tokens)
+                else:
+                    variable_grads_list.append(None)
+        else:
+            variable_grads_list = []
         return input_grads, variable_grads_list
 
     return (
@@ -267,9 +281,26 @@ def fused_moe_dispatch_v2(
                 router_logits=logits_in,
             )
             # Grads for: tokens, logits, capacity, bias
-            return (grad_tok, grad_logits, None, None), (
-                [None] * len(variables) if variables else []
-            )
+            input_grads_v2 = (grad_tok, grad_logits, None, None)
+
+            # GRADIENT FIX: Map C++ gradient outputs to tf.Variables by name pattern
+            # Instead of returning [None] * len(variables) which zeros out all gradients
+            if variables and len(variables) > 0:
+                variable_grads = []
+                for v in variables:
+                    name = v.name.lower()
+                    if "router" in name or "logit" in name:
+                        variable_grads.append(grad_logits)
+                    elif "token" in name or "embed" in name:
+                        variable_grads.append(grad_tok)
+                    elif "bias" in name:
+                        # routing_bias doesn't get gradients from this op
+                        variable_grads.append(None)
+                    else:
+                        variable_grads.append(None)
+            else:
+                variable_grads = []
+            return input_grads_v2, variable_grads
 
         return (d_tok, d_gate, d_meta, ex_bound, ex_idx, ex_loads), grad_fn_v2
 

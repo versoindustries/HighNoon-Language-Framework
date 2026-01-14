@@ -36,6 +36,15 @@ import tensorflow as tf
 
 logger = logging.getLogger(__name__)
 
+# REQUIRE native C++ implementation - no Python fallback
+from highnoon._native.ops.cayley_transform import cayley_dense_forward, cayley_dense_ops_available
+
+if not cayley_dense_ops_available():
+    raise ImportError(
+        "CayleyDense requires native C++ ops. "
+        "Build the native library: cd highnoon/_native && ./build_secure.sh --debug --lite"
+    )
+
 
 class CayleyDense(tf.keras.layers.Layer):
     """Dense layer with Cayley-parameterized orthogonal weights.
@@ -217,14 +226,16 @@ class CayleyDense(tf.keras.layers.Layer):
         Returns:
             Output tensor of shape [batch, units].
         """
-        W = self._get_weight(training)
-
-        output = tf.matmul(inputs, W)
-
-        if self.use_bias:
-            output = output + self.bias
-
-        return output
+        # Use native C++ implementation (required)
+        return cayley_dense_forward(
+            inputs=inputs,
+            skew_params=self.skew_params,
+            proj_weight=self.proj_weight,
+            bias=self.bias if self.use_bias else None,
+            input_dim=int(inputs.shape[-1]),
+            output_dim=self.units,
+            training=bool(training) if isinstance(training, bool) else False,
+        )
 
     def get_config(self) -> dict:
         """Get layer configuration."""

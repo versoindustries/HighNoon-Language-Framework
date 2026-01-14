@@ -13,17 +13,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Superword Merger for semantic n-gram grouping.
+"""Enterprise-grade Superword Merger with native C++ trie acceleration.
 
-Phase 10.2 Enhancement: Provides internal semantic grouping layer for learning
-common n-gram patterns and merging them into superword units. This improves
-tokenization quality for domain-specific terms and common phrases without
-requiring an external tokenizer.
+Phase 1000+ Enhancement: High-performance n-gram merging using SIMD-optimized
+C++ trie for O(max_ngram_size) lookup complexity. Streaming n-gram counting
+to minimize memory during training.
 
-The merger works by:
-1. Analyzing training corpus for frequent n-grams (2-5 tokens)
-2. Building a merge table that maps frequent n-grams to superword IDs
-3. Applying merges during encoding to reduce sequence length
+The merger learns common n-gram patterns from training corpus and merges them
+into superword units, reducing sequence length while preserving semantics.
+
+Performance Characteristics:
+    - Training: O(T × N) where T=texts, N=avg length (streaming, low memory)
+    - Lookup: O(max_ngram_size) per position (constant, not O(vocab))
+    - Memory: O(V × avg_ngram_len) where V=superword count
+
+Example:
+    >>> merger = SuperwordMerger(base_vocab_size=512)
+    >>> # Train on corpus
+    >>> merger.train([tokenized_sequence1, tokenized_sequence2])
+    >>> # Apply merges using native C++ trie
+    >>> merged = merger.apply(original_tokens)
 """
 
 from __future__ import annotations
@@ -31,12 +40,30 @@ from __future__ import annotations
 import json
 import logging
 from collections import Counter
-from collections.abc import Iterator, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# Native C++ trie for O(N) lookup
+_native_trie_available = False
+_SuperwordTrieHandle = None
+
+try:
+    from highnoon._native.ops.fused_text_tokenizer import SuperwordTrieHandle, ops_available
+    from highnoon._native.ops.fused_text_tokenizer import (
+        trie_apply_merges as native_trie_apply_merges,
+    )
+
+    if ops_available():
+        _SuperwordTrieHandle = SuperwordTrieHandle
+        _native_trie_available = True
+        logger.info("[SuperwordMerger] Native C++ trie acceleration enabled")
+except ImportError:
+    native_trie_apply_merges = None
+    logger.debug("[SuperwordMerger] Native trie not available")
 
 
 @dataclass
@@ -76,10 +103,11 @@ class SuperwordMergerConfig:
 
 
 class SuperwordMerger:
-    """Superword Merger for semantic n-gram grouping.
+    """Enterprise-grade Superword Merger with native C++ acceleration.
 
     This class provides learned merging of frequent n-grams into superword
     tokens, reducing sequence length while preserving semantic information.
+    Uses SIMD-optimized C++ trie for O(max_ngram_size) lookup complexity.
 
     Example:
         >>> merger = SuperwordMerger(base_vocab_size=512)
@@ -104,7 +132,7 @@ class SuperwordMerger:
         self.base_vocab_size = base_vocab_size
         self.config = config or SuperwordMergerConfig()
 
-        # Merge table: maps n-gram tuple -> SuperwordEntry
+        # Merge table: maps n-gram tuple -> SuperwordEntry (Python side for save/load)
         self._superword_table: dict[tuple[int, ...], SuperwordEntry] = {}
 
         # Reverse lookup: superword_id -> SuperwordEntry
@@ -116,6 +144,9 @@ class SuperwordMerger:
         # Statistics
         self._total_merges_applied = 0
 
+        # Native C++ trie (None until trained, then built for O(N) lookup)
+        self._native_trie: Any = None
+
     @property
     def superword_count(self) -> int:
         """Return the number of learned superwords."""
@@ -126,12 +157,20 @@ class SuperwordMerger:
         """Return the superword merge table."""
         return self._superword_table
 
+    @property
+    def has_native_trie(self) -> bool:
+        """Check if native C++ trie is available and built."""
+        return self._native_trie is not None
+
     def train(
         self,
         token_sequences: Sequence[Sequence[int]],
         progress_callback: Any = None,
     ) -> int:
         """Train the merger by learning frequent n-grams.
+
+        Uses streaming n-gram counting for minimal memory footprint.
+        Automatically builds native C++ trie after training.
 
         Args:
             token_sequences: Iterable of token ID sequences from the corpus.
@@ -147,44 +186,30 @@ class SuperwordMerger:
             self.config.max_ngram_size,
         )
 
-        # Count n-gram frequencies using batch processing for interrupt safety.
-        # By collecting n-grams in batches before updating the Counter,
-        # we reduce the time spent in C extension code and create safe
-        # interrupt points between batches.
+        # Streaming n-gram counting - process sequences one at a time
         ngram_counts: Counter[tuple[int, ...]] = Counter()
-        batch_size = 100  # Process sequences in batches for interrupt safety
+        total_sequences = len(token_sequences)
         interrupted = False
 
-        total_sequences = len(token_sequences)
-        for batch_start in range(0, total_sequences, batch_size):
-            # Check for interrupts at batch boundaries (safe point)
-            try:
-                # Collect n-grams for this batch
-                batch_ngrams: list[tuple[int, ...]] = []
-                batch_end = min(batch_start + batch_size, total_sequences)
+        try:
+            for seq_idx, sequence in enumerate(token_sequences):
+                seq_list = list(sequence)
+                # Stream n-grams directly into counter (no list materialization)
+                for n in range(self.config.min_ngram_size, self.config.max_ngram_size + 1):
+                    ngram_counts.update(self._extract_ngrams_gen(seq_list, n))
 
-                for seq_idx in range(batch_start, batch_end):
-                    sequence = token_sequences[seq_idx]
-                    seq_list = list(sequence)
-                    for n in range(self.config.min_ngram_size, self.config.max_ngram_size + 1):
-                        batch_ngrams.extend(self._extract_ngrams(seq_list, n))
+                # Progress callback at intervals
+                if progress_callback and (seq_idx + 1) % 1000 == 0:
+                    progress_callback(seq_idx + 1, total_sequences)
 
-                # Batch update the counter (single C extension call)
-                ngram_counts.update(batch_ngrams)
-
-                # Progress callback at batch boundaries
-                if progress_callback and batch_start % 1000 == 0:
-                    progress_callback(batch_start, total_sequences)
-
-            except KeyboardInterrupt:
-                logger.warning(
-                    "SuperwordMerger training interrupted at sequence %d/%d. "
-                    "Using partial n-gram counts.",
-                    batch_start,
-                    total_sequences,
-                )
-                interrupted = True
-                break
+        except KeyboardInterrupt:
+            logger.warning(
+                "SuperwordMerger training interrupted at sequence %d/%d. "
+                "Using partial n-gram counts.",
+                seq_idx,
+                total_sequences,
+            )
+            interrupted = True
 
         if interrupted:
             logger.info(
@@ -216,48 +241,74 @@ class SuperwordMerger:
             self._superword_table[ngram] = entry
             self._id_to_entry[superword_id] = entry
 
+        # Build native C++ trie for fast lookup
+        self._build_native_trie()
+
         status = "interrupted" if interrupted else "complete"
         logger.info(
-            "SuperwordMerger training %s: %d superwords learned",
+            "SuperwordMerger training %s: %d superwords learned (native_trie=%s)",
             status,
             len(self._superword_table),
+            self._native_trie is not None,
         )
         return len(self._superword_table)
 
+    def _build_native_trie(self) -> None:
+        """Build native C++ trie from superword table."""
+        if not _native_trie_available or not self._superword_table:
+            self._native_trie = None
+            return
+
+        try:
+            self._native_trie = _SuperwordTrieHandle()
+            ngrams = list(self._superword_table.keys())
+            ids = [self._superword_table[ng].superword_id for ng in ngrams]
+            self._native_trie.insert_batch(ngrams, ids)
+            logger.debug("Built native C++ trie with %d entries", len(ngrams))
+        except Exception as e:
+            logger.warning("Failed to build native trie: %s", e)
+            self._native_trie = None
+
     def apply(self, token_ids: Sequence[int]) -> list[int]:
         """Apply learned superword merges to a token sequence.
+
+        Uses optimized longest-match algorithm with O(N × max_ngram) complexity.
 
         Args:
             token_ids: Original token IDs from the base tokenizer.
 
         Returns:
             Token IDs with superword merges applied.
+
+        Raises:
+            RuntimeError: If native trie is not available.
         """
         if not self._superword_table:
             return list(token_ids)
 
-        result: list[int] = []
-        tokens = list(token_ids)
-        i = 0
+        if self._native_trie is None:
+            raise RuntimeError(
+                "SuperwordMerger.apply() requires native C++ trie. "
+                "Rebuild native ops with build_secure.sh."
+            )
 
-        while i < len(tokens):
-            # Try longest match first
-            merged = False
-            for n in range(self.config.max_ngram_size, self.config.min_ngram_size - 1, -1):
-                if i + n <= len(tokens):
-                    ngram = tuple(tokens[i : i + n])
-                    if ngram in self._superword_table:
-                        result.append(self._superword_table[ngram].superword_id)
-                        i += n
-                        self._total_merges_applied += 1
-                        merged = True
-                        break
+        if native_trie_apply_merges is None:
+            raise RuntimeError(
+                "Native trie_apply_merges not available. Rebuild native ops with build_secure.sh."
+            )
 
-            if not merged:
-                result.append(tokens[i])
-                i += 1
+        # Build ID-only lookup table for efficiency
+        id_table = {ngram: entry.superword_id for ngram, entry in self._superword_table.items()}
 
-        return result
+        # Use optimized longest-match algorithm
+        merged = native_trie_apply_merges(
+            list(token_ids),
+            self._native_trie,
+            superword_table=id_table,
+            max_ngram=self.config.max_ngram_size,
+        )
+        self._total_merges_applied += len(token_ids) - len(merged)
+        return merged
 
     def reverse_merge(self, token_ids: Sequence[int]) -> list[int]:
         """Reverse superword merges back to original tokens.
@@ -317,6 +368,8 @@ class SuperwordMerger:
     def load(cls, path: str | Path) -> SuperwordMerger:
         """Load a merger from a saved file.
 
+        Automatically rebuilds native C++ trie on load.
+
         Args:
             path: Path to the saved merger state.
 
@@ -341,13 +394,19 @@ class SuperwordMerger:
 
         merger._next_superword_id = state.get("next_id", merger.base_vocab_size)
 
+        # Rebuild native trie
+        merger._build_native_trie()
+
         logger.info(
-            "SuperwordMerger loaded from %s (%d superwords)", path, len(merger._superword_table)
+            "SuperwordMerger loaded from %s (%d superwords, native_trie=%s)",
+            path,
+            len(merger._superword_table),
+            merger._native_trie is not None,
         )
         return merger
 
-    def _extract_ngrams(self, tokens: list[int], n: int) -> Iterator[tuple[int, ...]]:
-        """Extract n-grams from a token sequence.
+    def _extract_ngrams_gen(self, tokens: list[int], n: int):
+        """Generator-based n-gram extraction for streaming counting.
 
         Args:
             tokens: List of token IDs.
@@ -370,6 +429,8 @@ class SuperwordMerger:
             "total_merges_applied": self._total_merges_applied,
             "base_vocab_size": self.base_vocab_size,
             "next_superword_id": self._next_superword_id,
+            "native_trie_available": _native_trie_available,
+            "native_trie_built": self._native_trie is not None,
         }
 
 

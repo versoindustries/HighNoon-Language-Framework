@@ -456,6 +456,7 @@ mkdir -p "${BUILD_DIR}" "${LOG_DIR}"
 cd "${BUILD_DIR}"
 
 # Export environment for CMake
+export PYTHON_EXEC
 export CPU_OPT_FLAGS
 export OPENMP_FLAGS
 export TBB_LFLAGS

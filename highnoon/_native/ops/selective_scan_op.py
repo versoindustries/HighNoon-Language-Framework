@@ -152,14 +152,36 @@ def selective_scan(
                 "NO PYTHON FALLBACK IS PROVIDED - native op is required."
             )
 
-        # If hidden_states output was not used, provide zeros
-        if d_hidden_states is None:
-            d_hidden_states = tf.zeros_like(hidden_states)
+        # CRITICAL FIX: Pass the forward-pass cached `hidden_states` to the C++ grad op,
+        # NOT `d_hidden_states` (the gradient w.r.t. hidden_states output).
+        # The C++ backward kernel needs the actual hidden state values h[t] to compute
+        # gradients for A_log, B, and delta. Passing the gradient instead results in
+        # empty tensor (since hidden_states output is typically unused) → zero gradients.
 
-        # Call the high-performance backward kernel
-        input_grads = selective_scan_grad_op(dy, u, delta, a_log, b, c, d, d_hidden_states)
+        # Call the high-performance backward kernel with FORWARD hidden_states
+        input_grads = selective_scan_grad_op(dy, u, delta, a_log, b, c, d, hidden_states)
 
-        variable_grads_list = [None] * len(variables) if variables is not None else []
+        # GRADIENT FIX: Map C++ gradient outputs to tf.Variables by name pattern
+        # Instead of returning [None] * len(variables) which zeros out all gradients
+        if variables is not None and len(variables) > 0:
+            # input_grads is a tuple: (grad_u, grad_delta, grad_a_log, grad_b, grad_c, grad_d)
+            grad_map = {
+                "a_log": input_grads[2] if len(input_grads) > 2 else None,
+                "b_proj": input_grads[3] if len(input_grads) > 3 else None,
+                "c_proj": input_grads[4] if len(input_grads) > 4 else None,
+                "d": input_grads[5] if len(input_grads) > 5 else None,
+            }
+            variable_grads_list = []
+            for v in variables:
+                name = v.name.lower()
+                found_grad = None
+                for key, grad in grad_map.items():
+                    if key in name:
+                        found_grad = grad
+                        break
+                variable_grads_list.append(found_grad)
+        else:
+            variable_grads_list = []
         return input_grads, variable_grads_list
 
     return (output, hidden_states), grad_fn

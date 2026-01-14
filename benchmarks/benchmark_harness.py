@@ -213,6 +213,9 @@ class BenchmarkHarness:
     def get_model(self, force_rebuild: bool = False) -> tf.keras.Model:
         """Get or create HSMN model instance.
 
+        Uses build_hsmn_model from hpo_trial_runner for consistency with
+        the validated training path and proper HD dimension configuration.
+
         Args:
             force_rebuild: Force rebuilding model even if cached.
 
@@ -220,34 +223,39 @@ class BenchmarkHarness:
             HSMN model instance configured per benchmark settings.
         """
         if self._model is None or force_rebuild:
-            from highnoon.models.hsmn import HSMN
+            # Use build_hsmn_model from hpo_trial_runner for consistency with
+            # the validated audit script / training path
+            from highnoon.services.hpo_trial_runner import build_hsmn_model
 
             model_config = self.config.model
 
-            # Use HSMN subclass model directly - this pattern is verified working
-            self._model = HSMN(
-                vocab_size=model_config.vocab_size,
-                embedding_dim=model_config.embedding_dim,
-                max_seq_length=model_config.max_seq_length,
-                num_reasoning_blocks=model_config.num_reasoning_blocks,
-                block_pattern=model_config.block_pattern,
-                num_experts=model_config.num_experts,
-                top_k=model_config.top_k,
-                # Quantum features enabled
-                use_quantum_memory_replay=model_config.use_quantum_memory_replay,
-                use_entanglement_loss=model_config.use_entanglement_loss,
-                use_quantum_holographic_memory=model_config.use_quantum_holographic_memory,
-            )
+            # Build config dict matching hpo_trial_runner expectations
+            trial_config = {
+                "hidden_dim": model_config.embedding_dim,
+                "num_reasoning_blocks": model_config.num_reasoning_blocks,
+                "num_heads": 8,  # Default
+                "context_window": model_config.max_seq_length,
+                "num_moe_experts": model_config.num_experts,
+                "moe_top_k": model_config.top_k,
+            }
 
-            # Build model with sample input
-            sample_input = tf.random.uniform(
-                [1, 128], minval=0, maxval=model_config.vocab_size, dtype=tf.int32
+            # Build model using validated construction path
+            self._model = build_hsmn_model(
+                trial_config,
+                vocab_size=model_config.vocab_size,
+                hidden_dim_override=model_config.embedding_dim,
+                hd_dim_embedding=model_config.hd_dim_embedding,
+                hd_dim_spatial=model_config.hd_dim_spatial,
+                hd_dim_timecrystal=model_config.hd_dim_timecrystal,
+                hd_dim_moe=model_config.hd_dim_moe,
             )
-            _ = self._model(sample_input, training=False)
 
             logger.info(
-                f"Built HSMN model: {model_config.embedding_dim}d, "
-                f"{model_config.num_reasoning_blocks} blocks, quantum={model_config.use_quantum_holographic_memory}"
+                f"Built HSMN model via hpo_trial_runner: {model_config.embedding_dim}d, "
+                f"{model_config.num_reasoning_blocks} blocks, "
+                f"hd_dims: emb={model_config.hd_dim_embedding}, "
+                f"spatial={model_config.hd_dim_spatial}, "
+                f"moe={model_config.hd_dim_moe}"
             )
 
         return self._model

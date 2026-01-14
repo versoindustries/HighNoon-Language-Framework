@@ -136,7 +136,7 @@ class QuantumGQA(layers.Layer):
 
         if embedding_dim % num_heads != 0:
             raise ValueError(
-                f"embedding_dim ({embedding_dim}) must be divisible by " f"num_heads ({num_heads})"
+                f"embedding_dim ({embedding_dim}) must be divisible by num_heads ({num_heads})"
             )
 
         self.embedding_dim = embedding_dim
@@ -156,8 +156,7 @@ class QuantumGQA(layers.Layer):
 
         if num_heads % self.num_kv_heads != 0:
             raise ValueError(
-                f"num_heads ({num_heads}) must be divisible by "
-                f"num_kv_heads ({self.num_kv_heads})"
+                f"num_heads ({num_heads}) must be divisible by num_kv_heads ({self.num_kv_heads})"
             )
 
         self.num_queries_per_kv = num_heads // self.num_kv_heads
@@ -362,23 +361,29 @@ class QuantumGQA(layers.Layer):
         Returns:
             Attention output [batch, heads, seq, head_dim].
         """
-        # Phase 300+: Holographic Attention (O(d log d) via FFT)
+        # Phase 300+: Holographic Attention via Unified O(n) Linear Attention
+        # Now uses HolographicLinearAttentionForward with FFT feature maps
+        # Complexity: O(n × d log d) for FFT + O(n × d) for kernel trick = O(n × d log d)
         if USE_HD_HOLOGRAPHIC_ATTENTION and _HD_ATTENTION_AVAILABLE:
             try:
-                # holographic_attention_scores returns [batch, heads, seq_q, seq_k]
-                scores = holographic_attention_scores(q_features, k_features, temperature=1.0)
-                # Apply causal mask if needed
-                if self.causal:
-                    seq_len = tf.shape(scores)[-1]
-                    mask = tf.linalg.band_part(
-                        tf.ones([seq_len, seq_len], dtype=scores.dtype), -1, 0
-                    )
-                    scores = scores * mask[tf.newaxis, tf.newaxis, :, :]
-                    scores = scores - (1.0 - mask[tf.newaxis, tf.newaxis, :, :]) * 1e9
-                attn_weights = tf.nn.softmax(scores, axis=-1)
-                return tf.matmul(attn_weights, v)
+                from highnoon._native.ops.unified_attention import (
+                    AttentionMode,
+                    UnifiedAttentionConfig,
+                    unified_attention,
+                )
+
+                config = UnifiedAttentionConfig(
+                    mode=AttentionMode.LINEAR,
+                    num_heads=self.num_heads,
+                    num_kv_heads=self.num_kv_heads,
+                    head_dim=self.head_dim,
+                    use_holographic_features=True,  # Use FFT feature maps
+                    causal=self.causal,
+                )
+                # unified_attention expects Q, K, V in [batch, heads, seq, dim] format
+                return unified_attention(q_features, k_features, v, config)
             except Exception as e:
-                logger.warning(f"Holographic attention failed, using quantum kernel: {e}")
+                logger.warning(f"Holographic linear attention failed, using quantum kernel: {e}")
                 # Fall through to quantum kernel
 
         if self.causal:

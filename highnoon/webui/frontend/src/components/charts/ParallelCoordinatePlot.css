@@ -1,0 +1,191 @@
+/* ParallelCoordinatePlot.css - Styling for parallel coordinates visualization */
+
+.parallel-coords {
+    background: var(--card-bg, rgba(15, 23, 42, 0.8));
+    border: 1px solid var(--border-color, rgba(255, 255, 255, 0.1));
+    border-radius: 12px;
+    padding: 16px;
+    position: relative;
+}
+
+.parallel-coords--empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 200px;
+    color: var(--text-muted, rgba(255, 255, 255, 0.5));
+    gap: 12px;
+}
+
+.parallel-coords--empty p {
+    margin: 0;
+    font-size: 14px;
+}
+
+/* Header */
+.parallel-coords__header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.parallel-coords__title {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-primary, #fff);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.parallel-coords__count {
+    font-size: 11px;
+    font-weight: 400;
+    color: var(--text-muted, rgba(255, 255, 255, 0.5));
+    background: rgba(255, 255, 255, 0.08);
+    padding: 2px 8px;
+    border-radius: 10px;
+}
+
+/* Legend */
+.parallel-coords__legend {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 11px;
+    color: var(--text-muted, rgba(255, 255, 255, 0.5));
+}
+
+.parallel-coords__legend-label {
+    font-weight: 500;
+}
+
+.parallel-coords__gradient {
+    width: 60px;
+    height: 8px;
+    border-radius: 4px;
+    background: linear-gradient(to right,
+            hsl(0, 70%, 50%),
+            /* Red - high loss */
+            hsl(60, 70%, 50%),
+            /* Yellow */
+            hsl(120, 70%, 50%)
+            /* Green - low loss */
+        );
+}
+
+.parallel-coords__legend-min,
+.parallel-coords__legend-max {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+}
+
+/* SVG Chart */
+.parallel-coords__svg {
+    width: 100%;
+    overflow: visible;
+}
+
+/* Axis styling */
+.parallel-coords__axis-line {
+    stroke: rgba(255, 255, 255, 0.15);
+    stroke-width: 1;
+}
+
+.parallel-coords__axis-label {
+    font-size: 3px;
+    font-weight: 500;
+    fill: var(--text-primary, #fff);
+    text-transform: capitalize;
+}
+
+.parallel-coords__axis-value {
+    font-size: 2.5px;
+    fill: var(--text-muted, rgba(255, 255, 255, 0.5));
+    font-family: 'JetBrains Mono', monospace;
+}
+
+.parallel-coords__axis-value--max {
+    fill: var(--text-muted, rgba(255, 255, 255, 0.4));
+}
+
+/* Trial paths */
+.parallel-coords__path {
+    cursor: pointer;
+    transition: opacity 0.15s ease, stroke-width 0.15s ease;
+    vector-effect: non-scaling-stroke;
+}
+
+.parallel-coords__path:hover {
+    opacity: 1 !important;
+    stroke-width: 3;
+}
+
+.parallel-coords__path--best {
+    stroke-dasharray: none;
+    filter: drop-shadow(0 0 4px rgba(16, 185, 129, 0.5));
+}
+
+.parallel-coords__path--hovered {
+    filter: drop-shadow(0 0 3px currentColor);
+}
+
+/* Tooltip */
+.parallel-coords__tooltip {
+    position: absolute;
+    top: 60px;
+    right: 16px;
+    background: rgba(15, 23, 42, 0.95);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 8px;
+    padding: 12px;
+    min-width: 140px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+    z-index: 10;
+    pointer-events: none;
+}
+
+.parallel-coords__tooltip-header {
+    font-weight: 600;
+    font-size: 13px;
+    color: var(--text-primary, #fff);
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.parallel-coords__tooltip-header .best-badge {
+    background: linear-gradient(135deg, #10b981, #059669);
+    color: white;
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-weight: 500;
+}
+
+.parallel-coords__tooltip-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+    padding: 3px 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.parallel-coords__tooltip-row:last-child {
+    border-bottom: none;
+}
+
+.parallel-coords__tooltip-row span:first-child {
+    color: var(--text-muted, rgba(255, 255, 255, 0.5));
+}
+
+.parallel-coords__tooltip-row span:last-child {
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--text-primary, #fff);
+}

@@ -159,6 +159,17 @@
     color: var(--text-muted);
 }
 
+/* Trend row with sparkline and indicator */
+.hud-speedometer__trend-row {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--spacing-xs);
+    margin-top: var(--spacing-xs);
+    padding: 0 var(--spacing-xs);
+}
+
+
 /* Size variants */
 .hud-speedometer--sm .hud-speedometer__readout {
     bottom: 20%;

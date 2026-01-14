@@ -154,7 +154,7 @@ class TemporalMPSLayer(keras.layers.Layer):
             raise ValueError(f"Expected 3D input [batch, seq_len, 3], got shape {inputs.shape}")
         if inputs.shape[-1] != self.input_dim:
             raise ValueError(
-                f"Expected {self.input_dim} features (r_e, J, T), " f"got {inputs.shape[-1]}"
+                f"Expected {self.input_dim} features (r_e, J, T), got {inputs.shape[-1]}"
             )
 
         batch_size = tf.shape(inputs)[0]

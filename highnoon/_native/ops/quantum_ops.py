@@ -60,7 +60,7 @@ def _load_quantum_ops():
         _quantum_ops_available = False
         logger.warning(f"Failed to load quantum ops: {e}")
         raise RuntimeError(
-            "Quantum native ops not available. " "Run ./build_secure.sh to compile."
+            "Quantum native ops not available. Run ./build_secure.sh to compile."
         ) from e
 
     return _quantum_ops_available

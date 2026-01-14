@@ -19,7 +19,15 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import (
+    BackgroundTasks,
+    FastAPI,
+    HTTPException,
+    Query,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -130,7 +138,7 @@ class SaveCurriculumRequest(BaseModel):
     name: str
     stages: list[SaveCurriculumStage]
     vocab_size: int = 32000
-    context_window: int = 4096
+    context_window: int = 128_000  # Phase 200: Default 128K
     created_at: str | None = None
     updated_at: str | None = None
 
@@ -286,6 +294,88 @@ class StartHPORequest(BaseModel):
     hyperband_eta: int = Field(default=3, ge=2, le=4)  # Hyperband reduction factor
     pbt_population_size: int = Field(default=8, ge=4, le=32)  # PBT population
 
+    # =========================================================================
+    # QAHPO Scheduler Meta-Parameters (Phase 700)
+    # These control the quantum-inspired optimization behavior.
+    # Presets: small (4-6 pop), standard (8-12), frontier (16-24)
+    # =========================================================================
+    qahpo_population_size: int = Field(
+        default=8,
+        ge=4,
+        le=32,
+        description="Number of configs explored per generation (higher = more parallel exploration)",
+    )
+    qahpo_initial_temperature: float = Field(
+        default=2.0,
+        ge=0.5,
+        le=10.0,
+        description="Starting temperature for annealing (higher = more aggressive early exploration)",
+    )
+    qahpo_final_temperature: float = Field(
+        default=0.1,
+        ge=0.01,
+        le=1.0,
+        description="Final temperature for annealing (lower = stronger late exploitation)",
+    )
+    qahpo_tunneling_probability: float = Field(
+        default=0.15,
+        ge=0.0,
+        le=0.5,
+        description="Probability of quantum tunneling to escape local minima",
+    )
+    qahpo_mutation_strength: float = Field(
+        default=0.3,
+        ge=0.1,
+        le=0.8,
+        description="Mutation magnitude during evolution (higher = larger config changes)",
+    )
+    qahpo_crossover_rate: float = Field(
+        default=0.4, ge=0.1, le=0.9, description="Probability of crossover between configurations"
+    )
+    qahpo_evolution_interval: int = Field(
+        default=4, ge=1, le=16, description="Number of trials between population evolution cycles"
+    )
+    qahpo_fanova_importance_boost: float = Field(
+        default=3.0,
+        ge=1.0,
+        le=6.0,
+        description="Multiplier for mutation strength on important hyperparameters",
+    )
+    qahpo_enable_meta_learning: bool = Field(
+        default=True, description="Enable cross-sweep meta-learning for warm-start"
+    )
+
+    # =========================================================================
+    # Enterprise HPO Features (Phase 7)
+    # Advanced scheduling, importance analysis, and feature toggles
+    # =========================================================================
+    multi_fidelity_scheduler: str = Field(
+        default="hyperband",
+        description="Scheduler type: hyperband, asha, mobster, freeze_thaw, pbt_backtrack",
+    )
+    importance_analyzer: str = Field(
+        default="shapley",
+        description="Importance analyzer: fanova, shapley, graph, causal, streaming",
+    )
+    enable_zero_cost_proxy: bool = Field(
+        default=True, description="Enable zero-cost proxy pre-filtering for NAS"
+    )
+    enable_early_stopping_predictor: bool = Field(
+        default=True, description="Enable early stopping based on learning curve prediction"
+    )
+    enable_deep_kernel_gp: bool = Field(
+        default=True, description="Enable Deep Kernel GP for high-dim correlations"
+    )
+    enable_acquisition_portfolio: bool = Field(
+        default=True, description="Enable EXP3 bandit ensemble of acquisition functions"
+    )
+    enable_regret_tracking: bool = Field(
+        default=True, description="Enable regret tracking with theoretical bounds"
+    )
+    enable_darts: bool = Field(
+        default=False, description="Enable DARTS differentiable architecture search (heavyweight)"
+    )
+
     # Learning rate configuration (HPO will optimize within this range)
     lr_min: str = "1e-5"
     lr_max: str = "1e-3"
@@ -308,7 +398,8 @@ class StartHPORequest(BaseModel):
         le=300000,
         description="Target vocabulary size for tokenizer learning (model uses actual learned size)",
     )
-    context_window: int = Field(default=4096, ge=128, le=5000000)
+    # Phase 200: Minimum 8K context (industry baseline)
+    context_window: int = Field(default=128_000, ge=8_192, le=5_000_000)
     embedding_dim: int | None = Field(default=512)  # Make optional with default
     num_reasoning_blocks: int | None = Field(default=8)  # Make optional with default
     num_moe_experts: int | None = Field(default=8)  # Make optional with default
@@ -1062,7 +1153,7 @@ def create_app(debug: bool = False) -> FastAPI:
     app = FastAPI(
         title="HighNoon Language Framework API",
         description="API backend for curriculum building and training management",
-        version="1.0.0",
+        version="2.1",
         debug=debug,
     )
 
@@ -1084,7 +1175,119 @@ def create_app(debug: bool = False) -> FastAPI:
     @app.get("/")
     async def health_check():
         """API health check endpoint."""
-        return {"status": "ok", "service": "highnoon-api", "version": "1.0.0"}
+        return {"status": "ok", "service": "highnoon-api", "version": "2.1"}
+
+    # ========================================================================
+    # HuggingFace Token Management
+    # ========================================================================
+
+    HF_TOKEN_FILE = PROJECT_ROOT / "artifacts" / ".hf_token"
+
+    def get_hf_token() -> str | None:
+        """Get stored HuggingFace token, if available."""
+        if HF_TOKEN_FILE.exists():
+            try:
+                token = HF_TOKEN_FILE.read_text().strip()
+                if token:
+                    return token
+            except Exception as e:
+                logger.warning(f"[HF Token] Failed to read token file: {e}")
+        return None
+
+    def save_hf_token(token: str) -> None:
+        """Save HuggingFace token to secure file."""
+        HF_TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+        HF_TOKEN_FILE.write_text(token.strip())
+        try:
+            HF_TOKEN_FILE.chmod(0o600)  # Owner read/write only
+        except Exception:
+            pass  # chmod may fail on some filesystems
+        logger.info("[HF Token] Token saved successfully")
+
+    def clear_hf_token() -> None:
+        """Clear stored HuggingFace token."""
+        if HF_TOKEN_FILE.exists():
+            HF_TOKEN_FILE.unlink()
+            logger.info("[HF Token] Token cleared")
+
+    def get_hf_auth_headers() -> dict[str, str]:
+        """Get authorization headers for HuggingFace API requests."""
+        token = get_hf_token()
+        if token:
+            return {"Authorization": f"Bearer {token}"}
+        return {}
+
+    @app.get("/api/settings/hf-token/status")
+    async def get_hf_token_status():
+        """Get HuggingFace token configuration status.
+
+        Returns whether a token is configured (does NOT return the token itself).
+        """
+        token = get_hf_token()
+        return {
+            "configured": token is not None,
+            "token_prefix": token[:10] + "..." if token and len(token) > 10 else None,
+        }
+
+    @app.put("/api/settings/hf-token")
+    async def update_hf_token(request: Request):
+        """Store HuggingFace token.
+
+        Body: {"token": "hf_..."}
+        """
+        body = await request.json()
+        token = body.get("token", "").strip()
+
+        if not token:
+            raise HTTPException(status_code=400, detail="Token is required")
+
+        if not token.startswith("hf_"):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid token format. HuggingFace tokens start with 'hf_'",
+            )
+
+        save_hf_token(token)
+        return {"status": "saved", "token_prefix": token[:10] + "..."}
+
+    @app.delete("/api/settings/hf-token")
+    async def delete_hf_token():
+        """Clear stored HuggingFace token."""
+        clear_hf_token()
+        return {"status": "cleared"}
+
+    @app.post("/api/settings/hf-token/validate")
+    async def validate_hf_token(request: Request):
+        """Validate HuggingFace token by testing against HF API.
+
+        If no token is provided in the body, validates the stored token.
+        Body (optional): {"token": "hf_..."}
+        """
+        body = await request.json() if await request.body() else {}
+        token = body.get("token", "").strip() or get_hf_token()
+
+        if not token:
+            return {"valid": False, "error": "No token configured"}
+
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(
+                    "https://huggingface.co/api/whoami",
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    return {
+                        "valid": True,
+                        "username": data.get("name", "unknown"),
+                        "email": data.get("email"),
+                    }
+                elif response.status_code == 401:
+                    return {"valid": False, "error": "Invalid or expired token"}
+                else:
+                    return {"valid": False, "error": f"API error: {response.status_code}"}
+        except httpx.RequestError as e:
+            return {"valid": False, "error": f"Connection error: {str(e)}"}
 
     # ========================================================================
     # Local Dataset Catalog (in-memory for now)
@@ -1355,8 +1558,12 @@ def create_app(debug: bool = False) -> FastAPI:
         limit: int = 20,
         offset: int = 0,
     ):
-        """Search HuggingFace Hub for datasets."""
+        """Search HuggingFace Hub for datasets.
+
+        Includes gated status for each dataset and uses auth headers if token is configured.
+        """
         try:
+            auth_headers = get_hf_auth_headers()
             async with httpx.AsyncClient(timeout=15.0) as client:
                 params = {
                     "search": query,
@@ -1368,13 +1575,16 @@ def create_app(debug: bool = False) -> FastAPI:
                 response = await client.get(
                     "https://huggingface.co/api/datasets",
                     params=params,
+                    headers=auth_headers,
                 )
                 response.raise_for_status()
                 datasets = response.json()
 
-                # Transform to our format
+                # Transform to our format with gated status
                 results = []
                 for ds in datasets:
+                    # Gated can be: false, true, "auto", or "manual"
+                    gated_value = ds.get("gated", False)
                     results.append(
                         {
                             "dataset_id": ds.get("id", ""),
@@ -1386,9 +1596,15 @@ def create_app(debug: bool = False) -> FastAPI:
                             "likes": ds.get("likes", 0),
                             "tags": ds.get("tags", [])[:5],
                             "last_modified": ds.get("lastModified", ""),
+                            "gated": gated_value,
+                            "private": ds.get("private", False),
                         }
                     )
-                return {"datasets": results, "total": len(results)}
+                return {
+                    "datasets": results,
+                    "total": len(results),
+                    "token_configured": bool(auth_headers),
+                }
         except httpx.HTTPStatusError as e:
             raise HTTPException(
                 status_code=e.response.status_code, detail="HuggingFace API error"
@@ -1400,22 +1616,39 @@ def create_app(debug: bool = False) -> FastAPI:
 
     @app.get("/api/huggingface/dataset/{dataset_id:path}")
     async def get_huggingface_dataset_info(dataset_id: str):
-        """Get detailed info about a HuggingFace dataset."""
+        """Get detailed info about a HuggingFace dataset.
+
+        Includes gated status and uses auth headers if token is configured.
+        """
         try:
+            auth_headers = get_hf_auth_headers()
             async with httpx.AsyncClient(timeout=15.0) as client:
                 response = await client.get(
                     f"https://huggingface.co/api/datasets/{dataset_id}",
+                    headers=auth_headers,
                 )
                 response.raise_for_status()
                 data = response.json()
 
-                # Also try to get dataset info
+                # Also try to get dataset info (may fail for gated datasets)
                 info_response = await client.get(
                     f"https://datasets-server.huggingface.co/info?dataset={dataset_id}",
+                    headers=auth_headers,
                 )
                 dataset_info = {}
                 if info_response.status_code == 200:
                     dataset_info = info_response.json()
+
+                # Determine gated status and access
+                gated_value = data.get("gated", False)
+                access_status = "accessible"
+                if gated_value:
+                    # If gated and we have a token, check if we have access
+                    if auth_headers:
+                        # If we got here without 401, we likely have access
+                        access_status = "accessible"
+                    else:
+                        access_status = "requires_token"
 
                 return {
                     "dataset_id": data.get("id", dataset_id),
@@ -1429,6 +1662,10 @@ def create_app(debug: bool = False) -> FastAPI:
                         list(dataset_info.get("dataset_info", {}).keys()) if dataset_info else []
                     ),
                     "dataset_info": dataset_info.get("dataset_info", {}),
+                    "gated": gated_value,
+                    "private": data.get("private", False),
+                    "access_status": access_status,
+                    "token_configured": bool(auth_headers),
                 }
         except httpx.HTTPStatusError as e:
             raise HTTPException(
@@ -2290,6 +2527,608 @@ def create_app(debug: bool = False) -> FastAPI:
         }
 
     # ========================================================================
+    # API Routes - Activation Visualization
+    # ========================================================================
+
+    # In-memory activation cache storage
+    # Maps job_id -> { layer_name: tensor_data }
+    activation_cache: dict[str, dict[str, Any]] = {}
+
+    @app.get("/api/activations/layers/{job_id}")
+    async def get_available_layers(job_id: str):
+        """Get list of layers available for activation visualization.
+
+        Args:
+            job_id: Training or HPO job ID
+
+        Returns:
+            List of layer names that have cached activations
+        """
+        cached = activation_cache.get(job_id, {})
+        if not cached:
+            # Return demo layers if no real data
+            return {
+                "layers": [
+                    "embedding",
+                    "block_0",
+                    "block_1",
+                    "block_2",
+                    "block_3",
+                    "attention_0",
+                    "moe_gate",
+                    "output_proj",
+                ],
+                "demo_mode": True,
+            }
+        return {"layers": list(cached.keys()), "demo_mode": False}
+
+    @app.get("/api/activations/surface/{layer_name}")
+    async def get_activation_surface(
+        layer_name: str,
+        job_id: str = Query(..., description="Training or HPO job ID"),
+        apply_envelope: bool = Query(
+            True, description="Apply Gaussian envelope for visual aesthetics"
+        ),
+        grid_size: int = Query(50, ge=10, le=100, description="Surface grid size NxN"),
+    ):
+        """Get layer activations as 3D surface data for visualization.
+
+        Returns surface data compatible with Three.js TensorSurfaceViz component.
+        If no real activations are cached, generates demo data with CTQW-style
+        interference patterns to showcase the visualization capability.
+
+        Args:
+            layer_name: Name of layer to extract activations from
+            job_id: Training or HPO job ID
+            apply_envelope: Apply Gaussian envelope for bubble effect
+            grid_size: Downsample to NxN grid for performance
+
+        Returns:
+            Surface data: { x, y, z, colorscale, layer_name, stats }
+        """
+        import numpy as np
+
+        cached = activation_cache.get(job_id, {})
+        activations = cached.get(layer_name)
+
+        if activations is not None:
+            # Real activation data
+            act_np = np.array(activations)
+            if act_np.ndim > 2:
+                act_np = act_np[0]  # Take first batch element
+            seq_len, embed_dim = act_np.shape
+
+            # Downsample to grid_size for performance
+            x_indices = np.linspace(0, seq_len - 1, grid_size, dtype=int)
+            y_indices = np.linspace(0, embed_dim - 1, grid_size, dtype=int)
+            z_grid = act_np[np.ix_(x_indices, y_indices)]
+        else:
+            # Generate demo data with CTQW-style interference pattern
+            # This creates visually interesting patterns for marketing/showcase
+            x = np.linspace(-5, 5, grid_size)
+            y = np.linspace(-5, 5, grid_size)
+            xx, yy = np.meshgrid(x, y)
+
+            # CTQW-inspired interference pattern
+            r = np.sqrt(xx**2 + yy**2)
+            # Bessel-like oscillation + damping (quantum walk probability amplitude)
+            z_grid = np.cos(3 * r) * np.exp(-0.15 * r**2)
+            # Add some asymmetric "activation hotspots"
+            z_grid += 0.3 * np.exp(-((xx - 1.5) ** 2 + (yy - 1) ** 2) / 0.8)
+            z_grid += 0.2 * np.exp(-((xx + 2) ** 2 + (yy + 1.5) ** 2) / 0.5)
+
+        # Optional: Apply Gaussian envelope for bubble effect
+        if apply_envelope:
+            cx, cy = grid_size // 2, grid_size // 2
+            xx_env, yy_env = np.meshgrid(np.arange(grid_size), np.arange(grid_size))
+            r_env = np.sqrt((xx_env - cx) ** 2 + (yy_env - cy) ** 2)
+            sigma = grid_size / 3.5
+            envelope = np.exp(-(r_env**2) / (2 * sigma**2))
+            z_grid = z_grid * envelope.T
+
+        # Compute statistics
+        z_min = float(np.min(z_grid))
+        z_max = float(np.max(z_grid))
+        z_mean = float(np.mean(z_grid))
+        z_std = float(np.std(z_grid))
+
+        return {
+            "x": list(range(grid_size)),
+            "y": list(range(grid_size)),
+            "z": z_grid.tolist(),
+            "colorscale": "viridis",
+            "layer_name": layer_name,
+            "original_shape": [grid_size, grid_size],
+            "stats": {
+                "min": z_min,
+                "max": z_max,
+                "mean": z_mean,
+                "std": z_std,
+            },
+            "demo_mode": activations is None,
+        }
+
+    @app.post("/api/activations/cache/{job_id}/{layer_name}")
+    async def cache_activation(job_id: str, layer_name: str, request: Request):
+        """Cache activation data for a layer (called by training process).
+
+        Args:
+            job_id: Training or HPO job ID
+            layer_name: Name of the layer
+            request: JSON body containing activation tensor data
+
+        Returns:
+            Confirmation of cached layer
+        """
+        body = await request.json()
+        if job_id not in activation_cache:
+            activation_cache[job_id] = {}
+
+        activation_cache[job_id][layer_name] = body.get("activations")
+
+        # Keep only last 10 layers to limit memory
+        if len(activation_cache[job_id]) > 10:
+            oldest_key = next(iter(activation_cache[job_id]))
+            del activation_cache[job_id][oldest_key]
+
+        return {"status": "cached", "layer_name": layer_name}
+
+    @app.delete("/api/activations/cache/{job_id}")
+    async def clear_activation_cache(job_id: str):
+        """Clear activation cache for a job.
+
+        Args:
+            job_id: Training or HPO job ID
+
+        Returns:
+            Confirmation of cleared cache
+        """
+        if job_id in activation_cache:
+            del activation_cache[job_id]
+        return {"status": "cleared", "job_id": job_id}
+
+    # ========================================================================
+    # WebSocket - Safe Send Helper
+    # ========================================================================
+
+    async def safe_websocket_send(ws: WebSocket, data: dict) -> bool:
+        """Safely send JSON data to a WebSocket, handling connection errors.
+
+        This helper catches connection reset/broken pipe errors that occur
+        when the client disconnects before the server finishes sending.
+        These are expected during normal operation (page navigation, sweep
+        completion, trial switching) and should not cause error logging.
+
+        Args:
+            ws: WebSocket connection to send on
+            data: Dictionary to JSON-encode and send
+
+        Returns:
+            True if send succeeded, False if connection was closed
+        """
+        try:
+            await ws.send_json(data)
+            return True
+        except (RuntimeError, ConnectionResetError, BrokenPipeError):
+            # Connection was closed by client - this is normal
+            return False
+        except Exception as e:
+            # Log unexpected errors but don't crash
+            if "WebSocket is not connected" in str(e):
+                return False
+            logger.debug("[WebSocket] Send failed: %s", e)
+            return False
+
+    # ========================================================================
+    # WebSocket - Live Activation Streaming (Phase 4 Visualization)
+    # ========================================================================
+
+    # Track active activation stream connections
+    activation_stream_connections: dict[str, list[WebSocket]] = {}
+
+    @app.websocket("/ws/activations/live/{job_id}")
+    async def activation_stream_websocket(websocket: WebSocket, job_id: str):
+        """WebSocket endpoint for real-time activation data streaming.
+
+        Streams activation surface data during training for live visualization.
+        Updates every 3 seconds with the latest cached activation data.
+
+        Args:
+            websocket: WebSocket connection
+            job_id: Training or HPO job ID to stream activations for
+        """
+        await websocket.accept()
+        logger.debug("[Activation WS] Client connected for job: %s", job_id)
+
+        if job_id not in activation_stream_connections:
+            activation_stream_connections[job_id] = []
+        activation_stream_connections[job_id].append(websocket)
+
+        try:
+            # Configure streaming parameters - optimized for connection stability
+            stream_interval = 3.0  # seconds between updates (was 2.0)
+            grid_size = 32  # default visualization grid size (was 50, ~60% smaller)
+            default_layer = "encoder_block_0"
+
+            while True:
+                # Check if job exists and is running
+                job = training_jobs.get(job_id)
+                if job and job["state"] in [
+                    TrainingState.COMPLETED.value,
+                    TrainingState.CANCELLED.value,
+                    TrainingState.FAILED.value,
+                ]:
+                    await safe_websocket_send(
+                        websocket,
+                        {
+                            "type": "finished",
+                            "state": job["state"],
+                        },
+                    )
+                    break
+
+                # Get available layers
+                layers = []
+                if job_id in activation_cache:
+                    layers = list(activation_cache[job_id].keys())
+
+                # Select layer to stream (prefer first available, fallback to default)
+                layer_name = layers[0] if layers else default_layer
+
+                # Get or generate activation data
+                activations = None
+                if job_id in activation_cache and layer_name in activation_cache[job_id]:
+                    activations = activation_cache[job_id][layer_name]
+
+                # Generate surface data (same logic as REST endpoint)
+                import numpy as np
+
+                if activations is not None:
+                    act_array = np.array(activations)
+                    if act_array.ndim == 3:
+                        act_array = act_array.mean(axis=0)
+                    elif act_array.ndim == 1:
+                        side = int(np.ceil(np.sqrt(len(act_array))))
+                        padded = np.zeros(side * side)
+                        padded[: len(act_array)] = act_array
+                        act_array = padded.reshape(side, side)
+
+                    from scipy.ndimage import zoom
+
+                    if act_array.shape != (grid_size, grid_size):
+                        zoom_factors = (
+                            grid_size / act_array.shape[0],
+                            grid_size / act_array.shape[1],
+                        )
+                        z_grid = zoom(act_array, zoom_factors, order=1)
+                    else:
+                        z_grid = act_array
+                else:
+                    # Demo mode: generate animated wave pattern
+                    t = time.time()
+                    x = np.linspace(-3, 3, grid_size)
+                    y = np.linspace(-3, 3, grid_size)
+                    X, Y = np.meshgrid(x, y)
+                    z_grid = np.sin(np.sqrt(X**2 + Y**2) - t) * np.exp(-0.1 * (X**2 + Y**2))
+
+                # Compute stats
+                z_min = float(np.min(z_grid))
+                z_max = float(np.max(z_grid))
+                z_mean = float(np.mean(z_grid))
+                z_std = float(np.std(z_grid))
+
+                # Send activation data - use safe send to handle client disconnects
+                if not await safe_websocket_send(
+                    websocket,
+                    {
+                        "type": "activation_update",
+                        "data": {
+                            "x": list(range(grid_size)),
+                            "y": list(range(grid_size)),
+                            "z": z_grid.tolist(),
+                            "colorscale": "viridis",
+                            "layer_name": layer_name,
+                            "original_shape": [grid_size, grid_size],
+                            "stats": {
+                                "min": z_min,
+                                "max": z_max,
+                                "mean": z_mean,
+                                "std": z_std,
+                            },
+                            "demo_mode": activations is None,
+                            "available_layers": layers,
+                            "timestamp": time.time(),
+                        },
+                    },
+                ):
+                    # Client disconnected, exit gracefully
+                    break
+
+                await asyncio.sleep(stream_interval)
+
+        except WebSocketDisconnect:
+            logger.debug("[Activation WS] Client disconnected: %s", job_id)
+        except (ConnectionResetError, BrokenPipeError):
+            # Client disconnected mid-stream - this is normal during page navigation
+            logger.debug("[Activation WS] Connection reset for %s", job_id)
+        except Exception as e:
+            # Only log unexpected errors - connection issues are handled above
+            if "WebSocket" not in str(e) and "connection" not in str(e).lower():
+                logger.error("[Activation WS] Error in activation stream for %s: %s", job_id, e)
+            try:
+                await safe_websocket_send(websocket, {"type": "error", "message": str(e)})
+                await websocket.close(code=1011)
+            except Exception:
+                pass
+        finally:
+            if job_id in activation_stream_connections:
+                try:
+                    activation_stream_connections[job_id].remove(websocket)
+                except ValueError:
+                    pass
+
+    # ========================================================================
+    # API Routes - Multi-Layer Activation Visualization
+    # ========================================================================
+
+    @app.get("/api/activations/multi/{job_id}")
+    async def get_multi_layer_activations(
+        job_id: str,
+        layers: str = Query(..., description="Comma-separated list of layer names"),
+        grid_size: int = Query(40, ge=10, le=80, description="Surface grid size"),
+    ):
+        """Get activation data for multiple layers at once.
+
+        Returns surface data for all requested layers, suitable for
+        stacked layer visualization.
+
+        Args:
+            job_id: Training or HPO job ID
+            layers: Comma-separated layer names (e.g., "block_0,block_1,block_2")
+            grid_size: Downsample grid size for performance
+
+        Returns:
+            List of surface data objects, one per layer
+        """
+        import numpy as np
+
+        layer_names = [l.strip() for l in layers.split(",") if l.strip()]
+        cached = activation_cache.get(job_id, {})
+        results = []
+
+        for layer_name in layer_names:
+            activations = cached.get(layer_name)
+
+            if activations is not None:
+                # Real activation data
+                act_np = np.array(activations)
+                if act_np.ndim > 2:
+                    act_np = act_np[0]
+                seq_len, embed_dim = act_np.shape
+                x_indices = np.linspace(0, seq_len - 1, grid_size, dtype=int)
+                y_indices = np.linspace(0, embed_dim - 1, grid_size, dtype=int)
+                z_grid = act_np[np.ix_(x_indices, y_indices)]
+            else:
+                # Generate demo data with layer-specific patterns
+                layer_idx = layer_names.index(layer_name)
+                x = np.linspace(-4, 4, grid_size)
+                y = np.linspace(-4, 4, grid_size)
+                xx, yy = np.meshgrid(x, y)
+                r = np.sqrt(xx**2 + yy**2)
+
+                # Each layer has slightly different frequency/phase
+                freq = 2.5 + layer_idx * 0.3
+                phase = layer_idx * 0.5
+                z_grid = np.cos(freq * r + phase) * np.exp(-0.1 * r**2)
+                z_grid += 0.2 * np.sin(xx * 2 + layer_idx) * np.cos(yy * 2)
+
+            z_min = float(np.min(z_grid))
+            z_max = float(np.max(z_grid))
+            z_mean = float(np.mean(z_grid))
+            z_std = float(np.std(z_grid))
+
+            results.append(
+                {
+                    "layerName": layer_name,
+                    "z": z_grid.tolist(),
+                    "stats": {
+                        "min": z_min,
+                        "max": z_max,
+                        "mean": z_mean,
+                        "std": z_std,
+                    },
+                    "demo_mode": activations is None,
+                }
+            )
+
+        return {"layers": results, "job_id": job_id}
+
+    # ========================================================================
+    # API Routes - Loss Landscape Visualization
+    # ========================================================================
+
+    # In-memory storage for tunneling events
+    tunneling_events_cache: dict[str, list[dict[str, Any]]] = {}
+
+    @app.get("/api/hpo/{sweep_id}/loss-landscape")
+    async def get_loss_landscape(
+        sweep_id: str,
+        param_x: str = Query("learning_rate", description="X-axis parameter"),
+        param_y: str = Query("batch_size", description="Y-axis parameter"),
+        grid_resolution: int = Query(30, ge=10, le=50, description="Grid resolution"),
+    ):
+        """Generate 2D loss landscape data for 3D visualization.
+
+        Creates a grid of loss values by sweeping two hyperparameters.
+        Uses cached trial data when available, otherwise generates
+        a synthetic landscape for demonstration.
+
+        Args:
+            sweep_id: HPO sweep ID
+            param_x: First hyperparameter (X-axis)
+            param_y: Second hyperparameter (Y-axis)
+            grid_resolution: Number of points per axis
+
+        Returns:
+            Loss landscape grid suitable for LossLandscape3D component
+        """
+        import numpy as np
+
+        # Try to get real trial data
+        sweep_data = hpo_sweeps.get(sweep_id) if "hpo_sweeps" in dir() else None
+        trial_points = []
+
+        if sweep_data and "trials" in sweep_data:
+            for trial in sweep_data["trials"]:
+                if "config" in trial and "final_loss" in trial:
+                    x_val = trial["config"].get(param_x)
+                    y_val = trial["config"].get(param_y)
+                    loss = trial["final_loss"]
+                    if x_val is not None and y_val is not None:
+                        trial_points.append((x_val, y_val, loss))
+
+        # Generate landscape grid
+        x = np.linspace(0, 1, grid_resolution)
+        y = np.linspace(0, 1, grid_resolution)
+        z: list[list[float]] = []
+
+        if len(trial_points) >= 5:
+            # Interpolate from real trial data
+            from scipy.interpolate import RBFInterpolator
+
+            trial_arr = np.array(trial_points)
+            points = trial_arr[:, :2]
+            values = trial_arr[:, 2]
+
+            # Normalize to [0, 1]
+            points_norm = (points - points.min(axis=0)) / (
+                points.max(axis=0) - points.min(axis=0) + 1e-8
+            )
+
+            try:
+                interp = RBFInterpolator(points_norm, values, kernel="thin_plate_spline")
+                for i in range(grid_resolution):
+                    row = []
+                    for j in range(grid_resolution):
+                        val = float(interp(np.array([[x[i], y[j]]]))[0])
+                        row.append(val)
+                    z.append(row)
+            except Exception:
+                # Fallback to synthetic
+                trial_points = []
+
+        if len(trial_points) < 5:
+            # Generate synthetic Rastrigin-like loss landscape
+            for i in range(grid_resolution):
+                row = []
+                for j in range(grid_resolution):
+                    xi = (x[i] - 0.5) * 4
+                    yj = (y[j] - 0.5) * 4
+                    # Rastrigin function (multiple local minima)
+                    loss = (
+                        20 + xi**2 + yj**2 - 10 * (np.cos(2 * np.pi * xi) + np.cos(2 * np.pi * yj))
+                    )
+                    # Add some asymmetry
+                    loss += 0.5 * np.sin(xi * 2) * np.cos(yj * 1.5)
+                    row.append(float(loss))
+                z.append(row)
+
+        z_arr = np.array(z)
+        z_min = float(np.min(z_arr))
+        z_max = float(np.max(z_arr))
+
+        # Find best position
+        min_idx = np.unravel_index(np.argmin(z_arr), z_arr.shape)
+        best_position = {
+            "x": float(x[min_idx[0]]),
+            "y": float(y[min_idx[1]]),
+            "z": float((z_arr[min_idx] - z_min) / (z_max - z_min + 1e-8)),
+        }
+
+        return {
+            "x": x.tolist(),
+            "y": y.tolist(),
+            "z": z,
+            "param_x": param_x,
+            "param_y": param_y,
+            "stats": {
+                "min": z_min,
+                "max": z_max,
+            },
+            "best_position": best_position,
+            "real_data": len(trial_points) >= 5,
+            "sweep_id": sweep_id,
+        }
+
+    @app.get("/api/hpo/{sweep_id}/tunneling-events")
+    async def get_tunneling_events(
+        sweep_id: str,
+        limit: int = Query(50, ge=1, le=200, description="Max events to return"),
+    ):
+        """Return history of quantum tunneling events for a sweep.
+
+        Tunneling events occur when QAHPO's quantum-inspired optimization
+        jumps across energy barriers to explore new hyperparameter regions.
+
+        Args:
+            sweep_id: HPO sweep ID
+            limit: Maximum number of events to return
+
+        Returns:
+            List of tunneling events with timestamps and positions
+        """
+        events = tunneling_events_cache.get(sweep_id, [])
+
+        # Return most recent events
+        recent_events = events[-limit:] if len(events) > limit else events
+
+        return {
+            "sweep_id": sweep_id,
+            "total_events": len(events),
+            "events": recent_events,
+            "summary": {
+                "total_tunnels": len(events),
+                "avg_probability": sum(e.get("probability", 0) for e in events)
+                / max(1, len(events)),
+                "last_tunnel_time": events[-1]["timestamp"] if events else None,
+            },
+        }
+
+    @app.post("/api/hpo/{sweep_id}/tunneling-events")
+    async def record_tunneling_event(sweep_id: str, request: Request):
+        """Record a tunneling event (called by HPO scheduler).
+
+        Args:
+            sweep_id: HPO sweep ID
+            request: JSON body with event details
+
+        Returns:
+            Confirmation with event ID
+        """
+        body = await request.json()
+
+        if sweep_id not in tunneling_events_cache:
+            tunneling_events_cache[sweep_id] = []
+
+        event = {
+            "id": len(tunneling_events_cache[sweep_id]),
+            "timestamp": time.time(),
+            "from_position": body.get("from_position", [0, 0, 0]),
+            "to_position": body.get("to_position", [0, 0, 0]),
+            "probability": body.get("probability", 0),
+            "temperature": body.get("temperature", 1.0),
+            "trial_id": body.get("trial_id"),
+        }
+
+        tunneling_events_cache[sweep_id].append(event)
+
+        # Keep only last 500 events per sweep
+        if len(tunneling_events_cache[sweep_id]) > 500:
+            tunneling_events_cache[sweep_id] = tunneling_events_cache[sweep_id][-500:]
+
+        return {"status": "recorded", "event_id": event["id"]}
+
+    # ========================================================================
     # API Routes - HPO
     # ========================================================================
 
@@ -2719,6 +3558,15 @@ def create_app(debug: bool = False) -> FastAPI:
             sweep_id=sweep_id,
             model_config=model_config,
             auto_stop_on_convergence=payload.auto_stop_on_convergence,
+            # Enterprise HPO Features
+            multi_fidelity_scheduler=payload.multi_fidelity_scheduler,
+            importance_analyzer=payload.importance_analyzer,
+            enable_zero_cost_proxy=payload.enable_zero_cost_proxy,
+            enable_early_stopping_predictor=payload.enable_early_stopping_predictor,
+            enable_deep_kernel_gp=payload.enable_deep_kernel_gp,
+            enable_acquisition_portfolio=payload.enable_acquisition_portfolio,
+            enable_regret_tracking=payload.enable_regret_tracking,
+            enable_darts=payload.enable_darts,
         )
 
         # Create scheduler based on strategy
@@ -3044,6 +3892,65 @@ def create_app(debug: bool = False) -> FastAPI:
             "best_loss": sweep.get("best_loss"),
             "best_composite_score": sweep.get("best_composite_score"),
         }
+
+    @app.get("/api/hpo/sweep/{sweep_id}/export")
+    async def export_hpo_config(sweep_id: str, format: str = "json"):
+        """Export best hyperparameter configuration for production use.
+
+        Downloads the best hyperparameters as JSON or YAML file.
+
+        Args:
+            sweep_id: The HPO sweep ID
+            format: Output format - 'json' or 'yaml' (default: json)
+
+        Returns:
+            File download with Content-Disposition header
+        """
+        from fastapi.responses import Response
+
+        sweep = hpo_sweeps.get(sweep_id)
+        if not sweep:
+            raise HTTPException(status_code=404, detail="HPO sweep not found")
+
+        best_hp = sweep.get("best_hyperparams", {})
+        model_config = sweep.get("model_config", {})
+        sweep_config = sweep.get("config", {})
+
+        export_data = {
+            "sweep_id": sweep_id,
+            "exported_at": datetime.now().isoformat(),
+            "best_loss": sweep.get("best_loss"),
+            "best_composite_score": sweep.get("best_composite_score"),
+            "hyperparameters": best_hp,
+            "model_config": model_config,
+            "training_config": {
+                "epochs_per_trial": sweep_config.get("epochs_per_trial", 5),
+                "search_strategy": sweep_config.get("search_strategy", "quantum"),
+            },
+        }
+
+        if format.lower() == "yaml":
+            try:
+                import yaml
+
+                content = yaml.dump(export_data, default_flow_style=False, sort_keys=False)
+                media_type = "application/x-yaml"
+                filename = f"hpo_config_{sweep_id}.yaml"
+            except ImportError:
+                # Fallback to JSON if yaml not available
+                content = json.dumps(export_data, indent=2)
+                media_type = "application/json"
+                filename = f"hpo_config_{sweep_id}.json"
+        else:
+            content = json.dumps(export_data, indent=2)
+            media_type = "application/json"
+            filename = f"hpo_config_{sweep_id}.json"
+
+        return Response(
+            content=content,
+            media_type=media_type,
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
 
     @app.get("/api/hpo/sweep/{sweep_id}/skipped")
     async def get_hpo_skipped_trials(sweep_id: str):
@@ -4217,6 +5124,358 @@ def create_app(debug: bool = False) -> FastAPI:
             "local_ip": info["local_ip"],
         }
 
+    # ========================================================================
+    # Distributed HPO API (Enterprise Phase 6 - Ray Tune Integration)
+    # ========================================================================
+
+    @app.get("/api/distributed-hpo/status")
+    async def get_distributed_hpo_status():
+        """Get status of distributed HPO cluster.
+
+        Returns Ray Tune cluster state, active trials, and resource info.
+        """
+        try:
+            from highnoon.services.hpo_distributed import get_distributed_manager
+
+            manager = get_distributed_manager()
+            return manager.get_status()
+        except ImportError:
+            return {
+                "status": "offline",
+                "ray_available": False,
+                "error_message": "Ray Tune not installed. Run: pip install ray[tune]",
+            }
+
+    @app.post("/api/distributed-hpo/start")
+    async def start_distributed_hpo_cluster(request: Request):
+        """Start distributed HPO cluster.
+
+        Body: {
+            "num_workers": 4,
+            "num_cpus_per_worker": 2,
+            "num_gpus_per_worker": 0,
+            "ray_address": null,
+            "scheduler_type": "asha"
+        }
+        """
+        try:
+            from highnoon.services.hpo_distributed import (
+                DistributedHPOConfig,
+                get_distributed_manager,
+            )
+
+            body = await request.json() if await request.body() else {}
+
+            config = DistributedHPOConfig(
+                enable_distributed=True,
+                num_workers=body.get("num_workers", 4),
+                num_cpus_per_worker=body.get("num_cpus_per_worker", 2),
+                num_gpus_per_worker=body.get("num_gpus_per_worker", 0),
+                ray_address=body.get("ray_address"),
+                scheduler_type=body.get("scheduler_type", "asha"),
+                max_concurrent_trials=body.get("max_concurrent_trials", 8),
+            )
+
+            manager = get_distributed_manager()
+            manager.config = config
+
+            success = await manager.start_cluster()
+            if success:
+                return {"status": "started", "cluster": manager.get_status()}
+            else:
+                raise HTTPException(
+                    status_code=500,
+                    detail=manager.state.error_message or "Failed to start cluster",
+                )
+
+        except ImportError:
+            raise HTTPException(
+                status_code=501,
+                detail="Ray Tune not installed. Run: pip install ray[tune]",
+            )
+
+    @app.post("/api/distributed-hpo/stop")
+    async def stop_distributed_hpo_cluster():
+        """Stop distributed HPO cluster."""
+        try:
+            from highnoon.services.hpo_distributed import get_distributed_manager
+
+            manager = get_distributed_manager()
+            await manager.stop_cluster()
+            return {"status": "stopped"}
+        except ImportError:
+            return {"status": "not_running"}
+
+    @app.post("/api/distributed-hpo/config")
+    async def update_distributed_hpo_config(request: Request):
+        """Update distributed HPO configuration without restarting cluster.
+
+        Body: {
+            "scheduler_type": "asha" | "pbt" | "qahpo",
+            "max_concurrent_trials": 8,
+            "checkpoint_freq": 5,
+            "grace_period": 5,
+            "reduction_factor": 3
+        }
+        """
+        try:
+            from highnoon.services.hpo_distributed import get_distributed_manager
+
+            manager = get_distributed_manager()
+            body = await request.json() if await request.body() else {}
+
+            # Update config fields
+            if "scheduler_type" in body:
+                manager.config.scheduler_type = body["scheduler_type"]
+            if "max_concurrent_trials" in body:
+                manager.config.max_concurrent_trials = body["max_concurrent_trials"]
+            if "checkpoint_freq" in body:
+                manager.config.checkpoint_freq = body["checkpoint_freq"]
+            if "grace_period" in body:
+                manager.config.grace_period = body["grace_period"]
+            if "reduction_factor" in body:
+                manager.config.reduction_factor = body["reduction_factor"]
+
+            return {
+                "status": "updated",
+                "config": {
+                    "scheduler_type": manager.config.scheduler_type,
+                    "max_concurrent_trials": manager.config.max_concurrent_trials,
+                    "checkpoint_freq": manager.config.checkpoint_freq,
+                },
+            }
+        except ImportError:
+            raise HTTPException(status_code=501, detail="Ray not available")
+
+    @app.get("/api/distributed-hpo/trials")
+    async def get_distributed_hpo_trials():
+        """Get results from all distributed HPO trials."""
+        try:
+            from highnoon.services.hpo_distributed import get_distributed_manager
+
+            manager = get_distributed_manager()
+            return {"trials": manager.get_trial_results()}
+        except ImportError:
+            return {"trials": []}
+
+    # ========================================================================
+    # NAS API (Enterprise Phase 2 - Neural Architecture Search)
+    # ========================================================================
+
+    @app.get("/api/nas/status")
+    async def get_nas_status():
+        """Get DARTS NAS status and current architecture weights."""
+        try:
+            from highnoon.services.hpo_nas import DARTSSearcher
+
+            # Return available features
+            return {
+                "available": True,
+                "features": ["darts", "early_stopping_predictor", "zero_cost_proxy"],
+            }
+        except ImportError:
+            return {"available": False, "error": "NAS module not available"}
+
+    @app.post("/api/nas/zero-cost-evaluate")
+    async def evaluate_zero_cost_proxy(request: Request):
+        """Evaluate architecture with zero-cost proxies.
+
+        Body: {"config": {...architecture config...}}
+        """
+        try:
+            from highnoon.services.hpo_nas import ZeroCostProxy
+
+            body = await request.json()
+            config = body.get("config", {})
+
+            proxy = ZeroCostProxy()
+            scores = proxy.evaluate(config)
+
+            return {
+                "scores": [
+                    {"proxy": s.proxy_name, "score": s.score, "time_ms": s.compute_time_ms}
+                    for s in scores
+                ]
+            }
+        except ImportError:
+            raise HTTPException(status_code=501, detail="NAS module not available")
+
+    # ========================================================================
+    # ASHA Scheduler API (Enterprise Phase 3 - Multi-Fidelity)
+    # ========================================================================
+
+    @app.get("/api/scheduler/types")
+    async def get_scheduler_types():
+        """Get available HPO scheduler types."""
+        return {
+            "schedulers": [
+                {"id": "asha", "name": "ASHA", "description": "Asynchronous Successive Halving"},
+                {"id": "mobster", "name": "MOBSTER", "description": "Model-Based ASHA with GP"},
+                {
+                    "id": "freeze_thaw",
+                    "name": "Freeze-Thaw",
+                    "description": "Dynamic pause/resume BO",
+                },
+                {"id": "hyperband", "name": "Hyperband", "description": "Classic multi-fidelity"},
+                {"id": "pbt", "name": "PBT", "description": "Population-Based Training"},
+            ]
+        }
+
+    @app.get("/api/scheduler/asha/status")
+    async def get_asha_status():
+        """Get ASHA scheduler status and statistics."""
+        try:
+            from highnoon.services.hpo_asha import ASHAScheduler
+
+            return {"available": True, "type": "ASHA"}
+        except ImportError:
+            return {"available": False}
+
+    # ========================================================================
+    # AutoML Pipeline API (Enterprise Phase 6.3)
+    # ========================================================================
+
+    _automl_pipeline = None
+
+    @app.get("/api/automl/status")
+    async def get_automl_status():
+        """Get AutoML pipeline status."""
+        try:
+            from highnoon.services.hpo_automl import AutoMLPipeline
+
+            if _automl_pipeline:
+                return _automl_pipeline.get_statistics()
+            return {"stage": "idle", "available": True}
+        except ImportError:
+            return {"available": False, "error": "AutoML module not available"}
+
+    @app.post("/api/automl/start")
+    async def start_automl_pipeline(request: Request):
+        """Start AutoML pipeline.
+
+        Body: {
+            "time_budget": 3600,
+            "max_trials": 100,
+            "num_samples": 10000
+        }
+        """
+        global _automl_pipeline
+        try:
+            from highnoon.services.hpo_automl import AutoMLPipeline
+
+            body = await request.json() if await request.body() else {}
+
+            _automl_pipeline = AutoMLPipeline(
+                time_budget=body.get("time_budget", 3600),
+                max_trials=body.get("max_trials", 100),
+            )
+
+            # Start in background (non-blocking)
+            asyncio.create_task(_automl_pipeline.run(num_samples=body.get("num_samples", 10000)))
+
+            return {"status": "started", "stage": _automl_pipeline.current_stage.value}
+        except ImportError:
+            raise HTTPException(status_code=501, detail="AutoML not available")
+
+    @app.post("/api/automl/stop")
+    async def stop_automl_pipeline():
+        """Stop AutoML pipeline."""
+        global _automl_pipeline
+        _automl_pipeline = None
+        return {"status": "stopped"}
+
+    # ========================================================================
+    # Advanced fANOVA API (Enterprise Phase 4)
+    # ========================================================================
+
+    @app.get("/api/fanova/types")
+    async def get_fanova_types():
+        """Get available fANOVA analysis types."""
+        return {
+            "analyzers": [
+                {"id": "standard", "name": "Standard fANOVA", "description": "Random Forest ANOVA"},
+                {"id": "graph", "name": "Graph fANOVA", "description": "Conditional dependencies"},
+                {"id": "causal", "name": "Causal fANOVA", "description": "Interventional analysis"},
+                {
+                    "id": "streaming",
+                    "name": "Streaming fANOVA",
+                    "description": "O(1) online updates",
+                },
+                {
+                    "id": "shapley",
+                    "name": "Shapley Values",
+                    "description": "Game-theoretic importance",
+                },
+            ]
+        }
+
+    @app.post("/api/fanova/analyze")
+    async def analyze_importance(request: Request):
+        """Run fANOVA importance analysis on trial data.
+
+        Body: {
+            "type": "shapley" | "graph" | "causal" | "streaming",
+            "configs": [...],
+            "losses": [...]
+        }
+        """
+        try:
+            body = await request.json()
+            analysis_type = body.get("type", "shapley")
+            configs = body.get("configs", [])
+            losses = body.get("losses", [])
+
+            if not configs or not losses:
+                raise HTTPException(status_code=400, detail="configs and losses required")
+
+            if analysis_type == "shapley":
+                from highnoon.services.hpo_shapley import ShapleyImportanceAnalyzer
+
+                analyzer = ShapleyImportanceAnalyzer()
+                analyzer.fit(configs, losses)
+                importance = analyzer.get_importance()
+            elif analysis_type == "streaming":
+                from highnoon.services.hpo_fanova_advanced import StreamingfANOVA
+
+                analyzer = StreamingfANOVA()
+                for c, l in zip(configs, losses):
+                    importance = analyzer.update(c, l)
+            else:
+                from highnoon.services.hpo_fanova_advanced import GraphfANOVA
+
+                analyzer = GraphfANOVA()
+                analyzer.fit(configs, losses)
+                importance = analyzer.get_all_importance()
+
+            return {"type": analysis_type, "importance": importance}
+
+        except ImportError as e:
+            raise HTTPException(status_code=501, detail=str(e))
+
+    # ========================================================================
+    # Theoretical HPO API (Enterprise Phase 7)
+    # ========================================================================
+
+    @app.get("/api/hpo/regret")
+    async def get_regret_statistics():
+        """Get regret tracking statistics."""
+        try:
+            from highnoon.services.hpo_theoretical import RegretTracker
+
+            return {"available": True, "features": ["simple_regret", "cumulative_regret", "bounds"]}
+        except ImportError:
+            return {"available": False}
+
+    @app.get("/api/hpo/experiment-framework/status")
+    async def get_experiment_framework_status():
+        """Get A/B testing framework status."""
+        try:
+            from highnoon.services.hpo_theoretical import HPOExperimentFramework
+
+            return {"available": True, "features": ["thompson_sampling", "ucb", "regret_tracking"]}
+        except ImportError:
+            return {"available": False}
+
     @app.websocket("/ws/distributed")
     async def distributed_websocket(websocket: WebSocket):
         """WebSocket endpoint for real-time cluster updates.
@@ -4233,16 +5492,22 @@ def create_app(debug: bool = False) -> FastAPI:
 
                 # Only send if status changed
                 if status_dict != last_status:
-                    await websocket.send_json(
+                    if not await safe_websocket_send(
+                        websocket,
                         {
                             "type": "cluster_status",
                             "data": status_dict,
-                        }
-                    )
+                        },
+                    ):
+                        # Client disconnected - exit gracefully
+                        break
                     last_status = status_dict
 
                 await asyncio.sleep(1)
         except WebSocketDisconnect:
+            pass
+        except (ConnectionResetError, BrokenPipeError):
+            # Client disconnected mid-stream - this is normal
             pass
         except Exception:
             pass
@@ -4353,11 +5618,12 @@ def create_app(debug: bool = False) -> FastAPI:
             while True:
                 job = training_jobs.get(job_id)
                 if not job:
-                    await websocket.send_json({"error": "Job not found"})
+                    await safe_websocket_send(websocket, {"error": "Job not found"})
                     break
 
-                # Send current metrics
-                await websocket.send_json(
+                # Send current metrics - use safe send for connection stability
+                if not await safe_websocket_send(
+                    websocket,
                     {
                         "type": "metrics",
                         "data": {
@@ -4371,21 +5637,35 @@ def create_app(debug: bool = False) -> FastAPI:
                             "hpo_trial_current": job.get("hpo_trial_current", 0),
                             "hpo_trial_total": job.get("hpo_trial_total", 0),
                         },
-                    }
-                )
+                    },
+                ):
+                    break  # Client disconnected
 
-                # Check if job finished
                 if job["state"] in [
                     TrainingState.COMPLETED.value,
                     TrainingState.CANCELLED.value,
                     TrainingState.FAILED.value,
                 ]:
-                    await websocket.send_json({"type": "finished", "state": job["state"]})
+                    await safe_websocket_send(
+                        websocket, {"type": "finished", "state": job["state"]}
+                    )
                     break
 
                 await asyncio.sleep(1)  # Update every second
         except WebSocketDisconnect:
-            pass
+            logger.debug("[Training WS] Client disconnected: %s", job_id)
+        except (ConnectionResetError, BrokenPipeError):
+            # Client disconnected mid-stream - this is normal during page navigation
+            logger.debug("[Training WS] Connection reset for %s", job_id)
+        except Exception as e:
+            # Only log unexpected errors
+            if "WebSocket" not in str(e) and "connection" not in str(e).lower():
+                logger.error("[Training WS] Error in training stream for %s: %s", job_id, e)
+            try:
+                await safe_websocket_send(websocket, {"type": "error", "message": str(e)})
+                await websocket.close(code=1011)
+            except Exception:
+                pass
         finally:
             if job_id in active_websockets:
                 active_websockets[job_id].remove(websocket)
@@ -4399,29 +5679,79 @@ def create_app(debug: bool = False) -> FastAPI:
             while True:
                 sweep = hpo_sweeps.get(sweep_id)
                 if not sweep:
-                    await websocket.send_json({"error": "Sweep not found"})
+                    await safe_websocket_send(websocket, {"error": "Sweep not found"})
                     break
 
-                await websocket.send_json(
+                # Get live progress from active executor if running
+                # This fixes the issue where sweep updates were only sent after completion
+                executor = active_sweeps.get(sweep_id)
+                if executor:
+                    completed = len(executor.completed_trials)
+                    best_loss = executor.best_trial.loss if executor.best_trial else None
+                    best_trial_id = executor.best_trial.trial_id if executor.best_trial else None
+                    best_composite_score = (
+                        executor.best_trial.composite_score if executor.best_trial else None
+                    )
+                    best_perplexity = (
+                        executor.best_trial.perplexity if executor.best_trial else None
+                    )
+                    best_confidence = (
+                        executor.best_trial.mean_confidence if executor.best_trial else None
+                    )
+                    # Get currently running trial ID for UI progress indicator
+                    current_trial_id = None
+                    if executor.running_trial_configs:
+                        current_trial_id = list(executor.running_trial_configs.keys())[0]
+                else:
+                    # Fallback to stored sweep data (for completed sweeps)
+                    completed = sweep["completed_trials"]
+                    best_loss = sweep.get("best_loss")
+                    best_trial_id = sweep.get("best_trial_id")
+                    best_composite_score = sweep.get("best_composite_score")
+                    best_perplexity = sweep.get("best_perplexity")
+                    best_confidence = sweep.get("best_confidence")
+                    current_trial_id = None
+
+                if not await safe_websocket_send(
+                    websocket,
                     {
                         "type": "sweep_update",
                         "data": {
                             "state": sweep["state"],
-                            "completed_trials": sweep["completed_trials"],
+                            "completed_trials": completed,
                             "max_trials": sweep["max_trials"],
-                            "best_loss": sweep.get("best_loss"),
-                            "best_trial_id": sweep.get("best_trial_id"),
+                            "best_loss": best_loss,
+                            "best_trial_id": best_trial_id,
+                            "best_composite_score": best_composite_score,
+                            "best_perplexity": best_perplexity,
+                            "best_confidence": best_confidence,
+                            "current_trial_id": current_trial_id,
                         },
-                    }
-                )
+                    },
+                ):
+                    break  # Client disconnected
 
                 if sweep["state"] in ["completed", "cancelled"]:
-                    await websocket.send_json({"type": "finished", "state": sweep["state"]})
+                    await safe_websocket_send(
+                        websocket, {"type": "finished", "state": sweep["state"]}
+                    )
                     break
 
                 await asyncio.sleep(2)
         except WebSocketDisconnect:
-            pass
+            logger.debug("[HPO WS] Client disconnected: %s", sweep_id)
+        except (ConnectionResetError, BrokenPipeError):
+            # Client disconnected mid-stream - this is normal during page navigation
+            logger.debug("[HPO WS] Connection reset for %s", sweep_id)
+        except Exception as e:
+            # Only log unexpected errors
+            if "WebSocket" not in str(e) and "connection" not in str(e).lower():
+                logger.error("[HPO WS] Error in HPO stream for %s: %s", sweep_id, e)
+            try:
+                await safe_websocket_send(websocket, {"type": "error", "message": str(e)})
+                await websocket.close(code=1011)
+            except Exception:
+                pass
 
     # ========================================================================
     # Phase 200+: QULS Full Telemetry WebSocket (HIGHNOON_UPGRADE_ROADMAP.md)
@@ -4508,26 +5838,29 @@ def create_app(debug: bool = False) -> FastAPI:
                             "mean_confidence": job.get("mean_confidence"),
                         },
                     }
-                    await websocket.send_json(telemetry)
+                    if not await safe_websocket_send(websocket, telemetry):
+                        break  # Client disconnected
 
                     # Check for job completion
                     if job.get("state") in ["completed", "failed", "cancelled"]:
                         # For sweeps, only finish if sweep is done, not individual trials
                         if is_sweep:
                             if sweep.get("state") in ["completed", "cancelled"]:
-                                await websocket.send_json(
+                                await safe_websocket_send(
+                                    websocket,
                                     {
                                         "type": "finished",
                                         "state": sweep.get("state"),
-                                    }
+                                    },
                                 )
                                 break
                         else:
-                            await websocket.send_json(
+                            await safe_websocket_send(
+                                websocket,
                                 {
                                     "type": "finished",
                                     "state": job.get("state"),
-                                }
+                                },
                             )
                             break
                 elif is_sweep:
@@ -4572,30 +5905,51 @@ def create_app(debug: bool = False) -> FastAPI:
                             "throughput_samples_sec": 0.0,
                         },
                     }
-                    await websocket.send_json(telemetry)
+                    if not await safe_websocket_send(websocket, telemetry):
+                        break  # Client disconnected
 
-                    # Check if sweep is done
                     if sweep.get("state") in ["completed", "cancelled"]:
-                        await websocket.send_json(
+                        await safe_websocket_send(
+                            websocket,
                             {
                                 "type": "finished",
                                 "state": sweep.get("state"),
-                            }
+                            },
                         )
                         break
                 else:
                     # Neither sweep nor job found - send waiting status and keep connection alive
-                    await websocket.send_json(
+                    if not await safe_websocket_send(
+                        websocket,
                         {
                             "type": "waiting",
                             "message": "Waiting for training data...",
                             "job_id": job_id,
-                        }
-                    )
+                        },
+                    ):
+                        break  # Client disconnected
 
                 await asyncio.sleep(1)  # More frequent updates for telemetry
         except WebSocketDisconnect:
-            pass
+            logger.debug("[Telemetry WS] Client disconnected: %s", job_id)
+        except (ConnectionResetError, BrokenPipeError):
+            # Client disconnected mid-stream - this is normal during page navigation
+            logger.debug("[Telemetry WS] Connection reset for %s", job_id)
+        except Exception as e:
+            # Only log unexpected errors - connection issues are handled above
+            if "WebSocket" not in str(e) and "connection" not in str(e).lower():
+                logger.error("[Telemetry WS] Error in telemetry stream for %s: %s", job_id, e)
+            try:
+                await safe_websocket_send(
+                    websocket,
+                    {
+                        "type": "error",
+                        "message": str(e),
+                    },
+                )
+                await websocket.close(code=1011)  # Internal error
+            except Exception:
+                pass  # Connection already closed
 
     # ========================================================================
     # Attribution Configuration (Pro/Enterprise Feature)
@@ -4745,7 +6099,7 @@ def create_app(debug: bool = False) -> FastAPI:
     @app.get("/health")
     async def health_status():
         """Health check endpoint."""
-        return {"status": "healthy", "version": "1.0.0"}
+        return {"status": "healthy", "version": "2.1"}
 
     return app
 

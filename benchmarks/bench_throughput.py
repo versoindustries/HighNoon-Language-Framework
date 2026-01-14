@@ -614,11 +614,33 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="HSMN Throughput Benchmark",
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python benchmarks/bench_throughput.py --quick          # Quick validation
+  python benchmarks/bench_throughput.py --enterprise     # 128k context benchmark
+  python benchmarks/bench_throughput.py --ultra          # 1M context benchmark
+  python benchmarks/bench_throughput.py --verbose        # Default with logging
+""",
     )
     parser.add_argument(
         "--quick", action="store_true", help="Use quick configuration for validation"
     )
     parser.add_argument("--speed", action="store_true", help="Use speed-optimized configuration")
+    parser.add_argument(
+        "--enterprise",
+        action="store_true",
+        help="Enterprise 128k context benchmark (seq lengths up to 131072)",
+    )
+    parser.add_argument(
+        "--ultra",
+        action="store_true",
+        help="Ultra 1M context benchmark (seq lengths up to 1048576)",
+    )
+    parser.add_argument(
+        "--long-context",
+        action="store_true",
+        help="Long context benchmark (seq lengths up to 65536)",
+    )
     parser.add_argument(
         "--output-format",
         choices=["json", "markdown", "both"],
@@ -645,13 +667,32 @@ def main() -> int:
         format="%(asctime)s [%(levelname)s] %(message)s",
     )
 
-    # Select configuration
-    if args.speed:
+    # Select configuration based on flags (priority: ultra > enterprise > long-context > speed > quick > default)
+    if args.ultra:
+        config = BenchmarkConfig.ultra()
+        print("Using ULTRA benchmark config (1M context)")
+    elif args.enterprise:
+        config = BenchmarkConfig.enterprise()
+        print("Using ENTERPRISE benchmark config (128k context)")
+    elif args.long_context:
+        config = BenchmarkConfig.long_context()
+        print("Using LONG-CONTEXT benchmark config (65k context)")
+    elif args.speed:
         config = BenchmarkConfig.speed()
+        print("Using SPEED benchmark config")
     elif args.quick:
         config = BenchmarkConfig.quick()
+        print("Using QUICK benchmark config")
     else:
         config = BenchmarkConfig()
+        print("Using DEFAULT benchmark config")
+
+    print(f"Sequence lengths: {config.throughput.sequence_lengths}")
+    print(f"Batch sizes: {config.throughput.batch_sizes}")
+    print(
+        f"Model: {config.model.embedding_dim}d embedding, {config.model.num_reasoning_blocks} blocks"
+    )
+    print()
 
     # Load trained model if checkpoint provided
     trained_model = None
@@ -685,9 +726,25 @@ def main() -> int:
         print(f"Saved Markdown: {md_path}")
 
     # Print summary
+    print()
+    print("=" * 60)
+    print("THROUGHPUT RESULTS")
+    print("=" * 60)
+    if results.get("streaming_results"):
+        print(f"{'Seq Length':>12} | {'Batch':>6} | {'Tokens/sec':>12}")
+        print("-" * 38)
+        for r in results["streaming_results"]:
+            print(
+                f"{r['sequence_length']:>12,} | {r['batch_size']:>6} | {r['tokens_per_second']:>12,.0f}"
+            )
+        print()
+
     if results.get("streaming_summary"):
         s = results["streaming_summary"]
-        print(f"\nStreaming forward throughput: {s['mean_tokens_per_second']:,.0f} tok/s (mean)")
+        print(f"Streaming forward throughput: {s['mean_tokens_per_second']:,.0f} tok/s (mean)")
+        print(f"  Max: {s['max_tokens_per_second']:,.0f} tok/s")
+        print(f"  Min: {s['min_tokens_per_second']:,.0f} tok/s")
+
     if results.get("qsg_summary"):
         s = results["qsg_summary"]
         print(f"QSG generation throughput: {s['mean_tokens_per_second']:.1f} tok/s (mean)")

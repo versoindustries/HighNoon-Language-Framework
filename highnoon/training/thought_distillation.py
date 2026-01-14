@@ -293,8 +293,9 @@ class ThoughtDistillationLoss(tf.keras.losses.Loss):
         if teacher_hidden is not None and student_hidden is not None:
             if self.use_cosine_similarity:
                 # Cosine similarity loss: 1 - cos_sim
-                teacher_norm = tf.nn.l2_normalize(teacher_hidden, axis=-1)
-                student_norm = tf.nn.l2_normalize(student_hidden, axis=-1)
+                # GRADIENT FIX: Add epsilon to prevent NaN/Inf gradients when norm → 0
+                teacher_norm = tf.nn.l2_normalize(teacher_hidden, axis=-1, epsilon=1e-8)
+                student_norm = tf.nn.l2_normalize(student_hidden, axis=-1, epsilon=1e-8)
                 cos_sim = tf.reduce_sum(teacher_norm * student_norm, axis=-1)
                 hidden_loss = tf.reduce_mean(1 - cos_sim)
             else:

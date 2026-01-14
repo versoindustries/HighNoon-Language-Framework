@@ -193,8 +193,7 @@ class ToolManifest:
         limiter = registration.rate_limiter
         if limiter is not None and not limiter.allow():
             raise ToolExecutionError(
-                f"Tool '{name}' exceeded rate limit "
-                f"{limiter.max_calls}/{limiter.interval_sec}s."
+                f"Tool '{name}' exceeded rate limit {limiter.max_calls}/{limiter.interval_sec}s."
             )
 
         # Execute the tool
@@ -227,6 +226,28 @@ class ToolManifest:
                 "name": reg.name,
                 "description": reg.description,
                 "safety_class": reg.safety_class,
+            }
+            for reg in self._tools.values()
+        ]
+
+    def to_openai_tools(self) -> list[dict[str, Any]]:
+        """Convert tool registrations to OpenAI function calling format.
+
+        Returns:
+            List of tool definitions in OpenAI format.
+        """
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": reg.name,
+                    "description": reg.description,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "required": [],
+                    },
+                },
             }
             for reg in self._tools.values()
         ]

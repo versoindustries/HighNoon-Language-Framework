@@ -59,7 +59,7 @@ def _load_ops():
         _available = False
         logger.warning(f"Failed to load intrinsic plasticity ops: {e}")
         raise RuntimeError(
-            "Intrinsic plasticity native ops not available. " "Run ./build_secure.sh to compile."
+            "Intrinsic plasticity native ops not available. Run ./build_secure.sh to compile."
         ) from e
     return _available
 

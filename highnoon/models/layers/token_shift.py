@@ -622,16 +622,19 @@ class FourierTokenShift(layers.Layer):
 
         # Only use FFT for sequences >= min_seq_len
         def freq_path():
-            # Apply FFT along sequence dimension for each feature
-            x_complex = tf.cast(x, tf.complex64)
+            # Phase 1.5: Apply FFT with complex128 precision per GRADIENT_CONNECTIVITY_ROADMAP
+            x_complex = tf.cast(x, tf.complex128)
             spectrum = tf.signal.fft(x_complex)
 
             # Apply learnable frequency filter
-            filter_complex = tf.complex(self.freq_filter_real, self.freq_filter_imag)
+            filter_complex = tf.complex(
+                tf.cast(self.freq_filter_real, tf.float64),
+                tf.cast(self.freq_filter_imag, tf.float64),
+            )
             filtered = spectrum * filter_complex
 
-            # Inverse FFT
-            freq_out = tf.math.real(tf.signal.ifft(filtered))
+            # Inverse FFT, cast back to float32 for downstream compatibility
+            freq_out = tf.cast(tf.math.real(tf.signal.ifft(filtered)), tf.float32)
             return freq_out
 
         def skip_freq():

@@ -39,6 +39,38 @@ For community support, visit: https://www.versoindustries.com/messages
 For enterprise licensing, contact: sales@versoindustries.com
 """
 
+import warnings
+
+# Phase 4.2 (GRADIENT_CONNECTIVITY_ROADMAP): Suppress TensorFlow complex-to-float casting warnings.
+# The FFT-based holographic operations (circular convolution, holographic binding) mathematically
+# require extracting the real part from complex FFT results. This is intentional and correct.
+# The warning "casting complex64/complex128 to float32" is a false positive in this context.
+warnings.filterwarnings("ignore", message=".*casting.*complex.*float.*")
+warnings.filterwarnings("ignore", message=".*incompatible dtype float.*imaginary part.*")
+
+# Also filter TensorFlow's internal logging system which bypasses Python warnings
+import logging
+
+
+def _apply_tf_complex_cast_filter():
+    """Apply filter to TensorFlow logger to suppress complex-to-float warnings."""
+    try:
+        tf_logger = logging.getLogger("tensorflow")
+
+        class ComplexCastingFilter(logging.Filter):
+            def filter(self, record):
+                msg = record.getMessage()
+                if "casting" in msg and "complex" in msg and ("float" in msg or "imaginary" in msg):
+                    return False
+                return True
+
+        tf_logger.addFilter(ComplexCastingFilter())
+    except Exception:
+        pass  # Graceful fallback if TensorFlow not yet imported
+
+
+_apply_tf_complex_cast_filter()
+
 __version__ = "1.0.0"
 __author__ = "Verso Industries"
 __license__ = "Apache-2.0 (Python) + Proprietary (Binaries)"

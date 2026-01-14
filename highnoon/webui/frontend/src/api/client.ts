@@ -129,6 +129,23 @@ export const hpoApi = {
     }> {
         return fetchApi(`/hpo/sweep/${sweepId}/skipped`);
     },
+
+    /** Export best hyperparameter configuration as JSON or YAML. */
+    async exportConfig(sweepId: string, format: 'json' | 'yaml' = 'json'): Promise<void> {
+        // Use direct window.open for file download since fetchApi expects JSON
+        window.open(`${API_BASE}/hpo/sweep/${sweepId}/export?format=${format}`, '_blank');
+    },
+
+    /** Get training config from completed sweep. */
+    async getTrainingConfig(sweepId: string): Promise<{
+        sweep_id: string;
+        training_config: Record<string, unknown>;
+        model_build_config: Record<string, unknown>;
+        optimizer_config: Record<string, unknown>;
+        best_loss?: number;
+    }> {
+        return fetchApi(`/hpo/sweep/${sweepId}/training-config`);
+    },
 };
 
 // ============================================================================
@@ -245,8 +262,11 @@ interface BackendHuggingFaceSearchResponse {
         likes: number;
         tags: string[];
         last_modified: string;
+        gated?: boolean | string;
+        private?: boolean;
     }>;
     total: number;
+    token_configured?: boolean;
 }
 
 interface BackendAddDatasetResponse {
@@ -314,6 +334,8 @@ export const datasetApi = {
                 likes: ds.likes || 0,
                 tags: ds.tags || [],
                 lastModified: ds.last_modified || '',
+                gated: ds.gated,
+                private: ds.private,
             };
         });
     },
@@ -466,5 +488,94 @@ export const systemApi = {
     /** Estimate resource requirements. */
     async estimateResources(modelSize: string, batchSize: number): Promise<{ ram_gb: number; vram_gb: number }> {
         return fetchApi(`/system/estimate?model_size=${modelSize}&batch_size=${batchSize}`);
+    },
+};
+
+// ============================================================================
+// Settings Endpoints
+// ============================================================================
+
+export const settingsApi = {
+    /** Get HuggingFace token configuration status. */
+    async getHfTokenStatus(): Promise<{ configured: boolean; token_prefix?: string | null }> {
+        return fetchApi('/settings/hf-token/status');
+    },
+
+    /** Save HuggingFace token. */
+    async saveHfToken(token: string): Promise<{ status: string; token_prefix: string }> {
+        return fetchApi('/settings/hf-token', {
+            method: 'PUT',
+            body: JSON.stringify({ token }),
+        });
+    },
+
+    /** Clear HuggingFace token. */
+    async clearHfToken(): Promise<{ status: string }> {
+        return fetchApi('/settings/hf-token', { method: 'DELETE' });
+    },
+
+    /** Validate HuggingFace token against HF API. */
+    async validateHfToken(token?: string): Promise<{
+        valid: boolean;
+        username?: string;
+        email?: string;
+        error?: string;
+    }> {
+        return fetchApi('/settings/hf-token/validate', {
+            method: 'POST',
+            body: token ? JSON.stringify({ token }) : JSON.stringify({}),
+        });
+    },
+};
+
+// ============================================================================
+// Activation Visualization Endpoints
+// ============================================================================
+
+/** Surface data returned by activation surface API */
+export interface ActivationSurfaceData {
+    x: number[];
+    y: number[];
+    z: number[][];
+    colorscale: string;
+    layer_name: string;
+    original_shape: [number, number];
+    stats: {
+        min: number;
+        max: number;
+        mean: number;
+        std: number;
+    };
+    demo_mode: boolean;
+}
+
+export const activationApi = {
+    /** Get available layers for activation visualization. */
+    async getLayers(jobId: string): Promise<{ layers: string[]; demo_mode: boolean }> {
+        return fetchApi(`/activations/layers/${encodeURIComponent(jobId)}`);
+    },
+
+    /** Get activation surface data for a specific layer. */
+    async getSurface(
+        layerName: string,
+        jobId: string,
+        options?: {
+            applyEnvelope?: boolean;
+            gridSize?: number;
+        }
+    ): Promise<ActivationSurfaceData> {
+        const params = new URLSearchParams({
+            job_id: jobId,
+            apply_envelope: String(options?.applyEnvelope ?? true),
+            grid_size: String(options?.gridSize ?? 50),
+        });
+        return fetchApi(`/activations/surface/${encodeURIComponent(layerName)}?${params}`);
+    },
+
+    /** Clear activation cache for a job. */
+    async clearCache(jobId: string): Promise<{ status: string; job_id: string }> {
+        return fetchApi(`/activations/cache/${encodeURIComponent(jobId)}`, {
+            method: 'DELETE',
+        });
     },
 };

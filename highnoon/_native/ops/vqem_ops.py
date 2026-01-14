@@ -55,7 +55,7 @@ def _load_ops():
         _available = False
         logger.warning(f"Failed to load VQEM ops: {e}")
         raise RuntimeError(
-            "VQEM native ops not available. " "Run ./build_secure.sh to compile."
+            "VQEM native ops not available. Run ./build_secure.sh to compile."
         ) from e
     return _available
 

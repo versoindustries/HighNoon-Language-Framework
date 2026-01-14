@@ -302,43 +302,6 @@ def get_current_attribution() -> AttributionInfo:
         )
 
 
-def get_full_attribution() -> str:
-    """Get the full formatted attribution text.
-
-    Returns the complete attribution block that would be displayed
-    when an attribution trigger is detected.
-
-    Returns:
-        Formatted attribution text string.
-    """
-    lib = _load_attribution_ops()
-    if lib is None:
-        return _get_default_attribution_text()
-
-    try:
-        result = lib.high_noon_get_attribution()
-        return result.numpy().decode("utf-8")
-    except Exception:
-        return _get_default_attribution_text()
-
-
-def get_compact_attribution() -> str:
-    """Get a compact attribution line for logging/headers.
-
-    Returns:
-        Compact attribution string (e.g., "Powered by HSMN | HighNoon v1.0.0 (Lite)")
-    """
-    lib = _load_attribution_ops()
-    if lib is None:
-        return "Powered by HSMN | HighNoon Language Framework v1.0.0 (Lite Edition)"
-
-    try:
-        result = lib.high_noon_get_compact_attribution()
-        return result.numpy().decode("utf-8")
-    except Exception:
-        return "Powered by HSMN | HighNoon Language Framework v1.0.0 (Lite Edition)"
-
-
 def _get_default_attribution_text() -> str:
     """Get default attribution text when native ops not available."""
     return """
@@ -376,6 +339,4 @@ __all__ = [
     "set_custom_attribution",
     "clear_custom_attribution",
     "get_current_attribution",
-    "get_full_attribution",
-    "get_compact_attribution",
 ]

@@ -11,9 +11,194 @@
   display: flex;
   flex-direction: column;
   overflow-x: hidden;
+  /* Enable view transitions for route changes */
+  view-transition-name: main-content;
 }
 
-/* Page transition */
+/* Skip to main content link for keyboard accessibility */
+.skip-nav {
+  position: absolute;
+  top: -100%;
+  left: 16px;
+  padding: 8px 16px;
+  background: var(--color-primary);
+  color: var(--text-primary);
+  border-radius: var(--radius-md);
+  z-index: 10000;
+  font-weight: var(--font-semibold);
+  text-decoration: none;
+  transition: top 0.2s ease;
+}
+
+.skip-nav:focus {
+  top: 16px;
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+/* Page transition fallback for browsers without view-transition support */
 .app-main>* {
-  animation: fadeIn 0.2s ease-out;
+  animation: pageEnter 0.25s ease-out;
+}
+
+@keyframes pageEnter {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* =============================================================================
+   VIEW TRANSITIONS API (Chrome 111+, Safari 18+)
+   ============================================================================= */
+
+/* Enable view transitions globally */
+@view-transition {
+  navigation: auto;
+}
+
+/* Default crossfade transition */
+::view-transition-old(main-content),
+::view-transition-new(main-content) {
+  animation-duration: 0.25s;
+  animation-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+::view-transition-old(main-content) {
+  animation-name: fadeSlideOut;
+}
+
+::view-transition-new(main-content) {
+  animation-name: fadeSlideIn;
+}
+
+@keyframes fadeSlideOut {
+  from {
+    opacity: 1;
+    transform: translateX(0);
+  }
+
+  to {
+    opacity: 0;
+    transform: translateX(-20px);
+  }
+}
+
+@keyframes fadeSlideIn {
+  from {
+    opacity: 0;
+    transform: translateX(20px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+/* Sidebar stays in place during transitions */
+::view-transition-group(sidebar) {
+  animation: none;
+}
+
+/* Reduced motion preference */
+@media (prefers-reduced-motion: reduce) {
+
+  ::view-transition-old(main-content),
+  ::view-transition-new(main-content) {
+    animation: none;
+  }
+
+  .app-main>* {
+    animation: none;
+  }
+}
+
+/* =============================================================================
+   FOCUS VISIBLE STYLES
+   ============================================================================= */
+
+/* Enhanced focus indicators for keyboard navigation */
+:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+/* Remove default focus for mouse users */
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* Focus ring for interactive elements */
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px var(--color-primary-muted);
+}
+
+/* Card focus state */
+.card:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+/* =============================================================================
+   ACCESSIBILITY UTILITIES
+   ============================================================================= */
+
+/* Visually hidden but accessible to screen readers */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Make hidden content focusable when tabbed to */
+.sr-only-focusable:focus,
+.sr-only-focusable:active {
+  position: static;
+  width: auto;
+  height: auto;
+  margin: 0;
+  overflow: visible;
+  clip: auto;
+  white-space: normal;
+}
+
+/* Live region for announcements */
+.live-region {
+  position: absolute;
+  left: -10000px;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+}
+
+/* High contrast mode enhancements */
+@media (prefers-contrast: high) {
+  :focus-visible {
+    outline-width: 3px;
+  }
+
+  button,
+  a,
+  input,
+  select {
+    border-width: 2px;
+  }
 }

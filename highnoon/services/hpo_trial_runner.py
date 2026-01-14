@@ -63,7 +63,11 @@ os.environ["CUDA_VISIBLE_DEVICES"] = ""  # Belt-and-suspenders: hide at driver l
 
 from highnoon.data.loaders import load_training_dataset
 from highnoon.models.reasoning.reasoning_module import ReasoningModule
-from highnoon.services.hpo_manager import estimate_model_params
+from highnoon.services.hpo_manager import (
+    check_memory_budget,
+    estimate_model_params,
+    estimate_peak_memory,
+)
 from highnoon.services.hpo_metrics import (
     DEFAULT_ALPHA_LOSS,
     DEFAULT_BETA_PERPLEXITY,
@@ -217,7 +221,7 @@ class EnterpriseMemoryManager:
             self._detect_system_memory()
             logger.info(
                 f"[Memory] EnterpriseMemoryManager: total={self.total_memory_mb:.0f}MB, "
-                f"warning_threshold={self.warning_threshold_mb:.0f}MB ({warning_threshold_pct*100:.0f}%)"
+                f"warning_threshold={self.warning_threshold_mb:.0f}MB ({warning_threshold_pct * 100:.0f}%)"
             )
         else:
             logger.warning("[Memory] psutil not available, using fallback thresholds")
@@ -380,16 +384,16 @@ class EnterpriseMemoryManager:
             self._warning_count += 1
             logger.warning(
                 f"[Memory] WARNING ({self._warning_count}/{self.grace_steps}): "
-                f"System memory at {system_pct*100:.1f}% (process={current_mb:.0f}MB), "
+                f"System memory at {system_pct * 100:.1f}% (process={current_mb:.0f}MB), "
                 f"trend={trend}"
             )
 
             # Early stop if sustained high usage AND memory is rising or stable
             if self._warning_count >= self.grace_steps:
                 if trend == "rising":
-                    return True, f"sustained_high_memory_rising:{system_pct*100:.1f}%"
+                    return True, f"sustained_high_memory_rising:{system_pct * 100:.1f}%"
                 elif trend == "stable":
-                    return True, f"sustained_high_memory_stable:{system_pct*100:.1f}%"
+                    return True, f"sustained_high_memory_stable:{system_pct * 100:.1f}%"
                 else:
                     # Memory is falling, give it more grace
                     logger.info("[Memory] High memory but trend falling, extending grace period")
@@ -398,8 +402,7 @@ class EnterpriseMemoryManager:
             # Reset warning count when memory drops
             if self._warning_count > 0:
                 logger.info(
-                    f"[Memory] Memory normalized: {system_pct*100:.1f}%, "
-                    f"resetting warning count"
+                    f"[Memory] Memory normalized: {system_pct * 100:.1f}%, resetting warning count"
                 )
             self._warning_count = 0
 
@@ -841,8 +844,7 @@ def evaluate_quality_metrics(
         )
 
     logger.info(
-        f"[HPO] Quality: PPL={overall_perplexity:.2f}, "
-        f"Conf={mean_confidence:.3f}, ECE={ece:.4f}"
+        f"[HPO] Quality: PPL={overall_perplexity:.2f}, Conf={mean_confidence:.3f}, ECE={ece:.4f}"
     )
 
     return {
@@ -856,8 +858,12 @@ def build_hsmn_model(
     config: dict[str, Any],
     vocab_size: int,
     hidden_dim_override: int | None = None,
-    is_hd_mode: bool = False,
-    hd_dim: int = 1024,
+    # Phase 1010: Per-layer HD dimensions (fallback to hd_dim for backward compat)
+    hd_dim: int | None = None,
+    hd_dim_embedding: int | None = None,
+    hd_dim_spatial: int | None = None,
+    hd_dim_timecrystal: int | None = None,
+    hd_dim_moe: int | None = None,
 ) -> tf.keras.Model:
     """
     Build HSMN model from hyperparameter configuration.
@@ -866,8 +872,11 @@ def build_hsmn_model(
         config: Hyperparameter configuration dictionary
         vocab_size: Vocabulary size for embedding and output layers
         hidden_dim_override: Optional override for hidden dimension
-        is_hd_mode: If True, build model for HD streaming (float32 bundle inputs)
-        hd_dim: HD bundle dimension (only used when is_hd_mode=True)
+        hd_dim: Deprecated global HD dimension (use per-layer dims instead)
+        hd_dim_embedding: HD dimension for DualPathEmbedding
+        hd_dim_spatial: HD dimension for QHDSpatialBlock
+        hd_dim_timecrystal: HD dimension for HDTimeCrystalBlock
+        hd_dim_moe: HD dimension for MoE holographic routing
 
     Returns:
         Compiled tf.keras.Model ready for language modeling
@@ -886,12 +895,7 @@ def build_hsmn_model(
     # =========================================================================
     from types import SimpleNamespace
 
-    from highnoon._native._limits import (
-        LimitExceededError,
-        is_lite,
-        validate_model_config,
-        validate_param_count,
-    )
+    from highnoon._native._limits import is_lite, validate_model_config, validate_param_count
 
     # MoE parameters (extracted early for validation)
     moe_num_experts = config.get("num_moe_experts", 8)
@@ -1022,76 +1026,68 @@ def build_hsmn_model(
     )
     logger.info(f"  - Training: VQEM={use_vqem}, RNG={use_rng}, SPINI={use_spini}, QCOT={use_qcot}")
 
-    # Override hidden_dim if specified
     if hidden_dim_override is not None:
         hidden_dim = hidden_dim_override
 
     # Build model using Keras Functional API with full ReasoningModule
-    if is_hd_mode:
-        # HD Streaming Mode: float32 bundle inputs from HolographicCorpus
-        # Use C++ HDStreamingAdapter op for projection
-        logger.info(
-            f"[HPO] Building HD-mode HSMN model: hd_dim={hd_dim} -> hidden_dim={hidden_dim}"
-        )
-        input_layer = tf.keras.layers.Input(shape=(hd_dim,), dtype=tf.float32, name="hd_bundle")
-
-        # Project HD bundle to hidden dim using C++ op
-        from highnoon._native.ops.hd_streaming_adapter import HDStreamingAdapter
-
-        x = HDStreamingAdapter(
-            hidden_dim=hidden_dim,
-            hd_dim=hd_dim,
-            use_bias=True,
-            name="hd_streaming_adapter",
-        )(input_layer)
-        # x is now (batch, 1, hidden_dim) - ready for ReasoningModule
-    else:
-        # Standard mode: int32 token IDs
-        input_layer = tf.keras.layers.Input(shape=(None,), dtype=tf.int32, name="token_ids")
+    # Standard mode: int32 token IDs
+    input_layer = tf.keras.layers.Input(shape=(None,), dtype=tf.int32, name="token_ids")
 
     # Use HyperdimensionalEmbedding for quantum-enhanced embedding (matching debug script)
-    # Skip embedding in HD mode - HDStreamingAdapter already provides (batch, 1, hidden_dim)
-    if is_hd_mode:
-        # x is already set from HDStreamingAdapter above
-        logger.info("[HPO] Skipping embedding layer in HD mode (HD bundles are pre-embedded)")
-    elif use_hqe:
+    if use_hqe:
         try:
             # Check if we should use memory-efficient DualPathEmbedding
             use_dual_path = getattr(hn_config, "USE_DUAL_PATH_EMBEDDING", True)
-            active_vocab_size = getattr(hn_config, "DUAL_PATH_ACTIVE_VOCAB_SIZE", 10000)
+
+            # Use QAHPO-tuned active_vocab_size, fallback to config default
+            active_vocab_size = config.get("hd_active_vocab_size") or getattr(
+                hn_config, "DUAL_PATH_ACTIVE_VOCAB_SIZE", 10000
+            )
+
+            # Extract max_seq_len from config for HDE position keys
+            # This ensures user's context_window setting reaches the embedding layer
+            max_seq_len = config.get("sequence_length") or config.get("context_window") or 4096
 
             if use_dual_path:
                 from highnoon.models.layers.hyperdimensional_layer import DualPathEmbedding
 
-                # PHASE 500+: Use the passed hd_dim from trial config (budget-filtered)
-                # Previously used hidden_dim * 8 which bypassed budget constraints
+                # PHASE 1010: Use per-layer hd_dim_embedding from trial config
+                # Fallback chain: hd_dim_embedding → hd_dim → hidden_dim * 8
+                effective_hd_dim = hd_dim_embedding or hd_dim or (hidden_dim * 8)
                 # Ensure divisibility: round up to nearest multiple of hidden_dim
                 embed_hd_dim = (
-                    hd_dim
-                    if hd_dim % hidden_dim == 0
-                    else ((hd_dim // hidden_dim) + 1) * hidden_dim
+                    effective_hd_dim
+                    if effective_hd_dim % hidden_dim == 0
+                    else ((effective_hd_dim // hidden_dim) + 1) * hidden_dim
                 )
+
+                # Use QAHPO-tuned ctqw_steps, fallback to config default
+                ctqw_steps = config.get("hqe_ctqw_steps") or getattr(hn_config, "HQE_CTQW_STEPS", 3)
+
                 x = DualPathEmbedding(
                     vocab_size=vocab_size,
                     model_dim=hidden_dim,
-                    active_vocab_size=min(active_vocab_size, vocab_size),  # Don't exceed vocab
+                    active_vocab_size=min(active_vocab_size, vocab_size),
                     hd_dim=embed_hd_dim,
                     use_ctqw=True,
-                    ctqw_steps=3,
+                    ctqw_steps=ctqw_steps,  # QAHPO-tunable
+                    max_seq_len=max_seq_len,
                     name="dual_path_embedding",
                 )(input_layer)
                 logger.info(
-                    f"[HPO] Using DualPathEmbedding: vocab={vocab_size}, active={min(active_vocab_size, vocab_size)}, hd_dim={embed_hd_dim}"
+                    f"[HPO] Using DualPathEmbedding: vocab={vocab_size}, active={min(active_vocab_size, vocab_size)}, "
+                    f"hd_dim={embed_hd_dim}, ctqw={ctqw_steps}, max_seq={max_seq_len}"
                 )
             else:
                 from highnoon.models.layers.hyperdimensional_layer import HyperdimensionalEmbedding
 
-                # PHASE 500+: Use the passed hd_dim from trial config (budget-filtered)
-                # Previously used hidden_dim * 8 which bypassed budget constraints
+                # PHASE 1010: Use per-layer hd_dim_embedding from trial config
+                # Fallback chain: hd_dim_embedding → hd_dim → hidden_dim * 8
+                effective_hd_dim = hd_dim_embedding or hd_dim or (hidden_dim * 8)
                 embed_hd_dim = (
-                    hd_dim
-                    if hd_dim % hidden_dim == 0
-                    else ((hd_dim // hidden_dim) + 1) * hidden_dim
+                    effective_hd_dim
+                    if effective_hd_dim % hidden_dim == 0
+                    else ((effective_hd_dim // hidden_dim) + 1) * hidden_dim
                 )
                 x = HyperdimensionalEmbedding(
                     vocab_size=vocab_size,
@@ -1099,10 +1095,11 @@ def build_hsmn_model(
                     hd_dim=embed_hd_dim,
                     use_ctqw=True,
                     ctqw_steps=3,
+                    max_seq_len=max_seq_len,  # User's context_window → HDE position_keys
                     name="hde_embedding",
                 )(input_layer)
                 logger.info(
-                    f"[HPO] Using HyperdimensionalEmbedding: vocab={vocab_size}, hd_dim={embed_hd_dim}"
+                    f"[HPO] Using HyperdimensionalEmbedding: vocab={vocab_size}, hd_dim={embed_hd_dim}, max_seq={max_seq_len}"
                 )
         except (ImportError, Exception) as e:
             logger.warning(
@@ -1192,13 +1189,153 @@ def build_hsmn_model(
         # Unified Bus
         "unified_bus_entanglement_init": config.get("unified_bus_entanglement_init", 0.5),
         "unified_bus_propagation_rate": config.get("unified_bus_propagation_rate", 0.1),
+        "unified_bus_mps_bond_dim": config.get("unified_bus_mps_bond_dim", 16),
+        "unified_bus_coherence_threshold": config.get("unified_bus_coherence_threshold", 0.7),
         # QASA
         "qasa_feature_rotation_depth": config.get("qasa_feature_rotation_depth", 2),
+        "qasa_vqc_layers": config.get("qasa_vqc_layers", 2),
+        "qasa_entanglement_strength": config.get("qasa_entanglement_strength", 0.3),
+        # Phase 1010: QHD Block parameters (QHDSpatialBlock, HDTimeCrystalBlock)
+        "qhd_num_paths": config.get("qhd_num_paths", 2),
+        "qhd_entanglement_depth": config.get("qhd_entanglement_depth", 2),
+        "qhd_entanglement_strength": config.get("qhd_entanglement_strength", 0.3),
+        "qhd_entanglement_topology": config.get("qhd_entanglement_topology", "walk"),
+        "qhd_gumbel_temperature": config.get("qhd_gumbel_temperature", 1.0),
+        # COCONUT / Latent Reasoning
+        "coconut_num_paths": config.get("coconut_num_paths", 2),
+        "coconut_collapse_threshold": config.get("coconut_collapse_threshold", 0.5),
+        "coconut_crystallize_threshold": config.get("coconut_crystallize_threshold", 0.8),
+        "qcot_reasoning_steps": config.get("qcot_reasoning_steps", 3),
+        # Tensor Train
+        "tt_ffn_ranks": config.get("tt_ffn_ranks", [1, 16, 16, 1]),
+        # Latent KV
+        "latent_kv_dim": config.get("latent_kv_dim", 64),
+        # GaLore optimizer
+        "galore_rank": config.get("galore_rank", 32),
+        "galore_scale": config.get("galore_scale", 1.0),
+        "galore_update_proj_gap": config.get("galore_update_proj_gap", 200),
+        # QULS (Quantum Unified Loss)
+        "quls_label_smoothing": config.get("quls_label_smoothing", 0.1),
+        "quls_fidelity_weight": config.get("quls_fidelity_weight", 0.01),
+        "quls_fidelity_temperature": config.get("quls_fidelity_temperature", 1.0),
+        "quls_born_rule_weight": config.get("quls_born_rule_weight", 0.01),
+        "quls_coherence_weight": config.get("quls_coherence_weight", 0.01),
+        "quls_symplectic_weight": config.get("quls_symplectic_weight", 0.01),
+        "quls_vqc_variance_boost": config.get("quls_vqc_variance_boost", 1.5),
+        "quls_barren_plateau_reduction": config.get("quls_barren_plateau_reduction", 0.1),
+        "quls_weight_ema_decay": config.get("quls_weight_ema_decay", 0.99),
+        # Barren Plateau
+        "barren_plateau_threshold": config.get("barren_plateau_threshold", 1e-6),
+        "barren_plateau_recovery_lr_scale": config.get("barren_plateau_recovery_lr_scale", 2.0),
+        "barren_plateau_recovery_window": config.get("barren_plateau_recovery_window", 100),
+        "barren_plateau_hysteresis": config.get("barren_plateau_hysteresis", 1.5),
+        # Gradient Dampening
+        "gradient_dampening_threshold": config.get("gradient_dampening_threshold", 100.0),
+        "min_gradient_dampening": config.get("min_gradient_dampening", 0.1),
+        # Symplectic Flow
+        "sympflow_mass": config.get("sympflow_mass", 1.0),
+        "sympflow_friction": config.get("sympflow_friction", 0.1),
+        "sympflow_step_size": config.get("sympflow_step_size", 0.01),
+        "sympflow_geodesic_weight": config.get("sympflow_geodesic_weight", 0.1),
+        "geodesic_momentum": config.get("geodesic_momentum", 0.9),
+        # QALRC / SAQC
+        "qalrc_annealing_power": config.get("qalrc_annealing_power", 2.0),
+        "qalrc_tunneling_probability": config.get("qalrc_tunneling_probability", 0.05),
+        "qalrc_entropy_smoothing": config.get("qalrc_entropy_smoothing", 0.9),
+        "saqc_tunneling_dataset_ratio": config.get("saqc_tunneling_dataset_ratio", 0.1),
+        "saqc_min_stage_duration": config.get("saqc_min_stage_duration", 500),
+        "saqc_update_interval": config.get("saqc_update_interval", 10),
+        "saqc_entropy_retreat_threshold": config.get("saqc_entropy_retreat_threshold", 0.3),
+        "saqc_fidelity_advance_threshold": config.get("saqc_fidelity_advance_threshold", 0.8),
+        "saqc_coherence_gate_threshold": config.get("saqc_coherence_gate_threshold", 0.9),
+        # Teleportation
+        "teleport_entanglement_dim": config.get("teleport_entanglement_dim", 64),
+        "teleport_fidelity_threshold": config.get("teleport_fidelity_threshold", 0.9),
+        # Loss weights
+        "entropy_reg_weight": config.get("entropy_reg_weight", 0.01),
+        "spectral_reg_weight": config.get("spectral_reg_weight", 0.01),
+        "fidelity_loss_weight": config.get("fidelity_loss_weight", 0.01),
+        "target_entropy": config.get("target_entropy", 0.5),
+        "born_rule_temperature": config.get("born_rule_temperature", 1.0),
+        # Quantum MoE
+        "qmoe_vqc_layers": config.get("qmoe_vqc_layers", 2),
+        "qmoe_measurement_temp": config.get("qmoe_measurement_temp", 1.0),
+        # Q-SSM
+        "q_ssm_vqc_layers": config.get("q_ssm_vqc_layers", 2),
+        "q_ssm_num_qubits": config.get("q_ssm_num_qubits", 4),
+        # QMD (Quantum Measurement Dropout)
+        "qmd_drop_rate": config.get("qmd_drop_rate", 0.1),
+        "qmd_softening_temp": config.get("qmd_softening_temp", 1.0),
+        # Quantum Coherence Bus
+        "qcb_num_nodes": config.get("qcb_num_nodes", 8),
+        "qcb_fidelity_threshold": config.get("qcb_fidelity_threshold", 0.9),
+        # Plasticity
+        "plasticity_learning_rate": config.get("plasticity_learning_rate", 0.01),
+        "neuromorphic_tau": config.get("neuromorphic_tau", 10.0),
+        # Floquet / DTC
+        "dtc_floquet_period": config.get("dtc_floquet_period", 10),
+        "majorana_floquet_period": config.get("majorana_floquet_period", 10),
+        # HD Hierarchical
+        "hd_hierarchical_levels": config.get("hd_hierarchical_levels", 3),
+        "hd_hierarchical_pooling_ratio": config.get("hd_hierarchical_pooling_ratio", 2),
+        "hd_hierarchical_ctqw_time": config.get("hd_hierarchical_ctqw_time", 1.0),
+        "hd_hierarchical_ema_base_rate": config.get("hd_hierarchical_ema_base_rate", 0.1),
+        "hd_floquet_base_freq": config.get("hd_floquet_base_freq", 1000.0),
+        "hd_position_decay_rate": config.get("hd_position_decay_rate", 0.999),
+        "hd_cross_attn_qfm_depth": config.get("hd_cross_attn_qfm_depth", 2),
+        "hd_reservoir_size": config.get("hd_reservoir_size", 2000),
+        "hd_sample_length": config.get("hd_sample_length", 512),
+        # CTQW
+        "ctqw_rff_dim": config.get("ctqw_rff_dim", 64),
+        "online_ctqw_rank": config.get("online_ctqw_rank", 8),
+        "online_ctqw_ema_decay": config.get("online_ctqw_ema_decay", 0.99),
+        # Streaming
+        "streaming_max_chunk_size": config.get("streaming_max_chunk_size", 64),
+        # Hierarchical Memory
+        "hierarchical_memory_slots": config.get("hierarchical_memory_slots", 64),
+        "uncertainty_pool_threshold": config.get("uncertainty_pool_threshold", 0.5),
+        # QNG
+        "qng_damping": config.get("qng_damping", 0.01),
+        # Hopfield
+        "hopfield_base_beta": config.get("hopfield_base_beta", 1.0),
+        "hopfield_beta_min": config.get("hopfield_beta_min", 0.1),
+        "hopfield_beta_max": config.get("hopfield_beta_max", 10.0),
+        # VQC Extended
+        "vqc_min_layers": config.get("vqc_min_layers", 1),
+        "vqc_max_layers": config.get("vqc_max_layers", 4),
+        # Hamiltonian Extended
+        "hamiltonian_num_stages": config.get("hamiltonian_num_stages", 4),
+        "hamiltonian_magnus_level": config.get("hamiltonian_magnus_level", 2),
+        "hamiltonian_pade_scaling": config.get("hamiltonian_pade_scaling", 1),
+        "hamiltonian_basis_size": config.get("hamiltonian_basis_size", 4),
+        "hamiltonian_nqs_hidden_dim": config.get("hamiltonian_nqs_hidden_dim", 32),
+        # MPQR / TWA / TD-MoE
+        "mpqr_num_paths": config.get("mpqr_num_paths", 2),
+        "mpqr_grover_iterations": config.get("mpqr_grover_iterations", 2),
+        "twa_num_scales": config.get("twa_num_scales", 4),
+        "td_moe_tucker_rank": config.get("td_moe_tucker_rank", 16),
+        # Neural Kalman
+        "neural_kalman_hidden_dim": config.get("neural_kalman_hidden_dim", 64),
+        "neural_kalman_process_noise": config.get("neural_kalman_process_noise", 0.1),
+        "neural_kalman_measurement_noise": config.get("neural_kalman_measurement_noise", 0.1),
+        "sgkf_dt": config.get("sgkf_dt", 0.1),
+        # QAO / QHPM
+        "qao_initial_temp": config.get("qao_initial_temp", 10.0),
+        "qao_final_temp": config.get("qao_final_temp", 0.1),
+        "qhpm_crystallization_rate": config.get("qhpm_crystallization_rate", 0.1),
+        "crystallization_threshold": config.get("crystallization_threshold", 0.8),
+        # VQE / AlphaQubit / RNG / Spini
+        "vqem_num_params": config.get("vqem_num_params", 16),
+        "alphaqubit_num_layers": config.get("alphaqubit_num_layers", 2),
+        "rng_num_samples": config.get("rng_num_samples", 100),
+        "spini_friction": config.get("spini_friction", 0.1),
+        # Vocab
+        "vocab_sample_size": config.get("vocab_sample_size", 10000),
     }
 
     # Build the full HSMN reasoning module with hybrid block pattern
     # Note: Quantum parameters are read from global config by ReasoningModule
-    # CRITICAL: Pass hd_dim so HD Activation Checkpointing uses trial-specific value
+    # Phase 1010: Pass per-layer HD dims so blocks use trial-specific values
     reasoning_module = ReasoningModule(
         num_layers=num_reasoning_blocks,
         embedding_dim=hidden_dim,
@@ -1207,7 +1344,14 @@ def build_hsmn_model(
         num_experts=moe_num_experts,
         wlam_num_heads=wlam_num_heads,
         wlam_kernel_size=wlam_kernel_size,
-        hd_activation_dim=hd_dim if is_hd_mode else None,  # Pass trial's hd_dim
+        # Phase 1010: Per-layer HD dimensions (fallback to hd_dim for backward compat)
+        hd_dim=hd_dim or hd_dim_spatial or (hidden_dim * 8),  # Deprecated global
+        hd_dim_spatial=hd_dim_spatial or hd_dim or (hidden_dim * 8),
+        hd_dim_timecrystal=hd_dim_timecrystal or hd_dim or (hidden_dim * 8),
+        hd_dim_moe=hd_dim_moe or hd_dim or (hidden_dim * 8),
+        hd_activation_dim=hd_dim_spatial
+        or hd_dim
+        or (hidden_dim * 8),  # For activation checkpointing
         **expanded_params,
     )
 
@@ -1611,11 +1755,56 @@ def train_trial(
 
     # Get dimensions from config
     batch_size = trial_config.get("batch_size", 8)
-    sequence_length = trial_config.get("sequence_length", 256)
-    # Phase 1 Tokenizer Fix: Use target_vocab_size (tokenizer target) instead of vocab_size
-    # Model vocab_size is ALWAYS derived from tokenizer.vocab_size after learning
+    # Phase 200: Unified to context_window
+    # Phase 900.1: Default reduced to 4K for HPO exploration (128K was causing 25GB+ memory)
+    # Users should explicitly set context_window in sweep config for larger contexts
+    context_window = trial_config.get("context_window") or trial_config.get("sequence_length", 4096)
     target_vocab_size = trial_config.get("target_vocab_size", 32000)
     hidden_dim = trial_config.get("hidden_dim") or 256  # Default if None or missing
+
+    # =========================================================================
+    # Phase 900.1: Pre-flight Memory Budget Check
+    # Check if this config will fit in memory BEFORE building the model.
+    # This prevents OOM crashes and wasted compute.
+    # =========================================================================
+    available_memory_gb = trial_config.get("available_memory_gb", 32.0)
+    memory_check_config = {
+        **trial_config,
+        "context_window": context_window,
+        "embedding_dim": hidden_dim,
+        "batch_size": batch_size,
+    }
+    fits, memory_msg = check_memory_budget(memory_check_config, available_memory_gb)
+
+    if not fits:
+        # Try reducing context_window to fit
+        for reduced_context in [context_window // 2, context_window // 4, 2048, 1024]:
+            if reduced_context < 512:
+                break
+            test_config = {**memory_check_config, "context_window": reduced_context}
+            fits_reduced, _ = check_memory_budget(test_config, available_memory_gb)
+            if fits_reduced:
+                logger.warning(
+                    f"[HPO] Memory budget exceeded. Reducing context_window: {context_window} -> {reduced_context}"
+                )
+                context_window = reduced_context
+                trial_config["context_window"] = reduced_context
+                fits = True
+                break
+
+        if not fits:
+            # Cannot fit even with reduced context - skip trial
+            logger.error(f"[HPO] {memory_msg}")
+            hpo_reporter.complete(
+                success=False,
+                error=f"MEMORY_BUDGET_EXCEEDED: {memory_msg}",
+            )
+            return float("nan")  # Sentinel for budget skip
+
+    estimated_memory_gb = estimate_peak_memory(memory_check_config) / 1e9
+    logger.info(
+        f"[HPO] Memory estimate: {estimated_memory_gb:.2f} GB (context_window={context_window})"
+    )
 
     # Get optional HuggingFace dataset name (set from curriculum or manually)
     hf_dataset_name = trial_config.get("hf_dataset_name") or trial_config.get("dataset_name")
@@ -1633,14 +1822,20 @@ def train_trial(
         # Configurable prefetch buffer for memory management (None = auto-tune)
         prefetch_buffer_size = trial_config.get("prefetch_buffer_size", None)
 
+        # Phase 200: Enterprise streaming mode (packed by default)
+        streaming_mode = trial_config.get("streaming_mode", "packed")
+        logger.info(f"[HPO] Streaming mode: {streaming_mode}, context_window: {context_window:,}")
+
         # Quantum Tokenization Pipeline (Phase 48+)
         # When USE_INTELLIGENT_VOCAB_CONTROLLER is enabled, the tokenizer auto-trains
         # on the curriculum data to learn frequent n-grams and expand vocabulary.
         use_adaptive_tokenizer = trial_config.get(
-            "use_adaptive_tokenizer", USE_INTELLIGENT_VOCAB_CONTROLLER  # Use config flag as default
+            "use_adaptive_tokenizer",
+            USE_INTELLIGENT_VOCAB_CONTROLLER,  # Use config flag as default
         )
         auto_train_enabled = trial_config.get(
-            "vocab_controller_auto_train", VOCAB_CONTROLLER_AUTO_TRAIN  # Use config flag as default
+            "vocab_controller_auto_train",
+            VOCAB_CONTROLLER_AUTO_TRAIN,  # Use config flag as default
         )
         # Get vocab tuning hyperparameters from HPO search space
         # These control how the tokenizer learns from the curriculum
@@ -1654,41 +1849,67 @@ def train_trial(
             f"min_freq={adaptive_min_freq}, max_ngram={vocab_max_ngram_size}"
         )
 
-        # Phase 200+: HD Streaming Mode (Quantum-Enhanced Memory Optimization)
-        # Uses HolographicCorpus for amplitude-based reservoir sampling
-        use_hd_streaming = trial_config.get("use_hd_streaming", True)  # Opt-in for now
-        hd_reservoir_size = trial_config.get("hd_reservoir_size", 2000)
-        hd_dim = trial_config.get("hd_dim")
-        if hd_dim is None:
-            # Phase 1.1 Fix: Respect SmartTuner reduction (hd = hidden * 8)
-            hd_dim = hidden_dim * 8
-        hd_sample_length = trial_config.get("hd_sample_length", 512)  # Tunable HD sample length
+        # Phase 1010: Per-layer HD dimensions from HPO
+        # Each layer type (embedding, spatial, timecrystal, moe) has its own HD dimension
+        hd_dim = trial_config.get("hd_dim")  # Deprecated global fallback
+        hd_dim_embedding = trial_config.get("hd_dim_embedding") or hd_dim or (hidden_dim * 8)
+        hd_dim_spatial = trial_config.get("hd_dim_spatial") or hd_dim or (hidden_dim * 8)
+        hd_dim_timecrystal = trial_config.get("hd_dim_timecrystal") or hd_dim or (hidden_dim * 8)
+        hd_dim_moe = trial_config.get("hd_dim_moe") or hd_dim or (hidden_dim * 8)
 
-        if use_hd_streaming:
-            logger.info(
-                f"[HPO] HD Streaming Mode: reservoir={hd_reservoir_size}, hd_dim={hd_dim}, "
-                f"sample_length={hd_sample_length}"
-            )
+        logger.info(
+            f"[HPO] Per-layer HD dims: embedding={hd_dim_embedding}, spatial={hd_dim_spatial}, "
+            f"timecrystal={hd_dim_timecrystal}, moe={hd_dim_moe}"
+        )
 
         train_dataset, tokenizer, merger = load_training_dataset(
             batch_size=batch_size,
-            sequence_length=sequence_length,
+            context_window=context_window,  # Phase 200: Unified naming
+            streaming_mode=streaming_mode,  # Phase 200: Enterprise streaming
             vocab_size=target_vocab_size,  # Phase 1: Pass target_vocab_size to tokenizer
             hf_dataset_name=hf_dataset_name,
             prefetch_buffer_size=prefetch_buffer_size,
             use_adaptive_tokenizer=use_adaptive_tokenizer,
             adaptive_min_freq=adaptive_min_freq,
             max_samples=vocab_sample_size,  # Control corpus sample size for tokenizer learning
-            # HD Streaming parameters
-            use_hd_streaming=use_hd_streaming,
-            hd_reservoir_size=hd_reservoir_size,
-            hd_dim=hd_dim,
-            hd_sample_length=hd_sample_length,  # Use tunable value from QAHPO
         )
 
         # Phase 1 Tokenizer Fix: ALWAYS derive model vocab from tokenizer
         # This ensures zero dead embeddings and eliminates loss floors at log(vocab_size)
-        vocab_size = tokenizer.vocab_size
+
+        # Task 1.2.1: Enhanced vocab derivation with untrained tokenizer handling
+        # When tokenizer isn't trained, vocab_size returns only base vocab (~362)
+        # but QAHPO may have sampled target_vocab_size=15000+. Using untrained
+        # vocab causes 95%+ dead embeddings and loss stuck at log(vocab_size).
+        if hasattr(tokenizer, "ensure_trained_or_fallback"):
+            # Use the new safety method that handles untrained tokenizers
+            vocab_size = tokenizer.ensure_trained_or_fallback(target_vocab_size)
+        elif hasattr(tokenizer, "is_trained") and not tokenizer.is_trained:
+            # Legacy fallback: tokenizer not trained, use target
+            logger.warning(
+                f"[HPO] Tokenizer not trained! Using target_vocab_size={target_vocab_size} "
+                "to prevent dead embeddings."
+            )
+            vocab_size = target_vocab_size
+        else:
+            vocab_size = tokenizer.vocab_size
+
+        # Validate vocab is not just base vocab (would indicate training failure)
+        if vocab_size < 256:
+            logger.error(
+                f"[HPO] Tokenizer returned base vocab only ({vocab_size}). "
+                "This likely indicates tokenizer training failed. Using target."
+            )
+            vocab_size = target_vocab_size
+
+        # Hard cap at target to prevent oversized embeddings
+        # (can happen if superword learning exceeds expectations)
+        vocab_size = min(vocab_size, target_vocab_size)
+
+        # Validation assertions for debugging gradient instability
+        assert vocab_size >= 256, f"Vocab size {vocab_size} is too small for training"
+        assert vocab_size <= 300000, f"Vocab size {vocab_size} exceeds maximum supported"
+
         logger.info(f"[HPO] Vocabulary aligned: target={target_vocab_size}, actual={vocab_size}")
 
         if merger is not None:
@@ -1701,13 +1922,16 @@ def train_trial(
         logger.error(f"[HPO] Failed to load dataset: {e}")
         raise
 
-    # Build model with embedding layer (or HD streaming adapter if enabled)
+    # Build model with per-layer HD dimensions
     model = build_hsmn_model(
         trial_config,
         vocab_size,
         hidden_dim_override=hidden_dim,
-        is_hd_mode=use_hd_streaming,
-        hd_dim=hd_dim,
+        hd_dim=hd_dim,  # Deprecated global fallback
+        hd_dim_embedding=hd_dim_embedding,
+        hd_dim_spatial=hd_dim_spatial,
+        hd_dim_timecrystal=hd_dim_timecrystal,
+        hd_dim_moe=hd_dim_moe,
     )
 
     # Create optimizer (pass model for SophiaG)
@@ -1862,7 +2086,7 @@ def train_trial(
             quality_metrics = evaluate_quality_metrics(
                 model,
                 vocab_size,
-                seq_length=sequence_length,
+                seq_length=context_window,
                 num_samples=quality_eval_samples,
                 dataset_name=quality_eval_dataset,
             )

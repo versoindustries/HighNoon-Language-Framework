@@ -19,14 +19,16 @@ This module provides multi-layer reasoning capabilities with:
 
 - ReasoningModule: Main reasoning architecture with configurable blocks
 - create_reasoning_stack: Factory function for creating reasoning block stacks
-- MemoryBuilder: Hierarchical memory construction
 - FusedReasoningBlockMixin: Base mixin for fused reasoning blocks
 
 The reasoning module uses the 'mamba_timecrystal_wlam_moe_hybrid' block pattern:
-- SpatialBlock (Mamba SSM): O(L) linear-time sequence modeling
-- TimeCrystalSequenceBlock: Energy-conserving Hamiltonian dynamics
+- QHDSpatialBlock: FFT-domain SSM + quantum superposition + holographic routing
+- HDTimeCrystalBlock: Energy-conserving Floquet dynamics
 - WLAMBlock: O(L log L) wavelet-based attention
-- MoELayer: Sparse expert routing
+- MoELayer with SuperposedExpert: Unified TT-decomposed experts with holographic routing
+
+UQHA v3.0: All blocks now use unified holographic circular correlation routing.
+See HD_SUPERPOSED_EXPERT_UNIFICATION.md for architecture details.
 """
 
 from highnoon.models.reasoning.block_factory import create_reasoning_stack

@@ -24,9 +24,13 @@ Also includes HD KV cache compression for inference.
 from __future__ import annotations
 
 import logging
-from typing import Optional, Tuple
+import warnings
 
 import tensorflow as tf
+
+# Phase 4.2: Suppress false-positive complex casting warnings
+# The FFT->real extraction is mathematically correct but triggers TF warnings
+warnings.filterwarnings("ignore", message=".*casting.*complex.*float.*")
 
 logger = logging.getLogger(__name__)
 
@@ -76,9 +80,9 @@ def holographic_bind(x: tf.Tensor, y: tf.Tensor) -> tf.Tensor:
     if _load_native_ops():
         return _native_ops.HolographicBind(x, y)
 
-    # TensorFlow fallback
-    x_complex = tf.cast(x, tf.complex64)
-    y_complex = tf.cast(y, tf.complex64)
+    # TensorFlow fallback - Phase 4.1: Use complex128 for quantum precision
+    x_complex = tf.cast(x, tf.complex128)
+    y_complex = tf.cast(y, tf.complex128)
 
     x_fft = tf.signal.fft(x_complex)
     y_fft = tf.signal.fft(y_complex)
@@ -86,7 +90,8 @@ def holographic_bind(x: tf.Tensor, y: tf.Tensor) -> tf.Tensor:
     bound_fft = x_fft * y_fft
     bound = tf.signal.ifft(bound_fft)
 
-    return tf.math.real(bound)
+    # Cast back to float32 for downstream compatibility
+    return tf.cast(tf.math.real(bound), tf.float32)
 
 
 def holographic_unbind(bundle: tf.Tensor, key: tf.Tensor, epsilon: float = 1e-8) -> tf.Tensor:
@@ -102,18 +107,20 @@ def holographic_unbind(bundle: tf.Tensor, key: tf.Tensor, epsilon: float = 1e-8)
     Returns:
         Unbound tensor [..., dim].
     """
-    b_complex = tf.cast(bundle, tf.complex64)
-    k_complex = tf.cast(key, tf.complex64)
+    # Phase 4.1: Use complex128 for quantum precision
+    b_complex = tf.cast(bundle, tf.complex128)
+    k_complex = tf.cast(key, tf.complex128)
 
     b_fft = tf.signal.fft(b_complex)
     k_fft = tf.signal.fft(k_complex)
 
     # Complex division with stability
     denom = tf.abs(k_fft) ** 2 + epsilon
-    result_fft = b_fft * tf.math.conj(k_fft) / tf.cast(denom, tf.complex64)
+    result_fft = b_fft * tf.math.conj(k_fft) / tf.cast(denom, tf.complex128)
 
     result = tf.signal.ifft(result_fft)
-    return tf.math.real(result)
+    # Cast back to float32 for downstream compatibility
+    return tf.cast(tf.math.real(result), tf.float32)
 
 
 def holographic_similarity(x: tf.Tensor, y: tf.Tensor) -> tf.Tensor:
@@ -129,9 +136,9 @@ def holographic_similarity(x: tf.Tensor, y: tf.Tensor) -> tf.Tensor:
     if _load_native_ops():
         return _native_ops.HolographicSimilarity(x, y)
 
-    # TensorFlow fallback
-    x_complex = tf.cast(x, tf.complex64)
-    y_complex = tf.cast(y, tf.complex64)
+    # TensorFlow fallback - Phase 4.1: Use complex128 for quantum precision
+    x_complex = tf.cast(x, tf.complex128)
+    y_complex = tf.cast(y, tf.complex128)
 
     x_fft = tf.signal.fft(x_complex)
     y_fft = tf.signal.fft(y_complex)
@@ -141,7 +148,8 @@ def holographic_similarity(x: tf.Tensor, y: tf.Tensor) -> tf.Tensor:
     corr = tf.signal.ifft(corr_fft)
 
     # Return max correlation (position 0 for aligned vectors)
-    return tf.math.real(corr[..., 0])
+    # Cast back to float32 for downstream compatibility
+    return tf.cast(tf.math.real(corr[..., 0]), tf.float32)
 
 
 def holographic_attention_scores(
@@ -164,14 +172,15 @@ def holographic_attention_scores(
 
     # TensorFlow fallback - compute pairwise holographic similarity
     # This is O(n² × d log d) instead of native O(n × d log d + n²)
-    batch = tf.shape(queries)[0]
-    heads = tf.shape(queries)[1]
-    seq_q = tf.shape(queries)[2]
-    seq_k = tf.shape(keys)[3]
+    tf.shape(queries)[0]
+    tf.shape(queries)[1]
+    tf.shape(queries)[2]
+    tf.shape(keys)[3]
     head_dim = queries.shape[-1]
 
-    q_complex = tf.cast(queries, tf.complex64)
-    k_complex = tf.cast(keys, tf.complex64)
+    # Phase 4.1: Use complex128 for quantum precision
+    q_complex = tf.cast(queries, tf.complex128)
+    k_complex = tf.cast(keys, tf.complex128)
 
     q_fft = tf.signal.fft(q_complex)  # [B, H, Sq, D]
     k_fft = tf.signal.fft(k_complex)  # [B, H, Sk, D]
@@ -183,13 +192,13 @@ def holographic_attention_scores(
     # [B, H, Sq, D] @ [B, H, D, Sk] -> [B, H, Sq, Sk]
     scores = tf.einsum(
         "bhqd,bhkd->bhqk",
-        tf.math.real(q_fft * k_fft_conj[:, :, None, :, :]),
+        tf.cast(tf.math.real(q_fft * k_fft_conj[:, :, None, :, :]), tf.float32),
         tf.ones_like(keys)[..., 0:1],
     )
 
     # Simplified: use standard attention with FFT features
-    q_feat = tf.math.real(q_fft)
-    k_feat = tf.math.real(k_fft)
+    q_feat = tf.cast(tf.math.real(q_fft), tf.float32)
+    k_feat = tf.cast(tf.math.real(k_fft), tf.float32)
     scores = tf.einsum("bhqd,bhkd->bhqk", q_feat, k_feat)
 
     return scores / (temperature * tf.sqrt(tf.cast(head_dim, tf.float32)))

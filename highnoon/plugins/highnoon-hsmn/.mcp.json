@@ -1,0 +1,14 @@
+{
+    "mcpServers": {
+        "highnoon-hsmn": {
+            "command": "python",
+            "args": [
+                "-m",
+                "highnoon.services.agent_server"
+            ],
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            }
+        }
+    }
+}

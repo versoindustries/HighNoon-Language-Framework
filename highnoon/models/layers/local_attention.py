@@ -31,6 +31,13 @@ from typing import Any
 import tensorflow as tf
 from tensorflow.keras import layers
 
+# V2 MIGRATION: Use unified attention API
+from highnoon._native.ops.unified_attention import (
+    AttentionMode,
+    UnifiedAttentionConfig,
+    unified_attention,
+)
+
 # Phase 201.5: Native Sparse Attention for long sequences
 from highnoon.config import (  # Phase 119: QASA config; Phase 130: Quantum integration config
     LOCAL_ATTENTION_ALIBI_SLOPE_BASE,
@@ -61,10 +68,6 @@ from highnoon.config import (  # Phase 119: QASA config; Phase 130: Quantum inte
     USE_QASA_ATTENTION,
 )
 from highnoon.models.reasoning.fused_contract import FusedReasoningBlockMixin
-
-# Phase 119: QASA ops (lazy import for availability check)
-_qasa_ops = None
-_qasa_available = None
 
 # Phase 201.5: Native Sparse Attention (lazy import)
 _nsa_layer_cls = None
@@ -193,7 +196,7 @@ class LocalAttentionBlock(FusedReasoningBlockMixin, layers.Layer):
 
         if embedding_dim % num_heads != 0:
             raise ValueError(
-                f"embedding_dim ({embedding_dim}) must be divisible by " f"num_heads ({num_heads})"
+                f"embedding_dim ({embedding_dim}) must be divisible by num_heads ({num_heads})"
             )
 
         self.embedding_dim = embedding_dim
@@ -411,22 +414,16 @@ class LocalAttentionBlock(FusedReasoningBlockMixin, layers.Layer):
         return output
 
     def _is_qasa_available(self) -> bool:
-        """Check if QASA C++ ops are available."""
-        global _qasa_ops, _qasa_available
-        if _qasa_available is not None:
-            return _qasa_available
-        try:
-            from highnoon._native.ops.qasa_ops import is_qasa_available
-
-            _qasa_available = is_qasa_available()
-        except ImportError:
-            _qasa_available = False
-        return _qasa_available
+        """Check if QASA is available via unified attention API."""
+        # V2 MIGRATION: QASA is always available via unified attention
+        return self.use_qasa_attention
 
     def _qasa_attention(
         self, q: tf.Tensor, k: tf.Tensor, v: tf.Tensor, training: bool = False
     ) -> tf.Tensor:
-        """Compute QASA attention using VQC-based scoring.
+        """Compute QASA attention using unified attention API.
+
+        V2 MIGRATION: Uses AttentionMode.QASA from unified_attention.
 
         Args:
             q: Query tensor [batch, heads, seq_len, head_dim].
@@ -437,20 +434,21 @@ class LocalAttentionBlock(FusedReasoningBlockMixin, layers.Layer):
         Returns:
             Attention output [batch, heads, seq_len, head_dim].
         """
-        global _qasa_ops
-        if _qasa_ops is None:
-            from highnoon._native.ops import qasa_ops
-
-            _qasa_ops = qasa_ops
-
-        qasa_output = _qasa_ops.run_qasa_attention(
-            queries=q,
-            keys=k,
-            values=v,
-            vqc_params=self.vqc_params,
+        # Build unified QASA config
+        qasa_config = UnifiedAttentionConfig(
+            mode=AttentionMode.QASA,
+            num_heads=self.num_heads,
+            num_kv_heads=self.num_heads,
+            head_dim=self.head_dim,
+            causal=self.causal,
             num_qubits=self.qasa_num_qubits,
             vqc_layers=self.qasa_vqc_layers,
             entanglement_strength=self.qasa_entanglement_strength,
+        )
+
+        # Call unified attention with VQC params as extra_inputs
+        qasa_output = unified_attention(
+            q, k, v, qasa_config, extra_inputs=self.vqc_params, training=training
         )
 
         # Phase 130.6: Apply MPS entropy gating if enabled
@@ -459,7 +457,6 @@ class LocalAttentionBlock(FusedReasoningBlockMixin, layers.Layer):
 
         # Phase 130.1: Apply auto Neural QEM if enabled
         if self._qasa_qem_mitigator is not None:
-            # Reshape for QEM: [batch, heads, seq, dim] -> [batch, heads*seq, dim]
             batch_size = tf.shape(qasa_output)[0]
             orig_shape = tf.shape(qasa_output)
             flat_output = tf.reshape(qasa_output, [batch_size, -1, tf.shape(qasa_output)[-1]])

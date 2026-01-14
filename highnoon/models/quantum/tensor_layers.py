@@ -12,7 +12,6 @@ These layers achieve significant parameter compression (target: 10× reduction)
 while maintaining accuracy (< 2% loss) per Phase 7.4 roadmap.
 """
 
-
 import numpy as np
 import tensorflow as tf
 

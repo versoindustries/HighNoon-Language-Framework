@@ -29,8 +29,13 @@ Phase 48: Hyperdimensional Quantum Embeddings (HQE)
 from __future__ import annotations
 
 import logging
+import warnings
 
 import tensorflow as tf
+
+# Phase 4.2: Suppress false-positive complex casting warnings
+# The FFT->real extraction is mathematically correct but triggers TF warnings
+warnings.filterwarnings("ignore", message=".*casting.*complex.*float.*")
 
 logger = logging.getLogger(__name__)
 
@@ -77,9 +82,9 @@ def circular_convolution_tf(a: tf.Tensor, b: tf.Tensor) -> tf.Tensor:
     Returns:
         Circular convolution result with same shape.
     """
-    # Cast to complex for FFT
-    a_complex = tf.cast(a, tf.complex64)
-    b_complex = tf.cast(b, tf.complex64)
+    # Phase 4.1: Cast to complex128 for quantum precision
+    a_complex = tf.cast(a, tf.complex128)
+    b_complex = tf.cast(b, tf.complex128)
 
     # FFT along last dimension
     a_fft = tf.signal.fft(a_complex)
@@ -91,8 +96,8 @@ def circular_convolution_tf(a: tf.Tensor, b: tf.Tensor) -> tf.Tensor:
     # Inverse FFT
     result = tf.signal.ifft(product_fft)
 
-    # Return real part
-    return tf.math.real(result)
+    # Cast back to float32 for downstream compatibility
+    return tf.cast(tf.math.real(result), tf.float32)
 
 
 @tf.function

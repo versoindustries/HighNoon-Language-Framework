@@ -1,20 +1,29 @@
-/* HighNoon Dashboard - Design System Variables */
-/* Supports both light and dark modes */
+/* HighNoon Dashboard - Enterprise Design System Variables */
+/* Supports both light and dark modes - WCAG AA Compliant */
 
 :root {
-  /* Base spacing scale */
+  /* Base spacing scale (8px base unit) */
   --spacing-xs: 0.25rem;
+  /* 4px */
   --spacing-sm: 0.5rem;
+  /* 8px */
   --spacing-md: 1rem;
+  /* 16px */
   --spacing-lg: 1.5rem;
+  /* 24px */
   --spacing-xl: 2rem;
+  /* 32px */
   --spacing-2xl: 3rem;
+  /* 48px */
+  --spacing-3xl: 4rem;
+  /* 64px */
 
   /* Border radius */
   --radius-sm: 0.25rem;
   --radius-md: 0.5rem;
   --radius-lg: 0.75rem;
   --radius-xl: 1rem;
+  --radius-2xl: 1.5rem;
   --radius-full: 9999px;
 
   /* Typography */
@@ -40,13 +49,44 @@
   --leading-normal: 1.5;
   --leading-relaxed: 1.75;
 
-  /* Shadows */
+  /* =============================================================================
+     ELEVATION SYSTEM (Enterprise-grade depth hierarchy)
+     ============================================================================= */
+  --elevation-0: none;
+  --elevation-1: 0 1px 3px rgba(0, 0, 0, 0.12), 0 1px 2px rgba(0, 0, 0, 0.24);
+  --elevation-2: 0 3px 6px rgba(0, 0, 0, 0.16), 0 3px 6px rgba(0, 0, 0, 0.23);
+  --elevation-3: 0 10px 20px rgba(0, 0, 0, 0.19), 0 6px 6px rgba(0, 0, 0, 0.23);
+  --elevation-4: 0 14px 28px rgba(0, 0, 0, 0.25), 0 10px 10px rgba(0, 0, 0, 0.22);
+
+  /* Glow effects for focus and status */
+  --elevation-glow-primary: 0 0 40px rgba(99, 102, 241, 0.15);
+  --elevation-glow-success: 0 0 40px rgba(16, 185, 129, 0.15);
+  --elevation-glow-warning: 0 0 40px rgba(245, 158, 11, 0.15);
+  --elevation-glow-danger: 0 0 40px rgba(239, 68, 68, 0.15);
+
+  /* Legacy shadows (kept for compatibility) */
   --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
   --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
   --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
   --shadow-xl: 0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1);
 
-  /* Transitions */
+  /* =============================================================================
+     MOTION TOKENS (Performance-optimized animations)
+     ============================================================================= */
+  /* Durations */
+  --duration-instant: 100ms;
+  --duration-fast: 150ms;
+  --duration-normal: 250ms;
+  --duration-slow: 400ms;
+  --duration-stately: 600ms;
+
+  /* Easing functions (from research) */
+  --ease-out-expo: cubic-bezier(0.19, 1, 0.22, 1);
+  --ease-in-out-sine: cubic-bezier(0.37, 0, 0.63, 1);
+  --ease-spring: cubic-bezier(0.175, 0.885, 0.32, 1.275);
+  --ease-bounce: cubic-bezier(0.68, -0.55, 0.265, 1.55);
+
+  /* Legacy transitions (kept for compatibility) */
   --transition-fast: 150ms ease;
   --transition-base: 200ms ease;
   --transition-slow: 300ms ease;
@@ -59,10 +99,73 @@
   --z-toast: 9200;
   --z-tooltip: 9300;
 
-  /* Glassmorphism */
-  --glass-blur: blur(12px);
+  /* =============================================================================
+     GLASSMORPHISM TOKENS (2024 Enterprise Standard)
+     ============================================================================= */
+  --glass-blur: blur(16px);
+  --glass-blur-heavy: blur(24px);
   --glass-saturate: saturate(180%);
+
+  /* Glass surfaces */
+  --glass-bg: rgba(255, 255, 255, 0.03);
+  --glass-bg-hover: rgba(255, 255, 255, 0.06);
+  --glass-bg-active: rgba(255, 255, 255, 0.09);
+  --glass-border: rgba(255, 255, 255, 0.08);
+  --glass-border-hover: rgba(255, 255, 255, 0.12);
+
+  /* Scanline effect for CockpitHUD */
+  --scanline-color: rgba(255, 255, 255, 0.015);
+  --scanline-size: 4px;
+
+  /* =============================================================================
+     QUANTUM COCKPIT PALETTE (Premium "Formula 1" Design System)
+     ============================================================================= */
+  /* Primary quantum accent colors */
+  --quantum-primary: #00f5ff;        /* Neon Cyan - Main accent */
+  --quantum-secondary: #a855f7;      /* Violet - Secondary accent */
+  --quantum-tertiary: #22c55e;       /* Emerald - Success/positive */
+  --quantum-quaternary: #f59e0b;     /* Amber - Warning/attention */
+
+  /* Quantum glow effects for 3D elements */
+  --quantum-glow: rgba(0, 245, 255, 0.3);
+  --quantum-glow-strong: rgba(0, 245, 255, 0.5);
+  --quantum-glow-violet: rgba(168, 85, 247, 0.3);
+  --quantum-glow-emerald: rgba(34, 197, 94, 0.3);
+
+  /* Quantum gradient presets */
+  --quantum-gradient-primary: linear-gradient(135deg, var(--quantum-primary), var(--quantum-secondary));
+  --quantum-gradient-surface: linear-gradient(180deg, rgba(0, 245, 255, 0.05) 0%, transparent 50%);
+  --quantum-gradient-radial: radial-gradient(ellipse at center, var(--quantum-glow), transparent 70%);
+
+  /* Noise texture for glassmorphism (SVG data URL) */
+  --noise-texture: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.03'/%3E%3C/svg%3E");
+
+  /* =============================================================================
+     3D SCENE CONFIGURATION (react-three-fiber / Three.js)
+     ============================================================================= */
+  /* Scene fog for depth */
+  --scene-fog-color: #0a0a0f;
+  --scene-fog-near: 10;
+  --scene-fog-far: 50;
+
+  /* Terrain/surface coloring */
+  --terrain-color-deep: #1e3a5f;      /* Low values (valleys) */
+  --terrain-color-mid: #2dd4bf;       /* Mid values */
+  --terrain-color-peak: #f43f5e;      /* High values (peaks) */
+  --terrain-wireframe: rgba(0, 245, 255, 0.15);
+
+  /* Particle system colors */
+  --particle-primary: var(--quantum-primary);
+  --particle-secondary: var(--quantum-secondary);
+  --particle-trail: rgba(0, 245, 255, 0.6);
+
+  /* Best position marker */
+  --marker-best: #fbbf24;             /* Gold for best position */
+  --marker-best-glow: rgba(251, 191, 36, 0.5);
+  --marker-current: var(--quantum-primary);
+  --marker-current-glow: var(--quantum-glow);
 }
+
 
 /* Dark theme (default) */
 :root,

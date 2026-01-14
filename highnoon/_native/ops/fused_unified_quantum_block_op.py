@@ -620,7 +620,8 @@ class UnifiedQuantumEnhancements(tf.keras.layers.Layer):
         # QSVT activation
         if self.use_qsvt_activations:
             # Normalize to [-1, 1] range for Chebyshev
-            x_norm = tf.nn.l2_normalize(x, axis=-1)
+            # GRADIENT FIX: Add epsilon to prevent NaN/Inf gradients when norm → 0
+            x_norm = tf.nn.l2_normalize(x, axis=-1, epsilon=1e-8)
             x_activated = qsvt_activation(x_norm, self.qsvt_coefficients, degree=self.qsvt_degree)
             x = x + 0.1 * x_activated  # Residual with small scaling
 

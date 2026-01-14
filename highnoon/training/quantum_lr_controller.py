@@ -343,9 +343,7 @@ class QuantumAdaptiveLRController:
             tunnel_jump = 1.0 + tunnel_direction * self.tunneling_magnitude * np.random.random()
             current_lr *= tunnel_jump
             self._state.tunneling_events += 1
-            logger.debug(
-                f"[QALRC] Quantum tunneling at step {step}: " f"LR jump by {tunnel_jump:.3f}x"
-            )
+            logger.debug(f"[QALRC] Quantum tunneling at step {step}: LR jump by {tunnel_jump:.3f}x")
 
         # Clamp to bounds
         current_lr = max(self.min_lr, min(self.max_lr, current_lr))

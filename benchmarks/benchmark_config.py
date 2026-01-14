@@ -33,6 +33,10 @@ from typing import Any
 from highnoon.config import (
     ENABLE_QUANTUM_MEMORY_REPLAY,
     ENTANGLEMENT_REGULARIZATION,
+    HD_DIM_EMBEDDING,
+    HD_DIM_MOE,
+    HD_DIM_SPATIAL,
+    HD_DIM_TIMECRYSTAL,
     MAX_CONTEXT_LEN,
     NUM_EXPERTS,
     REASONING_BLOCK_PATTERN,
@@ -236,7 +240,9 @@ class ModelConfig:
 
     # Import defaults from central config for consistency
     vocab_size: int = VOCAB_SIZE
-    embedding_dim: int = 128  # Smaller for fast benchmarks (prod uses EMBEDDING_DIM=512)
+    # CRITICAL: embedding_dim MUST match HD_DIM_MOE for SuperposedExpert C++ ops
+    # See enterprise_training_engine_audit.py lines 1018-1025 for validation
+    embedding_dim: int = HD_DIM_MOE  # 512 - matches validated audit script config
     num_reasoning_blocks: int = REASONING_LAYERS
     num_experts: int = NUM_EXPERTS
     top_k: int = TOP_K
@@ -246,6 +252,11 @@ class ModelConfig:
     use_quantum_memory_replay: bool = ENABLE_QUANTUM_MEMORY_REPLAY
     use_entanglement_loss: bool = ENTANGLEMENT_REGULARIZATION > 0
     use_quantum_holographic_memory: bool = USE_QUANTUM_HOLOGRAPHIC_MEMORY
+    # Per-layer HD dimensions for proper C++ op compatibility
+    hd_dim_embedding: int = HD_DIM_EMBEDDING
+    hd_dim_spatial: int = HD_DIM_SPATIAL
+    hd_dim_timecrystal: int = HD_DIM_TIMECRYSTAL
+    hd_dim_moe: int = HD_DIM_MOE
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for model initialization."""

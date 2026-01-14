@@ -675,6 +675,22 @@ class TimeCrystalSequenceBlock(FusedReasoningBlockMixin, ControlVarMixin, layers
         )
         candidate_time = tf.maximum(evolution_time_scalar, min_time)
 
+        # Phase 3.1: Coherence-Gated Evolution Time
+        # When coherence is low, reduce evolution time for stability
+        if config.COHERENCE_GATED_EVOLUTION:
+            try:
+                from highnoon.training.quantum_loss import get_coherence_aggregator
+
+                coherence_agg = get_coherence_aggregator()
+                if coherence_agg._sources:
+                    # Get global coherence [0, 1] - higher = more coherent
+                    coherence = coherence_agg.get_global_coherence()
+                    # Gate: [0.5, 1.0] - never reduce below 50% of evolution time
+                    coherence_gate = 0.5 + 0.5 * coherence
+                    candidate_time = candidate_time * coherence_gate
+            except (ImportError, AttributeError):
+                pass  # Coherence aggregator not available, skip gating
+
         guard_terms = []
         if limits.hardware_relative_step > 0.0:
             guard_terms.append(
@@ -968,6 +984,58 @@ class FloquetTimeCrystalBlock(TimeCrystalBlock):
             f"use_floquet={self.use_floquet_evolution}"
         )
 
+    def apply_born_rule_amplitude_feedback(
+        self,
+        qhd_amplitudes: tf.Tensor | None = None,
+        base_amplitude: float | None = None,
+    ) -> None:
+        """Phase 3.2: Born Rule Amplitude Feedback (HNN_TIMECRYSTAL_ENHANCEMENT_ROADMAP).
+
+        Uses the dominant path amplitude from QHD block to modulate Floquet drive.
+        High concentration (confident model) -> stronger drive
+        Low concentration (uncertain model) -> weaker drive for stability
+
+        Args:
+            qhd_amplitudes: Complex amplitudes from QHD block [batch, paths] or None.
+            base_amplitude: Base drive amplitude to scale from. Uses current if None.
+        """
+        if qhd_amplitudes is None:
+            # Try to get amplitudes from associated QHD block if exists
+            if hasattr(self, "qhd_block") and self.qhd_block is not None:
+                try:
+                    qhd_amplitudes = self.qhd_block.get_amplitudes()
+                except (AttributeError, TypeError):
+                    return  # No amplitudes available
+
+        if qhd_amplitudes is None:
+            return
+
+        # Compute Born probabilities: |ψ|²
+        probabilities = tf.abs(qhd_amplitudes) ** 2
+
+        # Find dominant path probability (max over paths and batch)
+        dominant_prob = tf.reduce_max(probabilities)
+
+        # High concentration → use stronger drive (model is confident)
+        # Range: [0.5, 1.0] * base_amplitude when dominant_prob in [0, 1]
+        drive_scale = tf.cast(0.5 + 0.5 * dominant_prob, tf.float32)
+
+        if base_amplitude is None:
+            base_amplitude = config.FLOQUET_DRIVE_AMPLITUDE
+
+        # Update drive amplitude
+        new_amplitude = drive_scale * base_amplitude
+        if self.H_drive_amplitude is not None:
+            self.H_drive_amplitude.assign(new_amplitude)
+
+    def set_energy_drift(self, drift: float) -> None:
+        """Store recent energy drift for Phase 3.3 drift-bounded period adjustment.
+
+        Args:
+            drift: Recent energy drift value from EnergyConservationMonitor.
+        """
+        self._recent_energy_drift = drift
+
     def floquet_hamiltonian_correction(self, t: tf.Tensor, q: tf.Tensor, p: tf.Tensor) -> tf.Tensor:
         """Compute time-periodic Floquet Hamiltonian correction.
 
@@ -986,8 +1054,10 @@ class FloquetTimeCrystalBlock(TimeCrystalBlock):
         # Periodic drive term: A · cos(ωt)
         drive = self.H_drive_amplitude * tf.cos(self.H_drive_frequency * t)
 
-        # Coupling term: Σ(q · p)
+        # Coupling term: Σ(q · p) normalized by state_dim
         coupling = tf.reduce_sum(q * p, axis=-1, keepdims=True)
+        state_dim = tf.cast(tf.shape(q)[-1], tf.float32)
+        coupling = coupling / state_dim
 
         # Floquet kick at period boundaries
         period_float = tf.cast(self.floquet_period, tf.float32)
@@ -1056,6 +1126,19 @@ class FloquetTimeCrystalBlock(TimeCrystalBlock):
         new_period = max(2, min(16, new_period))  # Clamp to [2, 16]
 
         if new_period != self.floquet_period:
+            # Phase 3.3: Drift-Based Floquet Period Bound (HNN_TIMECRYSTAL_ENHANCEMENT_ROADMAP)
+            # If recent energy drift is high, force shorter period for faster stabilization
+            if config.FLOQUET_DRIFT_PERIOD_BOUND:
+                if hasattr(self, "_recent_energy_drift") and self._recent_energy_drift is not None:
+                    if self._recent_energy_drift > config.FLOQUET_HIGH_DRIFT_THRESHOLD:
+                        # Force faster period when drift is high
+                        new_period = max(2, new_period // 2)
+                        log.debug(
+                            "[DTC-Phase3.3] High drift (%.6f) -> period halved to %d",
+                            self._recent_energy_drift,
+                            new_period,
+                        )
+
             self.floquet_period = new_period
             # Update frequency to match new period
             if self.H_drive_frequency is not None:

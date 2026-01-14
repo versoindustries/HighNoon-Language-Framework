@@ -196,7 +196,7 @@ class CurriculumScheduler:
         if self.verbose and epoch % 10 == 0:
             log.info(
                 f"[CURRICULUM] Epoch {epoch}: Stage {self.current_stage}/{self.num_stages}, "
-                f"Using {len(subset_indices)}/{num_total} molecules ({fraction*100:.1f}%)"
+                f"Using {len(subset_indices)}/{num_total} molecules ({fraction * 100:.1f}%)"
             )
 
         return subset_indices

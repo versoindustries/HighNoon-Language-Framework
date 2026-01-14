@@ -228,7 +228,7 @@ class HyperparameterImportanceAnalyzer:
 
         if len(trial_configs) < self.min_trials:
             logger.info(
-                f"fANOVA requires at least {self.min_trials} trials, " f"got {len(trial_configs)}"
+                f"fANOVA requires at least {self.min_trials} trials, got {len(trial_configs)}"
             )
             return False
 

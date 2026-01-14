@@ -220,45 +220,6 @@ class QuantumConfig:
         logger.info(f"[QuantumConfig] Created from preset '{preset}'")
         return config
 
-    @classmethod
-    def from_hpo(cls, hpo_config: dict[str, Any]) -> QuantumConfig:
-        """Create config from HPO sweep parameters.
-
-        Maps HPO parameter names to QuantumConfig fields.
-
-        Args:
-            hpo_config: HPO configuration dict.
-
-        Returns:
-            Configured QuantumConfig instance.
-        """
-        mappings = {
-            "quantum_enhancement_level": "enhancement_level",
-            "vqc_gradient_mode": "vqc_gradient_mode",
-            "quls_alpha": "quls_alpha",
-            "quls_beta": "quls_beta",
-            "quls_target_entropy": "quls_target_entropy",
-            "mps_bond_dim": "mps_bond_dim",
-            "bus_num_sites": "bus_num_sites",
-            "zne_enabled": "zne_enabled",
-            "zne_hidden_dim": "zne_hidden_dim",
-        }
-
-        kwargs = {}
-        for hpo_key, config_key in mappings.items():
-            if hpo_key in hpo_config:
-                value = hpo_config[hpo_key]
-
-                # Handle enum conversions
-                if config_key == "enhancement_level":
-                    value = QuantumEnhancementLevel(value)
-                elif config_key == "vqc_gradient_mode":
-                    value = VQCGradientMode(value)
-
-                kwargs[config_key] = value
-
-        return cls(**kwargs)
-
     def expand_flags(self) -> dict[str, Any]:
         """Expand config to individual flags for backwards compatibility.
 
@@ -323,20 +284,6 @@ class QuantumConfig:
 
         return flags
 
-    def apply_to_module(self, module) -> None:
-        """Apply configuration to a config module.
-
-        Writes expanded flags as attributes on the module.
-
-        Args:
-            module: Module to configure (e.g., highnoon.config).
-        """
-        flags = self.expand_flags()
-        for key, value in flags.items():
-            setattr(module, key, value)
-
-        logger.info(f"[QuantumConfig] Applied {len(flags)} flags to module")
-
     def summary(self) -> str:
         """Get human-readable config summary.
 
@@ -395,58 +342,9 @@ def set_global_config(config: QuantumConfig | str) -> QuantumConfig:
     return config
 
 
-def reset_global_config():
-    """Reset global configuration to None."""
-    global _global_config
-    _global_config = None
-
-
 # =============================================================================
 # Convenience Functions
 # =============================================================================
-
-
-def configure_quantum(
-    preset: str | None = None,
-    **kwargs,
-) -> QuantumConfig:
-    """Configure quantum features with optional preset and overrides.
-
-    Args:
-        preset: Base preset name (optional).
-        **kwargs: Config field overrides.
-
-    Returns:
-        Configured QuantumConfig.
-
-    Example:
-        >>> configure_quantum("balanced", mps_bond_dim=64)
-        >>> configure_quantum(quls_alpha=0.2, zne_enabled=False)
-    """
-    if preset is not None:
-        config = QuantumConfig.from_preset(preset)
-        # Apply overrides
-        for key, value in kwargs.items():
-            if hasattr(config, key):
-                setattr(config, key, value)
-    else:
-        config = QuantumConfig(**kwargs)
-
-    return set_global_config(config)
-
-
-def get_flag(name: str, default: Any = None) -> Any:
-    """Get individual flag value from global config.
-
-    Args:
-        name: Flag name.
-        default: Default if flag not found.
-
-    Returns:
-        Flag value.
-    """
-    flags = get_global_config().expand_flags()
-    return flags.get(name, default)
 
 
 # =============================================================================
@@ -460,7 +358,5 @@ __all__ = [
     "QuantumConfig",
     "get_global_config",
     "set_global_config",
-    "reset_global_config",
-    "configure_quantum",
-    "get_flag",
+    "set_global_config",
 ]

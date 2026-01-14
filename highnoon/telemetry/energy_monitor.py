@@ -54,6 +54,9 @@ class EnergyConservationMonitor:
 
     Tracks energy drift, conservation rate, and state convergence metrics
     for each evolution step in the reasoning stack.
+
+    Phase 1.1 Enhancement: Automatic emergency recovery when consecutive
+    violations exceed threshold, reducing evolution_time by 50%.
     """
 
     def __init__(
@@ -62,6 +65,8 @@ class EnergyConservationMonitor:
         drift_threshold: float = 0.1,
         history_size: int = 1000,
         enable_logging: bool = True,
+        emergency_threshold: int | None = None,
+        emergency_reduction: float | None = None,
     ):
         """
         Initialize energy conservation monitor.
@@ -71,11 +76,28 @@ class EnergyConservationMonitor:
             drift_threshold: Maximum acceptable energy drift (default: 0.1)
             history_size: Maximum number of steps to keep in history
             enable_logging: Whether to log warnings for high drift
+            emergency_threshold: Consecutive violations before emergency (default: from config)
+            emergency_reduction: Factor to reduce evolution_time by (default: from config)
         """
+        # Import config for defaults (lazy import to avoid circular)
+        from highnoon import config as hn_config
+
         self.name = name
         self.drift_threshold = drift_threshold
         self.history_size = history_size
         self.enable_logging = enable_logging
+
+        # Phase 1.1: Emergency recovery configuration
+        self.emergency_threshold = (
+            emergency_threshold
+            if emergency_threshold is not None
+            else getattr(hn_config, "ENERGY_EMERGENCY_THRESHOLD", 5)
+        )
+        self.emergency_reduction = (
+            emergency_reduction
+            if emergency_reduction is not None
+            else getattr(hn_config, "ENERGY_EMERGENCY_REDUCTION", 0.5)
+        )
 
         # Energy drift tracking
         self.energy_drifts: list[float] = []
@@ -92,10 +114,17 @@ class EnergyConservationMonitor:
         self.total_steps = 0
         self.conservation_violations = 0
 
+        # Phase 1.1: Consecutive violation tracking for emergency recovery
+        self.consecutive_violations = 0
+        self.emergency_triggered_count = 0
+        self._registered_blocks: list = []  # TimeCrystal blocks with evolution_time_bias
+
         # Moving window for recent statistics
         self.recent_drifts = deque(maxlen=100)
 
-        logger.info(f"Initialized {self.name} with drift_threshold={drift_threshold}")
+        logger.info(
+            f"Initialized {self.name} with drift_threshold={drift_threshold}, emergency_threshold={self.emergency_threshold}"
+        )
 
     def record_step(
         self,
@@ -173,12 +202,86 @@ class EnergyConservationMonitor:
                 self.state_norms.pop(0)
             self.state_norms.append(float(norm))
 
+        # Phase 1.1: Track consecutive violations for emergency recovery
+        if conserved:
+            # Reset consecutive counter on successful conservation
+            self.consecutive_violations = 0
+        else:
+            self.consecutive_violations += 1
+            # Check if emergency recovery should be triggered
+            if self.consecutive_violations >= self.emergency_threshold:
+                self._trigger_emergency_recovery()
+                self.consecutive_violations = 0  # Reset after recovery
+
         # Return step metrics
         return {
             "drift": float(drift),
             "relative_drift": float(relative_drift),
             "conserved": bool(conserved),
+            "consecutive_violations": self.consecutive_violations,
+            "emergency_triggered": self.emergency_triggered_count,
         }
+
+    def register_block(self, block) -> None:
+        """
+        Register a TimeCrystal block for emergency recovery.
+
+        Phase 1.1: Registered blocks will have their evolution_time_bias
+        reduced by the emergency_reduction factor when emergency recovery
+        is triggered.
+
+        Args:
+            block: TimeCrystal block with evolution_time_bias attribute.
+        """
+        if hasattr(block, "evolution_time_bias"):
+            if block not in self._registered_blocks:
+                self._registered_blocks.append(block)
+                logger.debug(
+                    f"{self.name}: Registered block {getattr(block, 'name', repr(block))} for emergency recovery"
+                )
+        else:
+            logger.warning(
+                f"{self.name}: Block {getattr(block, 'name', repr(block))} has no evolution_time_bias, skipping registration"
+            )
+
+    def unregister_block(self, block) -> None:
+        """Remove a block from emergency recovery registration."""
+        if block in self._registered_blocks:
+            self._registered_blocks.remove(block)
+            logger.debug(f"{self.name}: Unregistered block {getattr(block, 'name', repr(block))}")
+
+    def _trigger_emergency_recovery(self) -> None:
+        """
+        Emergency recovery: Reduce all registered blocks' evolution_time by reduction factor.
+
+        Phase 1.1: When consecutive violations exceed threshold, this method
+        reduces evolution_time_bias by emergency_reduction factor (default 50%)
+        to stabilize the dynamics.
+        """
+        if not self._registered_blocks:
+            logger.warning(f"{self.name}: Emergency recovery triggered but no blocks registered!")
+            return
+
+        reduced_count = 0
+        for block in self._registered_blocks:
+            if hasattr(block, "evolution_time_bias"):
+                try:
+                    current = float(block.evolution_time_bias.numpy())
+                    new_value = current * self.emergency_reduction
+                    block.evolution_time_bias.assign(new_value)
+                    reduced_count += 1
+                    logger.warning(
+                        f"{self.name}: Emergency recovery - reduced {getattr(block, 'name', 'block')} "
+                        f"evolution_time: {current:.6f} -> {new_value:.6f}"
+                    )
+                except Exception as e:
+                    logger.error(f"{self.name}: Failed to reduce evolution_time for block: {e}")
+
+        self.emergency_triggered_count += 1
+        logger.warning(
+            f"{self.name}: Emergency recovery #{self.emergency_triggered_count} triggered! "
+            f"Reduced {reduced_count} blocks by {(1 - self.emergency_reduction) * 100:.0f}%"
+        )
 
     def get_statistics(self) -> dict[str, float]:
         """
@@ -303,7 +406,7 @@ class EnergyConservationMonitor:
 
         message = (
             f"{self.name} Energy Conservation {status}:\n"
-            f"  Conservation rate: {conservation_rate*100:.1f}% "
+            f"  Conservation rate: {conservation_rate * 100:.1f}% "
             f"({stats['total_steps']} steps)\n"
             f"  Mean drift: {mean_drift:.4f} (threshold: {self.drift_threshold})\n"
             f"  Max drift: {max_drift:.4f}\n"

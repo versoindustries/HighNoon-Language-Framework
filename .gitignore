@@ -158,6 +158,9 @@ Thumbs.db
 # Benchmark Results (Generated)
 # =============================================================================
 benchmark_results.json
+build_secure.sh
+build_ops.sh
+CMakeLists.txt
 benchmarks/reports/*.json
 benchmarks/results/
 
@@ -170,6 +173,11 @@ benchmarks/results/
 CLAUDE.md
 GEMINI.md
 .pre-commit-config.yaml
+
+# =============================================================================
+# Saguaro Index (Generated - Large Files)
+# =============================================================================
+.saguaro/
 # =============================================================================
 # Pre-compiled Native Binaries Exception
 # =============================================================================

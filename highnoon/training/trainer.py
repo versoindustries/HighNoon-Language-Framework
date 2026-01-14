@@ -276,12 +276,12 @@ class Trainer:
             stage_epochs = stage.epochs or epochs_per_stage
 
             log.info(
-                f"\n{'='*60}\n"
+                f"\n{'=' * 60}\n"
                 f"  Starting Stage {stage_idx + 1}/{len(self.curriculum_stages)}: "
                 f"{stage.name}\n"
                 f"  Datasets: {stage.datasets}\n"
                 f"  Epochs: {stage_epochs}\n"
-                f"{'='*60}"
+                f"{'=' * 60}"
             )
 
             # Train on this stage

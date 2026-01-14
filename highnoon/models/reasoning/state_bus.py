@@ -100,6 +100,189 @@ def gumbel_softmax(
     return y
 
 
+# =============================================================================
+# Phase 1002: Floquet Phase Bus
+# =============================================================================
+
+
+class FloquetPhaseBus:
+    """Tracks global Floquet phase for cross-block synchronization.
+
+    Phase 1002: This class provides a shared Floquet phase state that
+    time-periodic components (HDSpatialBlock, TimeCrystalBlock) can read
+    to maintain phase coherence across the model.
+
+    Floquet theory describes systems with periodic driving. By sharing a
+    global phase, all blocks can synchronize their time-periodic operations.
+
+    Attributes:
+        period: Floquet period in normalized units.
+        phase: Current phase [0, 2π).
+        phase_history: History of phase values for coherence tracking.
+
+    Example:
+        >>> bus = FloquetPhaseBus(period=1.0)
+        >>> bus.advance(dt=0.1)  # Advance by 0.1 time units
+        >>> cos_phase, sin_phase = bus.get_cos_sin()
+        >>> # Use in time-periodic operation
+    """
+
+    def __init__(self, period: float = 1.0, max_history: int = 100):
+        """Initialize FloquetPhaseBus.
+
+        Args:
+            period: Floquet period (default: 1.0).
+            max_history: Maximum phase history to retain.
+        """
+        self.period = period
+        self.max_history = max_history
+        self._phase = tf.Variable(0.0, trainable=False, name="floquet_phase")
+        self._phase_history: list[float] = []
+        self._step_count = 0
+
+        logger.info(f"[FloquetPhaseBus] Initialized with period={period}")
+
+    def advance(self, dt: float = 1.0) -> tf.Tensor:
+        """Advance phase by dt time units, wrapping at period.
+
+        Args:
+            dt: Time step to advance (default: 1.0).
+
+        Returns:
+            New phase value.
+        """
+        import numpy as np
+
+        # Phase increment: dt / period * 2π
+        delta_phase = (dt / self.period) * 2.0 * np.pi
+        new_phase = (self._phase + delta_phase) % (2.0 * np.pi)
+
+        self._phase.assign(new_phase)
+        self._step_count += 1
+
+        # Track history (with limit)
+        self._phase_history.append(float(new_phase))
+        if len(self._phase_history) > self.max_history:
+            self._phase_history = self._phase_history[-self.max_history :]
+
+        return self._phase
+
+    def get_phase(self) -> tf.Tensor:
+        """Get current phase value.
+
+        Returns:
+            Phase tensor (scalar) in [0, 2π).
+        """
+        return self._phase
+
+    def get_cos_sin(self) -> tuple[tf.Tensor, tf.Tensor]:
+        """Get cosine and sine of current phase.
+
+        Useful for encoding phase in a rotation-invariant manner.
+
+        Returns:
+            Tuple of (cos(phase), sin(phase)).
+        """
+        return tf.cos(self._phase), tf.sin(self._phase)
+
+    def get_phase_vector(self, dim: int) -> tf.Tensor:
+        """Get phase encoding vector using Fourier features.
+
+        Creates a phase encoding similar to positional embeddings.
+
+        Args:
+            dim: Dimension of encoding vector.
+
+        Returns:
+            Phase encoding [dim].
+        """
+
+        # Create frequency bands
+        half_dim = dim // 2
+        freqs = tf.exp(tf.cast(tf.range(half_dim), tf.float32) * -(tf.math.log(10000.0) / half_dim))
+
+        # Phase encoding: [cos(phase * freq), sin(phase * freq)]
+        angles = self._phase * freqs
+        encoding = tf.concat([tf.cos(angles), tf.sin(angles)], axis=0)
+
+        return encoding[:dim]
+
+    def reset(self, initial_phase: float = 0.0) -> None:
+        """Reset phase to initial value.
+
+        Args:
+            initial_phase: Initial phase value (default: 0.0).
+        """
+        self._phase.assign(initial_phase)
+        self._phase_history = [initial_phase]
+        self._step_count = 0
+
+    def get_coherence(self) -> float:
+        """Compute phase coherence from history.
+
+        Uses the circular mean of phase history to estimate coherence.
+        High coherence indicates consistent phase progression.
+
+        Returns:
+            Coherence measure in [0, 1].
+        """
+        import numpy as np
+
+        if len(self._phase_history) < 2:
+            return 1.0
+
+        # Compute circular mean
+        cos_vals = [np.cos(p) for p in self._phase_history]
+        sin_vals = [np.sin(p) for p in self._phase_history]
+
+        mean_cos = np.mean(cos_vals)
+        mean_sin = np.mean(sin_vals)
+
+        # Resultant length (0 = uniform distribution, 1 = concentrated)
+        coherence = np.sqrt(mean_cos**2 + mean_sin**2)
+
+        return float(coherence)
+
+    def get_statistics(self) -> dict:
+        """Get phase statistics.
+
+        Returns:
+            Dictionary with phase, step_count, coherence.
+        """
+        return {
+            "phase": float(self._phase.numpy()),
+            "step_count": self._step_count,
+            "coherence": self.get_coherence(),
+            "history_length": len(self._phase_history),
+        }
+
+
+# Global Floquet phase bus instance (singleton)
+_GLOBAL_FLOQUET_BUS: FloquetPhaseBus | None = None
+
+
+def get_floquet_bus(period: float = 1.0) -> FloquetPhaseBus:
+    """Get or create the global FloquetPhaseBus instance.
+
+    Args:
+        period: Floquet period (only used on first call).
+
+    Returns:
+        Global FloquetPhaseBus instance.
+    """
+    global _GLOBAL_FLOQUET_BUS
+    if _GLOBAL_FLOQUET_BUS is None:
+        _GLOBAL_FLOQUET_BUS = FloquetPhaseBus(period=period)
+    return _GLOBAL_FLOQUET_BUS
+
+
+def reset_floquet_bus() -> None:
+    """Reset the global FloquetPhaseBus."""
+    global _GLOBAL_FLOQUET_BUS
+    if _GLOBAL_FLOQUET_BUS is not None:
+        _GLOBAL_FLOQUET_BUS.reset()
+
+
 class SuperpositionSlotBuffer:
     """Enhancement 4: Quantum-Inspired Slot Superposition.
 

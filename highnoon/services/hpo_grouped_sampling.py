@@ -210,10 +210,13 @@ class ParameterGroupSampler:
                         choices=[32, 64, 128],
                         default=64,
                     ),
+                    # V2.0 Path Independence: All path systems remain independent.
+                    # QHD, COCONUT, and SuperposedExpert explore different "universes".
+                    # faNOVA tracks correlation hints but doesn't merge parameters.
                     ParameterSpec(
                         name="superposition_dim",
                         param_type="choice",
-                        choices=[1, 2],  # Max 2 for Lite
+                        choices=[1, 2],  # Max 2 for Lite (K× memory cost)
                         default=2,
                     ),
                 ],

@@ -91,7 +91,9 @@ def create_scheduler(
     # Note: vocab_size is NOT extracted here - per PHASE1 tokenizer fix, model vocab_size
     # is derived from tokenizer.vocab_size after corpus learning, not from user config.
     param_budget = getattr(config, "param_budget", None) or model_config.get("param_budget")
-    context_window = model_config.get("sequence_length") or model_config.get("context_window")
+    # Phase 200: Unified to context_window (minimum 8K)
+    # Phase 900.1: Default reduced to 4K for HPO - 128K caused 25GB+ memory before first step
+    context_window = model_config.get("context_window", 4096)
 
     # Extract optimizer from model_config to set in search space
     # This ensures HPOSearchSpace.sample() uses the user-selected optimizer(s)
@@ -170,7 +172,7 @@ def create_scheduler(
             base_config["vocab_size"] = max_vocab
             logger.info(
                 f"[HPO] Set budget-aware vocab_size={max_vocab} "
-                f"(budget={param_budget/1e6:.0f}M, hqe={use_hqe})"
+                f"(budget={param_budget / 1e6:.0f}M, hqe={use_hqe})"
             )
 
         return base_config
@@ -196,16 +198,26 @@ def create_scheduler(
     else:
         logger.info(f"[HPO] Strategy '{strategy}' → Using Quantum Adaptive HPO (QAHPO)")
 
-    # Configure QAHPO with param_budget for c-TPE constraint enforcement
+    # Configure QAHPO with user-specified parameters from SweepConfig
+    # Falls back to sensible defaults if not specified
     qahpo_config = QAHPOConfig(
-        population_size=population_size,
-        initial_temperature=2.0,
-        final_temperature=0.1,
-        tunneling_probability=0.15,
-        mutation_strength=0.3,
-        crossover_rate=0.4,
+        population_size=getattr(config, "qahpo_population_size", population_size),
+        initial_temperature=getattr(config, "qahpo_initial_temperature", 2.0),
+        final_temperature=getattr(config, "qahpo_final_temperature", 0.1),
+        tunneling_probability=getattr(config, "qahpo_tunneling_probability", 0.15),
+        mutation_strength=getattr(config, "qahpo_mutation_strength", 0.3),
+        crossover_rate=getattr(config, "qahpo_crossover_rate", 0.4),
         elite_fraction=0.25,
+        evolution_interval=getattr(config, "qahpo_evolution_interval", 4),
+        fanova_importance_boost=getattr(config, "qahpo_fanova_importance_boost", 3.0),
+        enable_meta_learning=getattr(config, "qahpo_enable_meta_learning", True),
         param_budget=param_budget,  # Enable c-TPE constraint enforcement
+    )
+
+    logger.info(
+        f"[QAHPO] Config: pop={qahpo_config.population_size}, "
+        f"temp={qahpo_config.initial_temperature}→{qahpo_config.final_temperature}, "
+        f"tunnel={qahpo_config.tunneling_probability}, mut={qahpo_config.mutation_strength}"
     )
 
     return QuantumAdaptiveHPOScheduler(

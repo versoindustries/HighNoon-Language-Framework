@@ -179,10 +179,20 @@ def fused_depthwise_conv1d(input_tensor, filter_tensor, bias_tensor, stride, pad
             # Return gradients for the 3 differentiable tensor inputs
             input_grads = (grad_input, grad_filter, grad_bias)
 
-            # Only return (input_grads, variable_grads) tuple if variables are being watched.
-            # Otherwise, return just the input gradients to avoid shape mismatches in graph mode.
+            # GRADIENT FIX: Map C++ gradient outputs to captured tf.Variables by name
+            # Instead of returning [None] * len(variables) which zeros out gradients
             if variables:
-                return input_grads, [None] * len(variables)
+                var_grads = []
+                for v in variables:
+                    name = v.name.lower()
+                    if "filter" in name or "kernel" in name:
+                        var_grads.append(grad_filter)
+                    elif "bias" in name:
+                        var_grads.append(grad_bias)
+                    else:
+                        # Unknown variable - return None to let TF handle
+                        var_grads.append(None)
+                return input_grads, var_grads
             else:
                 return input_grads
 

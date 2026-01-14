@@ -30,12 +30,12 @@ from typing import Any
 import tensorflow as tf
 
 from highnoon.config import (
+    CHUNKED_FORWARD_SIZE,
     COMPRESSED_DIM,
     EMBEDDING_DIM,
     HD_ACTIVE_VOCAB_SIZE,
     HD_EMBEDDING_DIM,
     HQE_CTQW_STEPS,
-    LITE_MAX_REASONING_BLOCKS,
     MAMBA2_CONV_DIM,
     MAMBA2_STATE_DIM,
     NUM_EXPERTS,
@@ -44,6 +44,7 @@ from highnoon.config import (
     REASONING_HEADS,
     REASONING_LAYERS,
     TOP_K,
+    USE_CHUNKED_FORWARD,
     USE_HYPERDIMENSIONAL_EMBEDDING,
     USE_QUANTUM_LM_HEAD,
     VOCAB_SIZE,
@@ -188,20 +189,30 @@ class HSMN(tf.keras.Model):
                 hd_dim=HD_EMBEDDING_DIM,
                 use_ctqw=True,
                 ctqw_steps=HQE_CTQW_STEPS,
+                max_seq_len=max_seq_length,  # User's context window → HDE position_keys
                 name="token_embedding_hde",
             )
             logger.info(
                 f"HSMN Token Embedding: Using DualPathEmbedding "
-                f"(active={HD_ACTIVE_VOCAB_SIZE}, hd_dim={HD_EMBEDDING_DIM})"
+                f"(active={HD_ACTIVE_VOCAB_SIZE}, hd_dim={HD_EMBEDDING_DIM}, max_seq={max_seq_length})"
             )
         else:
             self.token_embedding = tf.keras.layers.Embedding(
                 vocab_size, embedding_dim, name="token_embedding"
             )
 
-        # Positional encoding (learnable)
-        self.position_embedding = tf.keras.layers.Embedding(
-            max_seq_length, embedding_dim, name="position_embedding"
+        # Phase 901: Position encoding moved to DualPathEmbedding.streaming_pos
+        # Holographic binding (circular convolution) in HD space replaces simple addition.
+        # HSMN.streaming_position is deprecated but retained for backward compatibility.
+        # Memory savings preserved: O(hd_dim) in DualPathEmbedding.
+        self.streaming_position = None  # Deprecated, use DualPathEmbedding.streaming_pos
+
+        # GRADIENT CONNECTIVITY FIX: Normalize embeddings before reasoning
+        # DualPathEmbedding output has std≈0.01 due to L2 normalization + projection.
+        # Without normalization, ReasoningModule amplifies 17,000× causing grad_norm=inf.
+        # LayerNorm ensures consistent activation magnitude entering the reasoning stack.
+        self.embedding_norm = tf.keras.layers.LayerNormalization(
+            epsilon=1e-6, name="embedding_norm"
         )
 
         # Embedding dropout
@@ -246,7 +257,7 @@ class HSMN(tf.keras.Model):
                     name="lm_head_quantum",
                 )
                 logger.info(
-                    f"HSMN LM Head: Using QuantumLMHead " f"(vqc_layers={QUANTUM_LM_HEAD_LAYERS})"
+                    f"HSMN LM Head: Using QuantumLMHead (vqc_layers={QUANTUM_LM_HEAD_LAYERS})"
                 )
             else:
                 # Import TT config and layer
@@ -353,18 +364,33 @@ class HSMN(tf.keras.Model):
         Returns:
             Dictionary with 'logits' and optionally 'hidden_states'.
         """
-        _batch_size = tf.shape(input_ids)[0]  # noqa: F841 - used for documentation
         seq_len = tf.shape(input_ids)[1]
 
-        # Token embeddings
-        token_embeds = self.token_embedding(input_ids)  # [B, L, D]
+        # Wire USE_CHUNKED_FORWARD config flag for O(1) memory forward passes
+        # Processes long sequences in chunks to reduce peak memory usage
+        if USE_CHUNKED_FORWARD and seq_len > CHUNKED_FORWARD_SIZE:
+            return self._chunked_forward(input_ids, attention_mask, training, return_hidden_states)
 
-        # Position embeddings
-        positions = tf.range(seq_len)
-        pos_embeds = self.position_embedding(positions)  # [L, D]
+        # Standard forward pass
+        return self._standard_forward(input_ids, attention_mask, training, return_hidden_states)
 
-        # Combine
-        hidden_states = token_embeds + pos_embeds
+    def _standard_forward(
+        self,
+        input_ids: tf.Tensor,
+        attention_mask: tf.Tensor | None,
+        training: bool,
+        return_hidden_states: bool,
+    ) -> dict[str, tf.Tensor]:
+        """Standard (non-chunked) forward pass."""
+        # Phase 901: Token embeddings with holographic position binding
+        # Position encoding is now handled via circular convolution in HD space
+        # within DualPathEmbedding. No separate position addition needed.
+        hidden_states = self.token_embedding(input_ids)  # [B, L, D] with positions bound
+
+        # GRADIENT CONNECTIVITY FIX: Normalize embeddings before reasoning
+        # Prevents 17,000× activation amplification that causes grad_norm=inf
+        hidden_states = self.embedding_norm(hidden_states)
+
         hidden_states = self.embedding_dropout(hidden_states, training=training)
 
         # Reasoning module
@@ -386,7 +412,6 @@ class HSMN(tf.keras.Model):
         # Compute logits
         if self.tie_word_embeddings:
             # Use transposed embedding weights for output projection
-            # logits = hidden_states @ embedding_weights
             embedding_weights = self.token_embedding.embeddings  # [vocab, dim]
             logits = tf.matmul(hidden_states, embedding_weights, transpose_b=True)  # [B, L, V]
         else:
@@ -395,6 +420,53 @@ class HSMN(tf.keras.Model):
         outputs = {"logits": logits}
         if return_hidden_states:
             outputs["hidden_states"] = hidden_states
+
+        return outputs
+
+    def _chunked_forward(
+        self,
+        input_ids: tf.Tensor,
+        attention_mask: tf.Tensor | None,
+        training: bool,
+        return_hidden_states: bool,
+    ) -> dict[str, tf.Tensor]:
+        """Chunked forward pass for O(1) memory scaling.
+
+        Processes long sequences in fixed-size chunks to reduce peak memory.
+        Combined with gradient checkpointing achieves constant memory training.
+        """
+        tf.shape(input_ids)[0]
+        seq_len = tf.shape(input_ids)[1]
+        chunk_size = CHUNKED_FORWARD_SIZE
+
+        # Compute number of chunks
+        num_chunks = (seq_len + chunk_size - 1) // chunk_size
+
+        # Process chunks and collect outputs
+        all_logits = []
+
+        for chunk_idx in range(num_chunks):
+            start = chunk_idx * chunk_size
+            end = tf.minimum(start + chunk_size, seq_len)
+
+            # Extract chunk
+            chunk_ids = input_ids[:, start:end]
+            chunk_mask = attention_mask[:, start:end] if attention_mask is not None else None
+
+            # Forward pass for chunk
+            chunk_output = self._standard_forward(
+                chunk_ids, chunk_mask, training, return_hidden_states=False
+            )
+            all_logits.append(chunk_output["logits"])
+
+        # Concatenate all chunk outputs
+        logits = tf.concat(all_logits, axis=1)
+
+        outputs = {"logits": logits}
+        if return_hidden_states:
+            # For chunked forward, we don't return intermediate hidden states
+            # to save memory (that's the whole point of chunking)
+            outputs["hidden_states"] = None
 
         return outputs
 

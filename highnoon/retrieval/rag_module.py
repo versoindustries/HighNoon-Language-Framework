@@ -79,7 +79,7 @@ class RetrievedContext:
         for i, doc in enumerate(self.documents):
             if char_count + len(doc) > max_chars:
                 break
-            context_parts.append(f"[Document {i+1}] {doc}")
+            context_parts.append(f"[Document {i + 1}] {doc}")
             char_count += len(doc)
 
         return "\n\n".join(context_parts)
@@ -429,9 +429,7 @@ class RAGModule(tf.keras.layers.Layer):
             embeddings_array = np.array(all_chunk_embeddings)
             self.index.add(embeddings_array, all_chunk_ids)
 
-        logger.info(
-            f"Added {len(documents)} documents " f"({len(all_chunk_ids)} chunks) to RAG index"
-        )
+        logger.info(f"Added {len(documents)} documents ({len(all_chunk_ids)} chunks) to RAG index")
 
     def _compute_embedding(self, text: str) -> np.ndarray:
         """Compute embedding for text using the embedding model."""

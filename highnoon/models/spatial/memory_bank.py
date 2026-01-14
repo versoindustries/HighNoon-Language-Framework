@@ -42,8 +42,8 @@ from typing import Any
 
 import tensorflow as tf
 
-# Strict C++ compliance: require fused adaptive memory op
-from highnoon._native.ops.fused_adaptive_memory_op import fused_adaptive_memory_available
+# V2 MIGRATION: Use unified memory system API
+from highnoon._native.ops.unified_memory_system_op import hopfield_memory, product_key_memory
 from highnoon.config import (  # Enhancement 1: Surprise-Based Write Gating; Enhancement 2: Product-Key Memory; Enhancement 3: Multi-Head External Memory; Enhancement 4: TT-Decomposed Projections; Enhancement 5: Quantum-Inspired Associative Memory; Enhancement 6: Sparse Memory Finetuning
     MEMORY_COMPRESSION_RATIO,
     MEMORY_EXPLORATION_PROB,
@@ -66,7 +66,8 @@ from highnoon.config import (  # Enhancement 1: Surprise-Based Write Gating; Enh
     USE_TT_MEMORY_PROJECTIONS,
 )
 
-_cpp_adaptive_memory_available = fused_adaptive_memory_available()
+# V2 MIGRATION: Legacy availability checks not needed - unified API always available
+_cpp_adaptive_memory_available = True  # Native ops required
 
 
 class GatedExternalMemory(tf.keras.layers.Layer):
@@ -645,7 +646,9 @@ class ProductKeyMemory(tf.keras.layers.Layer):
         query: tf.Tensor,
         memory: tf.Tensor,
     ) -> tuple[tf.Tensor, tf.Tensor]:
-        """Perform product-key lookup.
+        """Perform product-key lookup using unified memory system API.
+
+        V2 MIGRATION: Uses MemoryType.PRODUCT_KEY from unified_memory_system_op.
 
         Complexity: O(√M) instead of O(M).
 
@@ -656,53 +659,17 @@ class ProductKeyMemory(tf.keras.layers.Layer):
         Returns:
             Tuple of (read_output, attention_weights).
         """
-        batch_size = tf.shape(query)[0]
-
-        # Project query into two sub-keys
-        q_a = self.query_proj_a(query)  # [B, subkey_dim]
-        q_b = self.query_proj_b(query)  # [B, subkey_dim]
-
-        # Compute similarity with each codebook: O(√M)
-        sim_a = tf.matmul(q_a, self.codebook_a, transpose_b=True)  # [B, √M]
-        sim_b = tf.matmul(q_b, self.codebook_b, transpose_b=True)  # [B, √M]
-
-        # Get top-k from each codebook
-        topk_a = tf.math.top_k(sim_a, k=self.product_k)
-        topk_b = tf.math.top_k(sim_b, k=self.product_k)
-
-        # Compute combined indices: i * codebook_size + j
-        # Create all combinations of top-k from each
-        indices_a = topk_a.indices  # [B, k]
-        indices_b = topk_b.indices  # [B, k]
-        scores_a = topk_a.values  # [B, k]
-        scores_b = topk_b.values  # [B, k]
-
-        # Expand for outer product: [B, k, 1] x [B, 1, k] -> [B, k, k]
-        combined_scores = scores_a[:, :, tf.newaxis] + scores_b[:, tf.newaxis, :]  # [B, k, k]
-
-        combined_indices = (
-            indices_a[:, :, tf.newaxis] * self.codebook_size + indices_b[:, tf.newaxis, :]
-        )  # [B, k, k]
-
-        # Flatten to [B, k*k]
-        combined_scores = tf.reshape(combined_scores, [batch_size, -1])
-        combined_indices = tf.reshape(combined_indices, [batch_size, -1])
-
-        # Softmax over combined scores
-        attention = tf.nn.softmax(combined_scores / tf.sqrt(float(self.subkey_dim)))
-
-        # Gather memory values at selected indices
-        # combined_indices: [B, k*k], need to gather from memory [B, M, D]
-        batch_indices = tf.tile(
-            tf.expand_dims(tf.range(batch_size), 1), [1, self.product_k * self.product_k]
+        # Use unified product_key_memory function
+        output, attention = product_key_memory(
+            query=query,
+            memory=memory,
+            codebook_a=self.codebook_a,
+            codebook_b=self.codebook_b,
+            num_slots=self.codebook_size * self.codebook_size,
+            slot_dim=self.slot_dim,
+            top_k=self.product_k,
         )
-        gather_indices = tf.stack([batch_indices, combined_indices], axis=-1)
-        selected_values = tf.gather_nd(memory, gather_indices)  # [B, k*k, slot_dim]
-
-        # Weighted sum
-        read_out = tf.einsum("bk,bkd->bd", attention, selected_values)  # [B, slot_dim]
-
-        return read_out, attention
+        return output, attention
 
     def call(
         self,
@@ -1746,6 +1713,10 @@ class HopfieldMemory(tf.keras.layers.Layer):
         adaptive_beta: bool | None = None,
         beta_min: float = 0.5,
         beta_max: float = 4.0,
+        # UQHA v3.1 P6: Product-Key Hopfield Unification
+        use_product_keys: bool | None = None,
+        product_key_threshold: int = 256,
+        product_k: int = 8,
         name: str = "hopfield_memory",
         **kwargs: Any,
     ) -> None:
@@ -1761,6 +1732,10 @@ class HopfieldMemory(tf.keras.layers.Layer):
                 Defaults to config.HOPFIELD_ADAPTIVE_BETA.
             beta_min: Minimum beta for adaptive mode.
             beta_max: Maximum beta for adaptive mode.
+            use_product_keys: Enable O(√M) product-key retrieval (P6).
+                Auto-enabled when memory_slots > product_key_threshold.
+            product_key_threshold: Auto-enable product keys above this M.
+            product_k: Top-k per sub-codebook for product-key mode.
             name: Layer name.
             **kwargs: Additional layer arguments.
         """
@@ -1786,15 +1761,33 @@ class HopfieldMemory(tf.keras.layers.Layer):
         self.output_proj: tf.keras.layers.Dense | None = None
         self.write_gate: tf.keras.layers.Dense | None = None
 
-        # Check C++ availability
-        self._cpp_available = False
-        if use_cpp:
-            try:
-                from highnoon._native.ops.hopfield_memory_op import hopfield_ops_available
+        # V2 MIGRATION: Using unified memory system API
+        self._cpp_available = True  # Native ops required
 
-                self._cpp_available = hopfield_ops_available()
-            except ImportError:
-                self._cpp_available = False
+        # UQHA v3.1 P6: Product-Key mode for O(√M) retrieval
+        # Auto-enable for large memory banks
+        if use_product_keys is None:
+            self.use_product_keys = memory_slots > product_key_threshold
+        else:
+            self.use_product_keys = use_product_keys
+        self.product_key_threshold = product_key_threshold
+        self.product_k = product_k
+
+        # Product-key codebooks (initialized in build)
+        if self.use_product_keys:
+            self.codebook_size = int(math.ceil(math.sqrt(memory_slots)))
+            while self.codebook_size * self.codebook_size < memory_slots:
+                self.codebook_size += 1
+            self.subkey_dim = slot_dim // 2
+        else:
+            self.codebook_size = 0
+            self.subkey_dim = 0
+
+        # Codebook weights (built in build())
+        self.codebook_a: tf.Variable | None = None
+        self.codebook_b: tf.Variable | None = None
+        self.query_proj_a: tf.keras.layers.Dense | None = None
+        self.query_proj_b: tf.keras.layers.Dense | None = None
 
     def build(self, input_shape: tf.TensorShape) -> None:
         """Build layer weights."""
@@ -1826,6 +1819,30 @@ class HopfieldMemory(tf.keras.layers.Layer):
             name=f"{self.name}_write_gate",
         )
 
+        # UQHA v3.1 P6: Build product-key codebooks if enabled
+        if self.use_product_keys:
+            init_std = 1.0 / math.sqrt(self.subkey_dim)
+            self.codebook_a = self.add_weight(
+                name="hopfield_codebook_a",
+                shape=(self.codebook_size, self.subkey_dim),
+                initializer=tf.keras.initializers.RandomNormal(stddev=init_std),
+                trainable=True,
+            )
+            self.codebook_b = self.add_weight(
+                name="hopfield_codebook_b",
+                shape=(self.codebook_size, self.subkey_dim),
+                initializer=tf.keras.initializers.RandomNormal(stddev=init_std),
+                trainable=True,
+            )
+            self.query_proj_a = tf.keras.layers.Dense(
+                self.subkey_dim,
+                name=f"{self.name}_query_a",
+            )
+            self.query_proj_b = tf.keras.layers.Dense(
+                self.subkey_dim,
+                name=f"{self.name}_query_b",
+            )
+
         super().build(input_shape)
 
     def initialize_memory(self, batch_size: int) -> tf.Tensor:
@@ -1848,30 +1865,100 @@ class HopfieldMemory(tf.keras.layers.Layer):
         query: tf.Tensor,
         patterns: tf.Tensor,
     ) -> tf.Tensor:
-        """Retrieve using C++ SIMD-optimized implementation.
+        """Retrieve using unified memory system API.
 
-        CRITICAL: Requires C++ native ops. No Python fallback.
-
-        Raises:
-            RuntimeError: If C++ ops are not available.
+        V2 MIGRATION: Uses MemoryType.HOPFIELD from unified_memory_system_op.
         """
-        if not self._cpp_available:
-            raise RuntimeError(
-                "HopfieldMemoryRetrieve C++ operator is required but not available. "
-                "Run ./build_secure.sh to compile. NO PYTHON FALLBACK IS PROVIDED."
-            )
-        from highnoon._native.ops.hopfield_memory_op import hopfield_memory_retrieve
+        # Use unified hopfield_memory function
+        output, attention = hopfield_memory(
+            query=query,
+            patterns=patterns,
+            num_patterns=self.memory_slots,
+            beta=self.beta,
+            num_iterations=1,
+        )
+        return output
 
-        return hopfield_memory_retrieve(query, patterns, beta=self.beta)
+    def _product_key_retrieve(
+        self,
+        x_summary: tf.Tensor,
+        memory: tf.Tensor,
+    ) -> tf.Tensor:
+        """Retrieve using O(√M) product-key decomposition.
+
+        UQHA v3.1 P6: Sub-linear retrieval for large memory banks.
+        Splits query into two sub-keys, performs two O(√M) lookups,
+        then combines results using Kronecker product indexing.
+
+        Args:
+            x_summary: Sequence summary [batch, dim].
+            memory: Memory patterns [batch, M, slot_dim].
+
+        Returns:
+            Retrieved memory content [batch, slot_dim].
+        """
+        # Project to sub-keys for each codebook
+        query_a = self.query_proj_a(x_summary)  # [B, subkey_dim]
+        query_b = self.query_proj_b(x_summary)  # [B, subkey_dim]
+
+        # Compute scores against each codebook: O(√M) each
+        scores_a = tf.matmul(query_a, self.codebook_a, transpose_b=True)  # [B, √M]
+        scores_b = tf.matmul(query_b, self.codebook_b, transpose_b=True)  # [B, √M]
+
+        # Apply softmax with Hopfield beta temperature
+        weights_a = tf.nn.softmax(scores_a * self.beta, axis=-1)  # [B, √M]
+        weights_b = tf.nn.softmax(scores_b * self.beta, axis=-1)  # [B, √M]
+
+        # Get top-k indices from each codebook
+        _, top_k_a = tf.math.top_k(weights_a, k=self.product_k)  # [B, k]
+        _, top_k_b = tf.math.top_k(weights_b, k=self.product_k)  # [B, k]
+
+        # Compute combined indices: idx = i * √M + j (Kronecker product)
+        # This gives k² candidate slots to retrieve from
+        batch_size = tf.shape(x_summary)[0]
+
+        # Create all combinations: [B, k, k] -> [B, k²]
+        top_k_a_exp = tf.expand_dims(top_k_a, 2)  # [B, k, 1]
+        top_k_b_exp = tf.expand_dims(top_k_b, 1)  # [B, 1, k]
+        combined_idx = top_k_a_exp * self.codebook_size + top_k_b_exp  # [B, k, k]
+        combined_idx = tf.reshape(combined_idx, [batch_size, -1])  # [B, k²]
+
+        # Clamp to valid memory range
+        max_idx = tf.shape(memory)[1] - 1
+        combined_idx = tf.minimum(combined_idx, max_idx)
+
+        # Gather memory slots: [B, k², slot_dim]
+        batch_indices = tf.tile(
+            tf.expand_dims(tf.range(batch_size), 1),
+            [1, self.product_k * self.product_k],
+        )
+        gather_indices = tf.stack([batch_indices, combined_idx], axis=-1)
+        retrieved_slots = tf.gather_nd(memory, gather_indices)  # [B, k², slot_dim]
+
+        # Combine weights: outer product of softmax weights
+        weights_a_top = tf.gather(weights_a, top_k_a, batch_dims=1)  # [B, k]
+        weights_b_top = tf.gather(weights_b, top_k_b, batch_dims=1)  # [B, k]
+        combined_weights = tf.expand_dims(weights_a_top, 2) * tf.expand_dims(
+            weights_b_top, 1
+        )  # [B, k, k]
+        combined_weights = tf.reshape(combined_weights, [batch_size, -1])  # [B, k²]
+        combined_weights = combined_weights / (
+            tf.reduce_sum(combined_weights, axis=-1, keepdims=True) + 1e-8
+        )
+
+        # Weighted sum of retrieved slots
+        output = tf.einsum("bk,bkd->bd", combined_weights, retrieved_slots)  # [B, slot_dim]
+        return output
 
     def read(
         self,
         x: tf.Tensor,
         memory: tf.Tensor,
     ) -> tf.Tensor:
-        """Read from memory using Hopfield retrieval.
+        """Read from memory using Hopfield or product-key retrieval.
 
-        CRITICAL: Requires C++ native ops. No Python fallback.
+        Uses O(√M) product-key retrieval for large memory banks (P6),
+        falls back to standard O(M) Hopfield for small banks.
 
         Args:
             x: Input tensor [batch, seq_len, dim].
@@ -1879,16 +1966,17 @@ class HopfieldMemory(tf.keras.layers.Layer):
 
         Returns:
             Read output [batch, 1, dim].
-
-        Raises:
-            RuntimeError: If C++ ops are not available.
         """
         # Sequence summary for query
         x_summary = tf.reduce_mean(x, axis=1)  # [B, dim]
-        query = self.query_proj(x_summary)  # [B, slot_dim]
 
-        # Retrieve via Hopfield update (C++ only)
-        retrieved = self._hopfield_retrieve_cpp(query, memory[0])  # Batched retrieval
+        # UQHA v3.1 P6: Use product-key for large memory banks
+        if self.use_product_keys:
+            retrieved = self._product_key_retrieve(x_summary, memory)  # [B, slot_dim]
+        else:
+            # Standard Hopfield retrieval (O(M))
+            query = self.query_proj(x_summary)  # [B, slot_dim]
+            retrieved = self._hopfield_retrieve_cpp(query, memory[0])  # Batched
 
         # Project to input dimension
         output = self.output_proj(retrieved[:, tf.newaxis, :])  # [B, 1, dim]
@@ -2038,6 +2126,10 @@ class HopfieldMemory(tf.keras.layers.Layer):
                 "adaptive_beta": self.adaptive_beta,
                 "beta_min": self.beta_min,
                 "beta_max": self.beta_max,
+                # UQHA v3.1 P6: Product-key parameters
+                "use_product_keys": self.use_product_keys,
+                "product_key_threshold": self.product_key_threshold,
+                "product_k": self.product_k,
             }
         )
         return config

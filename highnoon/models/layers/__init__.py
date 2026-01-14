@@ -10,7 +10,8 @@ from typing import TYPE_CHECKING
 
 from highnoon.models.layers.adapter import AdapterLayer
 from highnoon.models.layers.chunker import StreamingChunker
-from highnoon.models.layers.collapse import ContextualGatingCollapse
+
+# [DEPRECATED] ContextualGatingCollapse removed - replaced by holographic routing in SuperposedExpert
 from highnoon.models.layers.dense import LowRankDense
 
 # WLAM requires tensorflow_models and fused_contract - import conditionally
@@ -86,8 +87,17 @@ try:
 except ImportError:
     pass
 
+# Phase 2 Memory Roadmap: Holographic Token Bundling - import conditionally
+HolographicBundle: type | None = None
+HolographicUnbundle: type | None = None
+
+try:
+    from highnoon.models.layers.holographic_bundle import HolographicBundle, HolographicUnbundle
+except ImportError:
+    pass
+
 __all__ = [
-    "ContextualGatingCollapse",
+    # [DEPRECATED] "ContextualGatingCollapse" - removed, replaced by holographic routing
     "AdapterLayer",
     "StreamingChunker",
     "LowRankDense",
@@ -108,4 +118,7 @@ __all__ = [
     # Phase 48: Hyperdimensional Quantum Embeddings
     "HyperdimensionalEmbedding",
     "DualPathEmbedding",
+    # Phase 2 Memory Roadmap: Holographic Token Bundling
+    "HolographicBundle",
+    "HolographicUnbundle",
 ]

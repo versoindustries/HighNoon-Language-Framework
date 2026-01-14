@@ -1,0 +1,165 @@
+/* FidelityLadder.css - BOHB fidelity ladder visualization styling */
+
+.fidelity-ladder {
+    background: var(--card-bg, rgba(15, 23, 42, 0.8));
+    border: 1px solid var(--border-color, rgba(255, 255, 255, 0.1));
+    border-radius: 12px;
+    padding: 16px;
+}
+
+.fidelity-ladder--empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 150px;
+    color: var(--text-muted, rgba(255, 255, 255, 0.5));
+    gap: 12px;
+}
+
+/* Header */
+.fidelity-ladder__header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.fidelity-ladder__title {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-primary, #fff);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.fidelity-ladder__legend {
+    display: flex;
+    gap: 12px;
+}
+
+.fidelity-ladder__legend-item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 10px;
+    color: var(--text-muted, rgba(255, 255, 255, 0.6));
+}
+
+.fidelity-ladder__legend-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+}
+
+/* Levels */
+.fidelity-ladder__levels {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.fidelity-ladder__level {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.fidelity-ladder__level-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.fidelity-ladder__level-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-primary, #fff);
+}
+
+.fidelity-ladder__level-budget {
+    font-size: 10px;
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--text-muted, rgba(255, 255, 255, 0.5));
+}
+
+.fidelity-ladder__level-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: rgba(255, 255, 255, 0.03);
+    border-radius: 8px;
+    padding: 8px;
+    min-height: 40px;
+}
+
+.fidelity-ladder__trials {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    flex: 1;
+}
+
+.fidelity-ladder__trial {
+    width: 24px;
+    height: 24px;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+    color: rgba(0, 0, 0, 0.7);
+}
+
+.fidelity-ladder__trial:hover,
+.fidelity-ladder__trial--hovered {
+    transform: scale(1.2);
+    box-shadow: 0 0 10px currentColor;
+    z-index: 10;
+}
+
+.fidelity-ladder__trial .spinning {
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    from {
+        transform: rotate(0deg);
+    }
+
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+.fidelity-ladder__empty-level {
+    font-size: 11px;
+    color: var(--text-muted, rgba(255, 255, 255, 0.3));
+    font-style: italic;
+}
+
+.fidelity-ladder__promotion {
+    color: var(--text-muted, rgba(255, 255, 255, 0.3));
+    flex-shrink: 0;
+}
+
+/* Summary */
+.fidelity-ladder__summary {
+    display: flex;
+    gap: 16px;
+    justify-content: center;
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.fidelity-ladder__summary-item {
+    font-size: 11px;
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--text-muted, rgba(255, 255, 255, 0.5));
+}

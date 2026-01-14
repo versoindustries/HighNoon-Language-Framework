@@ -24,7 +24,6 @@ HD random projection (fixed projection matrix, no SVD needed).
 from __future__ import annotations
 
 import logging
-from typing import Dict, Optional, Tuple
 
 import tensorflow as tf
 
@@ -41,7 +40,7 @@ def _load_native_ops():
         return _native_available
 
     try:
-        from highnoon._native.ops.lib_loader import load_highnoon_core
+        from highnoon._native import load_highnoon_core
 
         _native_ops = load_highnoon_core()
         _native_available = hasattr(_native_ops, "hd_gradient_project") or hasattr(
@@ -86,20 +85,24 @@ class HDGradientCompressor:
 
         self._use_native = hd_gradient_projection_available()
 
+    def _var_key(self, variable: tf.Variable) -> str:
+        """Create a unique key for projection state to avoid name collisions."""
+        return f"{variable.name}::{id(variable)}"
+
     def _get_or_create_projection(
         self,
-        var_name: str,
+        var_key: str,
         param_size: int,
     ) -> tuple[tf.Tensor, tf.Tensor]:
         """Get or create projection parameters for a variable."""
-        if var_name in self._projections:
-            return self._projections[var_name]
+        if var_key in self._projections:
+            return self._projections[var_key]
 
         if self._use_native:
             signs, indices = _native_ops.HDGradientGenerateProjection(
                 param_size=param_size,
                 rank=self.rank,
-                seed=self.seed + hash(var_name) % 10000,
+                seed=self.seed + hash(var_key) % 10000,
             )
         else:
             # TensorFlow fallback: random Gaussian projection
@@ -110,7 +113,7 @@ class HDGradientCompressor:
             # Random signs
             signs = tf.random.stateless_uniform(
                 [padded],
-                seed=[self.seed + hash(var_name) % 10000, 0],
+                seed=[self.seed + hash(var_key) % 10000, 0],
                 minval=0,
                 maxval=2,
                 dtype=tf.int32,
@@ -120,13 +123,13 @@ class HDGradientCompressor:
             # Random indices
             indices = tf.random.stateless_uniform(
                 [self.rank],
-                seed=[self.seed + hash(var_name) % 10000 + 1, 0],
+                seed=[self.seed + hash(var_key) % 10000 + 1, 0],
                 minval=0,
                 maxval=padded,
                 dtype=tf.int32,
             )
 
-        self._projections[var_name] = (signs, indices)
+        self._projections[var_key] = (signs, indices)
         return signs, indices
 
     def compress(
@@ -143,26 +146,30 @@ class HDGradientCompressor:
         Returns:
             Tuple of (compressed gradient, variable identifier).
         """
-        var_name = variable.name
+        var_key = self._var_key(variable)
         shape = gradient.shape
-        self._shapes[var_name] = tuple(shape.as_list())
+        self._shapes[var_key] = tuple(shape.as_list())
 
         flat_grad = tf.reshape(gradient, [-1])
         param_size = flat_grad.shape[0]
 
-        signs, indices = self._get_or_create_projection(var_name, param_size)
+        signs, indices = self._get_or_create_projection(var_key, param_size)
 
         if self._use_native:
-            compressed = _native_ops.HDGradientProject(flat_grad, signs, indices)
+            compressed = _native_ops.HDGradientProject(
+                gradient=flat_grad,
+                signs=signs,
+                indices=indices,
+            )
         else:
             compressed = self._tf_srht_project(flat_grad, signs, indices)
 
-        return compressed, var_name
+        return compressed, var_key
 
     def decompress(
         self,
         compressed: tf.Tensor,
-        var_name: str,
+        var_key: str,
     ) -> tf.Tensor:
         """Decompress low-rank gradient back to full tensor.
 
@@ -173,19 +180,22 @@ class HDGradientCompressor:
         Returns:
             Full-rank gradient tensor.
         """
-        if var_name not in self._projections:
-            raise KeyError(f"Variable {var_name} not registered")
+        if var_key not in self._projections:
+            raise KeyError(f"Variable {var_key} not registered")
 
-        shape = self._shapes[var_name]
+        shape = self._shapes[var_key]
         param_size = 1
         for dim in shape:
             param_size *= dim
 
-        signs, indices = self._projections[var_name]
+        signs, indices = self._projections[var_key]
 
         if self._use_native:
             flat_grad = _native_ops.HDGradientReconstruct(
-                compressed, signs, indices, param_size=param_size
+                compressed=compressed,
+                signs=signs,
+                indices=indices,
+                param_size=param_size,
             )
         else:
             flat_grad = self._tf_srht_reconstruct(compressed, signs, indices, param_size)
@@ -210,11 +220,12 @@ class HDGradientCompressor:
 
         # Walsh-Hadamard via FFT approximation
         # (True WHT not available in TF, use FFT as proxy)
-        complex_x = tf.cast(signed, tf.complex64)
+        # Phase 1.5: Use complex128 for quantum precision per GRADIENT_CONNECTIVITY_ROADMAP
+        complex_x = tf.cast(signed, tf.complex128)
         fft_x = tf.signal.fft(complex_x)
 
-        # Subsample
-        sampled = tf.gather(tf.math.real(fft_x), indices)
+        # Subsample, cast back to float32
+        sampled = tf.gather(tf.cast(tf.math.real(fft_x), tf.float32), indices)
         scale = 1.0 / tf.sqrt(tf.cast(self.rank, tf.float32))
 
         return sampled * scale
@@ -240,11 +251,12 @@ class HDGradientCompressor:
         expanded = expanded * scale
 
         # Inverse via FFT
-        complex_x = tf.cast(expanded, tf.complex64)
-        ifft_x = tf.signal.ifft(complex_x) * tf.cast(padded_dim, tf.complex64)
+        # Phase 1.5: Use complex128 for quantum precision per GRADIENT_CONNECTIVITY_ROADMAP
+        complex_x = tf.cast(expanded, tf.complex128)
+        ifft_x = tf.signal.ifft(complex_x) * tf.cast(padded_dim, tf.complex128)
 
-        # Apply signs and truncate
-        result = tf.math.real(ifft_x) * signs
+        # Apply signs and truncate, cast back to float32
+        result = tf.cast(tf.math.real(ifft_x), tf.float32) * signs
         return result[:param_size]
 
     def get_compression_ratio(self, var_name: str) -> float:

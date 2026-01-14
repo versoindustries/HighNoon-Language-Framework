@@ -154,7 +154,7 @@ def mps_contract(
         tf.size(physical_dims), N, message=f"physical_dims must have {N} elements"
     )
     tf.debugging.assert_equal(
-        tf.size(bond_dims), N + 1, message=f"bond_dims must have {N+1} elements"
+        tf.size(bond_dims), N + 1, message=f"bond_dims must have {N + 1} elements"
     )
 
     # Ensure all MPS tensors are float32

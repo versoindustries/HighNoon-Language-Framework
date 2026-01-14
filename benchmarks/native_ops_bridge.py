@@ -613,9 +613,9 @@ class NativeOpsBridge:
 
             return holographic_bind(a, b)
         except ImportError:
-            # Python fallback
-            a_c = tf.cast(a, tf.complex64)
-            b_c = tf.cast(b, tf.complex64)
+            # Python fallback - Phase 1.5: Use complex128 for quantum precision
+            a_c = tf.cast(a, tf.complex128)
+            b_c = tf.cast(b, tf.complex128)
             fft_a = tf.signal.fft(a_c)
             fft_b = tf.signal.fft(b_c)
             result = tf.signal.ifft(fft_a * fft_b)

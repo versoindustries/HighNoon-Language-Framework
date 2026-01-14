@@ -35,6 +35,13 @@ Available Operations:
     - alphaqubit_ops: Neural syndrome decoder (Phase 61)
     - entropy_regularization_ops: Von Neumann entropy (Phase 45)
     - intrinsic_plasticity_ops: Stiefel manifold ops (Phase 71)
+
+V2.0 Performance Optimizations (Phase P0):
+    - fused_qhd_spatial_mega_op: Fused QHD Spatial Block (2.0-2.5× speedup)
+    - fused_quls_loss_op: Fused QULS Loss (7 terms in 1 kernel, 1.4-1.8× speedup)
+    - fused_moe_mega_op: Fused MoE forward (1.3-1.5× speedup)
+
+    See HIGHNOON_V2_PERFORMANCE_ANALYSIS.md Section 6.1 for details.
 """
 
 # Phase 61: AlphaQubit Decoder
@@ -81,7 +88,30 @@ from highnoon._native.ops.intrinsic_plasticity_ops import (
 from highnoon._native.ops.intrinsic_plasticity_ops import ops_available as plasticity_ops_available
 from highnoon._native.ops.lib_loader import resolve_op_library
 
+# TensorStreamPool zero-copy inter-kernel streaming (Phase 0)
+try:
+    from highnoon._native.ops.tensor_stream_pool import (
+        StreamingBuffer,
+        tensor_stream_acquire,
+        tensor_stream_clear,
+        tensor_stream_get_stats,
+        tensor_stream_handoff,
+        tensor_stream_release,
+    )
+    from highnoon._native.ops.tensor_stream_pool import print_stats as tensor_stream_print_stats
+
+    tensor_stream_pool_available = True
+except ImportError:
+    tensor_stream_pool_available = False
+
 # MPS operations
+# V2.0 Fused QULS Loss (Phase P0.2)
+from highnoon._native.ops.fused_quls_loss_op import (
+    fused_quls_loss,
+    fused_quls_loss_differentiable,
+    fused_quls_loss_with_gradient,
+)
+from highnoon._native.ops.fused_quls_loss_op import is_native_available as fused_quls_loss_available
 from highnoon._native.ops.mps_contract import mps_contract
 from highnoon._native.ops.mps_temporal import mps_temporal_scan
 
@@ -164,7 +194,10 @@ from highnoon._native.ops.quantum_ops import (  # Phase 34: Unitary Residual; Ph
 )
 
 # Phase 44: Quantum Teleport Bus
-from highnoon._native.ops.quantum_teleport_bus_ops import bell_measurement, quantum_teleport_state
+from highnoon._native.ops.quantum_teleport_bus_ops import (
+    bell_measurement,
+    quantum_teleport_state,
+)
 from highnoon._native.ops.quantum_teleport_bus_ops import (
     ops_available as teleport_bus_ops_available,
 )
@@ -320,4 +353,9 @@ __all__ = [
     "HDStreamingAdapter",
     "hd_streaming_project",
     "hd_streaming_project_grad",
+    # V2.0 Fused QULS Loss
+    "fused_quls_loss",
+    "fused_quls_loss_with_gradient",
+    "fused_quls_loss_differentiable",
+    "fused_quls_loss_available",
 ]

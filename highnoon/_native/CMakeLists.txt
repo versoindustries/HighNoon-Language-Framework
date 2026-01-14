@@ -29,13 +29,14 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # =============================================================================
 # Build Options
 # =============================================================================
-option(ENABLE_LTO "Enable Link-Time Optimization for better inlining" OFF)
+option(ENABLE_LTO "Enable Link-Time Optimization for better inlining" ON)
 option(ENABLE_OBFUSCATION "Enable symbol and control flow obfuscation" ON)
 option(STRIP_SYMBOLS "Strip all symbols from release binary" ON)
 option(PRODUCTION_BUILD "Enable production hardening (anti-debug, etc.)" OFF)
 option(ENABLE_ANTIDEBUG "Enable anti-debugging measures" OFF)
 option(ENABLE_OPENMP "Enable OpenMP for parallelization" ON)
 option(BUILD_TESTS "Build native op tests" OFF)
+option(ENABLE_LAPACK "Enable LAPACK for accelerated matrix operations (4x for inversion)" OFF)
 
 # =============================================================================
 # Phase 2: Obfuscator-LLVM (O-LLVM) Options
@@ -227,6 +228,10 @@ endif()
 # Source Files - ALL ops consolidated into single binary
 # =============================================================================
 set(HIGHNOON_OPS_SOURCES
+    # Phase 0: TensorStreamPool Foundation (Zero-Copy Inter-Kernel Streaming)
+    ops/common/tensor_stream_pool.cc
+    ops/tensor_stream_pool_op.cc  # TensorFlow ops for pool access
+
     # Core Language Model Ops
     ops/fused_moe_dispatch_op.cc
     ops/fused_superposition_moe_op.cc
@@ -248,17 +253,17 @@ set(HIGHNOON_OPS_SOURCES
     ops/meta_controller_op.cc
     ops/time_crystal_step_op.cc
     # Phase 1 Migration: Flash Linear Attention
-    ops/fused_linear_attention_op.cc
+    # [UNIFIED] ops/fused_linear_attention_op.cc -> unified_attention_op.cc
     # Phase 1 Migration: Token Shift (RWKV-6 DataDependentTokenShift)
     ops/fused_token_shift_op.cc
     # Phase 3 Migration: Local Attention (Griffin-style windowed attention)
-    ops/fused_local_attention_op.cc
+    # [UNIFIED] ops/fused_local_attention_op.cc -> unified_attention_op.cc
     # Phase 3 Migration: Mamba SSM (State-Space Model)
     ops/fused_mamba_op.cc
     # Phase 4 Migration: WLAM (Wavelet-Enhanced Linear Attention)
     ops/fused_wlam_op.cc
     # Phase 4 Migration: Memory Bank (GatedExternalMemory)
-    ops/fused_memory_bank_op.cc
+    # [UNIFIED] ops/fused_memory_bank_op.cc -> unified_memory_system_op.cc
     # Phase 4 Migration: Memory Builder Enhancements (CTQW, MultiRate, CrossLevel, Adaptive, QGAN)
     ops/fused_memory_builder_enhancements_op.cc
     # Phase 12.11: Cross-Block State Bus
@@ -279,8 +284,8 @@ set(HIGHNOON_OPS_SOURCES
     ops/fused_quantum_layers_op.cc
     # Phase 5 Migration: Tensor Layers
     ops/fused_tensor_layers_op.cc
-    # Phase 5 Migration: Custom Attention
-    ops/fused_custom_attention_op.cc
+    # [V2 MIGRATED] Phase 5 Migration: Custom Attention → unified_attention_op.cc
+    # ops/fused_custom_attention_op.cc
     # Phase 5 Migration: Optimizers
     ops/fused_optimizers_op.cc
     # Phase 5 Migration: QBM
@@ -289,8 +294,8 @@ set(HIGHNOON_OPS_SOURCES
     ops/fused_qgan_op.cc
     # Phase 5 Migration: Stateful Wrapper
     ops/fused_stateful_wrapper_op.cc
-    # Phase 15: Flash Attention with enhanced features
-    ops/fused_flash_attention_op.cc  # GLA, RALA, Hybrid, Chunkwise, QuantumInspired
+    # [V2 MIGRATED] Phase 15: Flash Attention → unified_attention_op.cc
+    # ops/fused_flash_attention_op.cc
     # Phase 16: Contextual Gating Collapse
     ops/fused_collapse_op.cc         # Multi-head cross-attention collapse with Gumbel-Softmax
     # Phase 17: MoE Layer Enhancements
@@ -300,9 +305,9 @@ set(HIGHNOON_OPS_SOURCES
     ops/get_attribution_op.cc         # Framework attribution, trigger detection, metadata
     ops/set_attribution_op.cc         # Custom attribution (Pro/Enterprise only)
     # Phase 18: Final Upgrade Enhancements
-    ops/fused_differential_attention_op.cc  # Differential Transformer (ICLR 2025)
+    # [V2 MIGRATED] ops/fused_differential_attention_op.cc → unified_attention_op.cc
     ops/fused_mod_routing_op.cc       # Mixture-of-Depths dynamic layer routing
-    ops/fused_native_sparse_attention_op.cc # Native Sparse Attention (DeepSeek ACL 2025)
+    # [V2 MIGRATED] ops/fused_native_sparse_attention_op.cc → unified_attention_op.cc
     # New ops for full native coverage
     ops/qbm_sample_op.cc              # QBM Sampling with annealing
     ops/vqc_expectation_op.cc         # VQC expectation values
@@ -315,14 +320,20 @@ set(HIGHNOON_OPS_SOURCES
     ops/fused_lorentzian_gat_op.cc    # Lorentzian Graph Attention
     # Efficient Sparse Operations
     ops/structured_sparse_matmul_op.cc # Band-diagonal sparse matmul
-    # Phase 18.1: Latent KV Attention (MLA-style KV compression)
-    ops/fused_latent_kv_attention_op.cc
-    # Phase 18.3: Adaptive Memory with Test-Time Learning (Titans-inspired)
-    ops/fused_adaptive_memory_op.cc
+    # [V2 MIGRATED] Phase 18.1: Latent KV → unified_attention_op.cc
+    # ops/fused_latent_kv_attention_op.cc
+    # [V2 MIGRATED] Phase 18.3: Adaptive Memory → unified_memory_system_op.cc
+    # ops/fused_adaptive_memory_op.cc
     # Phase 19-24: Unified Quantum Block (all quantum enhancements)
     ops/fused_unified_quantum_block_op.cc
     # Quantum Superposition Generation (QSG) - parallel non-autoregressive generation
     ops/fused_qsg_op.cc
+    ops/qsg_mps_entangle.cpp
+    # QSG Enterprise Optimization (header-only, included by qsg_ops.h/fused_qsg_op.cc):
+    #   - ops/vocab_factorization.h       (Phase 1.2: Factored vocab embeddings, 4x speedup)
+    #   - ops/pq_vocab_index.h            (Phase 1.1: Product quantization top-K, 60x speedup)
+    #   - ops/self_consistency_filter.h   (Phase 3.2: Cross-position coherence + Grover boost)
+
     # Phases 26-36: Unified Quantum Architecture Enhancements
     ops/quantum_residual_op.cc        # Phase 34: Unitary residual connections
     ops/quantum_norm_op.cc            # Phase 30: Quantum normalization (Stiefel)
@@ -336,12 +347,14 @@ set(HIGHNOON_OPS_SOURCES
     ops/discrete_time_crystal_op.cc   # Phase 38: DTC state protection
     ops/coconut_reservoir_op.cc       # Phase 39: Coconut continuous latent reasoning
     # Phase 87: Enhanced CoCoNut (BFS exploration, crystallization, adaptive DFS)
+    ops/fused_fft_projector_op.cc      # FFT-based Thought Projector (Phase 2.1)
     ops/fused_coconut_bfs_op.cc        # Multi-path BFS thought exploration
     ops/fused_coconut_dfs_collapse_op.cc  # Adaptive BFS→DFS collapse
     ops/fused_coconut_crystallize_op.cc   # Thought crystallization store
-    ops/lmwt_attention_op.cc          # Phase 41: Learnable wavelet transformer
+    # [V2 MIGRATED] ops/lmwt_attention_op.cc → unified_attention_op.cc (LMWT mode)
     ops/qmoe_routing_op.cc            # Phase 42: Quantum MoE routing
     ops/neural_kalman_op.cc           # Phase 43: Neural Kalman with learned gain
+    ops/tensor_network_kalman_op.cc   # UQHA Phase 1001: TT-compressed Kalman O(n·r²)
     ops/quantum_teleport_bus_op.cc    # Phase 44: Quantum teleport state bus
     ops/entropy_regularization_op.cc  # Phase 45: Von Neumann entropy regularization
     ops/sympflow_optimizer_op.cc      # Phase 46: SympFlow Hamiltonian optimizer
@@ -358,7 +371,7 @@ set(HIGHNOON_OPS_SOURCES
     ops/born_rule_loss_op.cc          # Phase 51: Born rule loss
     ops/quantum_fidelity_loss_op.cc   # Phase 52: Quantum fidelity regularization
     # Pillar 3: Topological Reasoning
-    ops/qasa_attention_op.cc          # Phase 53: QASA attention
+    # [V2 MIGRATED] ops/qasa_attention_op.cc → unified_attention_op.cc (QASA mode)
     ops/mpqr_reasoning_op.cc          # Phase 55: Multi-path quantum reasoning
     ops/topological_wavelet_op.cc     # Phase 56: Topological wavelet attention
     ops/td_moe_op.cc                  # Phase 57: TD-MoE Tucker decomposition
@@ -378,14 +391,17 @@ set(HIGHNOON_OPS_SOURCES
     # Pillar 7: Advanced Quantum Intelligence
     ops/spini_integrator_op.cc        # Phase 78: SPINI integrator
     ops/quantum_advanced_ops.cc       # Phases 73-84: Consolidated advanced ops
-    # Phase 86: Modern Hopfield Network Memory
-    ops/hopfield_memory_op.cc         # Phase 86: MHN-based associative memory
+    # [V2 MIGRATED] Phase 86: Hopfield Memory → unified_memory_system_op.cc
+    # ops/hopfield_memory_op.cc
     # Phase 91: Quantum GaLore Gradient Compression
     ops/quantum_galore_op.cc          # Phase 91: Entropy-based dynamic rank projection
     # Phase 200+: HD Streaming Mode
     ops/hd_streaming_adapter_op.cc    # Phase 200+: HD bundle → model projection
     # Phase 200+: Block-Integrated HD Streaming (HIGHNOON_UPGRADE_ROADMAP.md Phase 2.2)
     ops/hd_spatial_block_op.cc        # HD Spatial Block: FFT-domain Mamba SSM
+    ops/qhd_spatial_block_op.cc       # QHD Spatial Block: FFT + quantum superposition
+    # Phase 800+: Fused HD Hierarchical Block (single-kernel multi-scale reasoning)
+    ops/fused_hd_hierarchical_block_op.cc  # QHD + adaptive chunking + CTQW + cross-level attention
     ops/hd_timecrystal_op.cc          # HD TimeCrystal Block: Floquet dynamics
     ops/hd_moe_dispatch_op.cc         # HD MoE Dispatch: Holographic routing
     # Phase 200+: QULS Native Ops (HIGHNOON_UPGRADE_ROADMAP.md Phase 3.2)
@@ -404,6 +420,24 @@ set(HIGHNOON_OPS_SOURCES
     ops/hd_fisher_compression_op.cc   # HD Fisher compression for VQC meta-optimizer
     ops/quantum_lm_head_hd_op.cc      # Entropy-aware QuantumLMHead
     ops/qwt_continuous_op.cc          # Continuous QWT→HD gradient path
+    # Cayley Transform Orthogonal Weights (Phase 900+)
+    ops/cayley_transform_op.cc        # Cayley-parameterized orthogonal dense layer
+    # [V2 MIGRATED] Product-Key Memory → unified_memory_system_op.cc
+    # ops/product_key_memory_op.cc
+    # Phase 1000+: Fused Text Tokenizer (SIMD byte encoding + trie n-gram merging)
+    ops/fused_text_tokenizer_op.cc    # SIMD UTF-8 tokenization + SuperwordTrie
+    # Phase 1005: Tensor Ring VQC (native SIMD-optimized)
+    ops/tensor_ring_vqc_op.cc         # Tensor ring VQC simulation + Neural BP mitigation
+    # Phase 2000+: Unified Attention Consolidation (V2 Performance Optimization Phase 2)
+    ops/unified_attention_op.cc       # Consolidated 11 attention modes: Flash, Linear, Local, Differential, NSA, GQA, etc.
+    # Phase 2001: Unified Quantum Foundation (V2 Performance Optimization Phase 3)
+    ops/quantum_foundation_ops.cc     # Consolidated 15 quantum ops: VQC, Embedding, LMHead, Expert, Norm, etc.
+    # Phase 2002: Unified Memory System (V2 Performance Optimization Phase 4)
+    ops/unified_memory_system_op.cc   # Consolidated 5 memory ops: ContentAddressed, ProductKey, Hopfield, Adaptive, Hierarchical
+    # Phase 900.2: Memory-Optimized Circular Convolution (in-place FFT)
+    ops/circular_conv_op.cc           # In-place circular convolution for holographic binding
+    # UQHA Priority 3: TT-Floquet Decomposition for large hd_dim
+    ops/tt_floquet_decomposition_op.cc # TT-compressed Floquet with up to 32x memory savings
 )
 
 # Controller sources (requires spdlog: apt install libspdlog-dev)
@@ -448,6 +482,7 @@ set(BASE_CXX_FLAGS
     -fno-strict-aliasing        # Safe type punning
     -Wall -Wextra               # Warnings
     -Wno-unused-parameter       # TensorFlow has many of these
+    -Wno-array-bounds           # GCC 13 false positives with TensorFlow Eigen headers
 )
 
 # Hardening flags for security
@@ -547,6 +582,23 @@ if(HIGHNOON_CONTROLLER_SOURCES)
         target_link_libraries(highnoon_core PRIVATE spdlog fmt)
         message(STATUS "spdlog: Using system library")
     endif()
+endif()
+
+# LAPACK support for accelerated matrix operations (CPU Performance Optimization P3)
+if(ENABLE_LAPACK)
+    find_package(LAPACK QUIET)
+    if(LAPACK_FOUND)
+        target_compile_definitions(highnoon_core PRIVATE HIGHNOON_USE_LAPACK)
+        target_link_libraries(highnoon_core PRIVATE ${LAPACK_LIBRARIES})
+        message(STATUS "LAPACK: Enabled (4x matrix inversion speedup)")
+    else()
+        # Try linking directly (common on Linux)
+        target_compile_definitions(highnoon_core PRIVATE HIGHNOON_USE_LAPACK)
+        target_link_libraries(highnoon_core PRIVATE lapack blas)
+        message(STATUS "LAPACK: Using system library (apt install liblapack-dev)")
+    endif()
+else()
+    message(STATUS "LAPACK: Disabled (use -DENABLE_LAPACK=ON for 4x matrix inversion)")
 endif()
 
 # Link options

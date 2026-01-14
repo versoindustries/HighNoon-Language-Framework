@@ -102,7 +102,7 @@ def qssm_forward(
     """
     if _ops is None:
         raise RuntimeError(
-            "Q-SSM C++ operators not available. " "Rebuild with: ./build_secure.sh --debug --lite"
+            "Q-SSM C++ operators not available. Rebuild with: ./build_secure.sh --debug --lite"
         )
 
     return _ops.qssm_forward(
@@ -147,7 +147,7 @@ def vqc_gate_expectation(
     """
     if _ops is None:
         raise RuntimeError(
-            "Q-SSM C++ operators not available. " "Rebuild with: ./build_secure.sh --debug --lite"
+            "Q-SSM C++ operators not available. Rebuild with: ./build_secure.sh --debug --lite"
         )
 
     return _ops.vqc_gate_expectation(
@@ -190,7 +190,7 @@ def qssm_compute_gates(
     """
     if _ops is None:
         raise RuntimeError(
-            "Q-SSM C++ operators not available. " "Rebuild with: ./build_secure.sh --debug --lite"
+            "Q-SSM C++ operators not available. Rebuild with: ./build_secure.sh --debug --lite"
         )
 
     return _ops.qssm_compute_gates(

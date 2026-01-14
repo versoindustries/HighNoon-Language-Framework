@@ -4,7 +4,9 @@ import { useState, useEffect } from 'react';
 import { Play, Pause, Square, AlertCircle, Clock, Cpu, Settings, Layers, Target } from 'lucide-react';
 import { Card, CardHeader, CardContent, Button, ProgressBar } from '../components/ui';
 import { TrainingDiagnostics } from '../components/TrainingDiagnostics';
-import { trainingApi, hpoApi } from '../api/client';
+import { TensorSurfaceViz, useActivationStream } from '../components/visualization';
+import { trainingApi, hpoApi, activationApi } from '../api/client';
+import type { ActivationSurfaceData } from '../api/client';
 import type { TrainingJobInfo, TrainingMetrics, HPOSweepInfo } from '../api/types';
 import './Training.css';
 
@@ -33,6 +35,22 @@ export function Training() {
     const [job, setJob] = useState<TrainingJobInfo | null>(null);
     const [metrics, setMetrics] = useState<TrainingMetrics | null>(null);
     const [lossHistory, setLossHistory] = useState<{ step: number; loss: number }[]>([]);
+
+    // Activation visualization - use live WebSocket streaming when training is running
+    const jobIsActive = job?.state === 'running' || job?.state === 'paused';
+    const activationStream = useActivationStream(
+        jobIsActive && job ? job.job_id : null,
+        { enabled: job?.state === 'running' }
+    );
+
+    // Fallback state for manual layer selection
+    const [manualActivationData, setManualActivationData] = useState<ActivationSurfaceData | null>(null);
+    const [selectedLayer, setSelectedLayer] = useState<string>('embedding');
+    const [activationLoading, setActivationLoading] = useState(false);
+
+    // Use stream data when available, fallback to manual fetch
+    const activationData = activationStream.data || manualActivationData;
+    const isLiveStreaming = activationStream.isConnected && activationStream.data !== null;
 
     // Load HPO sweeps - both completed and running for visibility
     useEffect(() => {
@@ -392,6 +410,41 @@ export function Training() {
                                 </div>
                             )}
                         </div>
+                    </CardContent>
+                </Card>
+
+                {/* Tensor Activations Visualization */}
+                <Card padding="lg" className="activation-viz-card">
+                    <CardHeader title="Tensor Activations">
+                        <select
+                            value={selectedLayer}
+                            onChange={async (e) => {
+                                setSelectedLayer(e.target.value);
+                                setActivationLoading(true);
+                                try {
+                                    const data = await activationApi.getSurface(
+                                        e.target.value,
+                                        job?.job_id || 'demo'
+                                    );
+                                    setManualActivationData(data);
+                                } finally {
+                                    setActivationLoading(false);
+                                }
+                            }}
+                            className="layer-select-sm"
+                        >
+                            {['embedding', 'block_0', 'block_1', 'attention_0', 'moe_gate', 'output_proj'].map(layer => (
+                                <option key={layer} value={layer}>{layer}</option>
+                            ))}
+                        </select>
+                    </CardHeader>
+                    <CardContent>
+                        <TensorSurfaceViz
+                            data={activationData}
+                            loading={activationLoading}
+                            autoRotate={job?.state === 'running'}
+                            height={250}
+                        />
                     </CardContent>
                 </Card>
 

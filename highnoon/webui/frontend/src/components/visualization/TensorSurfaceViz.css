@@ -1,0 +1,297 @@
+/* TensorSurfaceViz.css - Styling for 3D Tensor Surface Visualization */
+
+.tensor-surface {
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-surface);
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--border-subtle);
+    overflow: hidden;
+}
+
+.tensor-surface--loading,
+.tensor-surface--empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 300px;
+    color: var(--text-muted);
+    gap: var(--spacing-sm);
+}
+
+.tensor-surface--empty p {
+    margin: 0;
+    font-size: var(--text-xs);
+}
+
+.tensor-surface__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--spacing-md);
+    border-bottom: 1px solid var(--border-subtle);
+    background: var(--bg-muted);
+}
+
+.tensor-surface__header h4 {
+    margin: 0;
+    font-size: var(--text-sm);
+    font-weight: var(--font-semibold);
+    color: var(--text-primary);
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-sm);
+}
+
+.layer-badge {
+    padding: 2px 8px;
+    background: var(--color-primary-muted);
+    color: var(--color-primary);
+    border-radius: var(--radius-sm);
+    font-size: var(--text-xs);
+    font-family: var(--font-mono);
+}
+
+.tensor-surface__canvas {
+    height: 350px;
+    background: linear-gradient(180deg, #0a0a12 0%, #1a1a2e 100%);
+}
+
+.tensor-surface__footer {
+    display: flex;
+    gap: var(--spacing-lg);
+    padding: var(--spacing-sm) var(--spacing-md);
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    border-top: 1px solid var(--border-subtle);
+}
+
+.tensor-surface__actions {
+    display: flex;
+    gap: var(--spacing-sm);
+}
+
+.export-btn {
+    padding: var(--spacing-xs) var(--spacing-sm);
+    background: var(--bg-surface);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    color: var(--text-secondary);
+    font-size: var(--text-xs);
+    cursor: pointer;
+    transition: all var(--transition-fast);
+}
+
+.export-btn:hover {
+    background: var(--bg-elevated);
+    border-color: var(--color-primary);
+    color: var(--color-primary);
+}
+
+.export-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* 3D Stats overlay */
+.surface-stats-3d {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    font-size: 10px;
+    font-family: var(--font-mono);
+    color: white;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+    pointer-events: none;
+}
+
+.viridis-gradient {
+    width: 12px;
+    height: 60px;
+    background: linear-gradient(180deg,
+            #fde725 0%,
+            #5ec962 25%,
+            #21918c 50%,
+            #3b528b 75%,
+            #440154 100%);
+    border-radius: 2px;
+    border: 1px solid rgba(255, 255, 255, 0.3);
+}
+
+.tensor-surface__spinner {
+    width: 32px;
+    height: 32px;
+    border: 3px solid var(--border-subtle);
+    border-top-color: var(--color-primary);
+    border-radius: 50%;
+    animation: tensor-spin 1s linear infinite;
+}
+
+@keyframes tensor-spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+    .tensor-surface__canvas {
+        height: 250px;
+    }
+
+    .tensor-surface__footer {
+        flex-wrap: wrap;
+        gap: var(--spacing-sm);
+    }
+}
+
+/* =============================================================================
+   MARKETING MODE & CONTROLS (Phase 4 Enhancement)
+   ============================================================================= */
+
+.tensor-surface--marketing {
+    box-shadow:
+        0 0 50px rgba(99, 102, 241, 0.15),
+        inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+/* Camera Preset Selector */
+.preset-select {
+    padding: 4px 8px;
+    background: var(--bg-base);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    font-size: var(--text-xs);
+    color: var(--text-primary);
+    cursor: pointer;
+    transition: all var(--transition-fast);
+}
+
+.preset-select:hover {
+    border-color: var(--color-primary);
+}
+
+.preset-select:focus {
+    outline: none;
+    border-color: var(--color-primary);
+    box-shadow: 0 0 0 2px var(--color-primary-muted);
+}
+
+/* Marketing Mode Toggle */
+.marketing-btn {
+    padding: var(--spacing-xs) var(--spacing-sm);
+    background: var(--bg-surface);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    color: var(--text-secondary);
+    font-size: var(--text-xs);
+    cursor: pointer;
+    transition: all var(--transition-fast);
+}
+
+.marketing-btn:hover {
+    background: var(--bg-elevated);
+    border-color: var(--color-secondary);
+    color: var(--color-secondary);
+}
+
+.marketing-btn--active {
+    background: rgba(139, 92, 246, 0.15);
+    border-color: var(--color-secondary);
+    color: var(--color-secondary);
+    box-shadow: 0 0 12px rgba(139, 92, 246, 0.25);
+}
+
+/* Video Record Button */
+.record-btn {
+    padding: var(--spacing-xs) var(--spacing-sm);
+    background: var(--bg-surface);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    color: var(--text-secondary);
+    font-size: var(--text-xs);
+    cursor: pointer;
+    transition: all var(--transition-fast);
+}
+
+.record-btn:hover {
+    background: var(--bg-elevated);
+    border-color: var(--color-danger);
+    color: var(--color-danger);
+}
+
+.record-btn--recording {
+    background: rgba(239, 68, 68, 0.15);
+    border-color: var(--color-danger);
+    color: var(--color-danger);
+    animation: recordPulse 1.5s ease-in-out infinite;
+}
+
+@keyframes recordPulse {
+
+    0%,
+    100% {
+        box-shadow: 0 0 8px rgba(239, 68, 68, 0.3);
+    }
+
+    50% {
+        box-shadow: 0 0 16px rgba(239, 68, 68, 0.5);
+    }
+}
+
+/* Recording Indicator Overlay */
+.recording-indicator {
+    position: absolute;
+    top: var(--spacing-sm);
+    left: var(--spacing-sm);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    background: rgba(0, 0, 0, 0.75);
+    border: 1px solid rgba(239, 68, 68, 0.5);
+    border-radius: var(--radius-sm);
+    font-family: var(--font-mono);
+    font-size: 0.65rem;
+    font-weight: var(--font-semibold);
+    color: var(--color-danger);
+    z-index: 10;
+}
+
+.recording-dot {
+    width: 8px;
+    height: 8px;
+    background: var(--color-danger);
+    border-radius: 50%;
+    animation: recordBlink 1s ease-in-out infinite;
+}
+
+@keyframes recordBlink {
+
+    0%,
+    100% {
+        opacity: 1;
+    }
+
+    50% {
+        opacity: 0.3;
+    }
+}
+
+/* Marketing Indicator in Footer */
+.marketing-indicator {
+    padding: 2px 6px;
+    background: rgba(139, 92, 246, 0.15);
+    border: 1px solid rgba(139, 92, 246, 0.3);
+    border-radius: var(--radius-sm);
+    color: var(--color-secondary);
+    font-weight: var(--font-semibold);
+}
+
+/* Canvas container position for overlay */
+.tensor-surface__canvas {
+    position: relative;
+}

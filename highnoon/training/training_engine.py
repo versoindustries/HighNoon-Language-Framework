@@ -57,7 +57,7 @@ import math
 import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 import tensorflow as tf
 
@@ -79,6 +79,9 @@ except ImportError:
     TuningDecisions = None
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from highnoon.training.gradient_audit import GradientAudit
 
 
 # =============================================================================
@@ -987,6 +990,185 @@ class LoggingCallback(BaseCallback):
             logger.warning(f"Failed to write log entry: {e}")
 
 
+class ActivationReporterCallback(BaseCallback):
+    """Callback for reporting layer activations to WebUI visualization.
+
+    Captures intermediate layer activations during training and sends them
+    to the WebUI API endpoint for 3D tensor surface visualization.
+
+    Attributes:
+        model: Model to extract activations from.
+        job_id: Training job ID for WebUI API.
+        webui_base_url: Base URL for WebUI API (default: http://localhost:8000).
+        layers_to_capture: List of layer names to capture (default: auto-detect).
+        capture_frequency: Steps between activation captures.
+        max_samples: Maximum samples to capture per layer (for memory).
+
+    Example:
+        >>> callback = ActivationReporterCallback(
+        ...     model=model,
+        ...     job_id="train_abc123",
+        ...     layers_to_capture=["embedding", "block_0", "attention_0"],
+        ...     capture_frequency=50,
+        ... )
+    """
+
+    def __init__(
+        self,
+        model: tf.keras.Model,
+        job_id: str,
+        webui_base_url: str = "http://localhost:8000",
+        layers_to_capture: list[str] | None = None,
+        capture_frequency: int = 50,
+        max_samples: int = 100,
+        enabled: bool = True,
+    ):
+        """Initialize activation reporter callback.
+
+        Args:
+            model: Model to extract activations from.
+            job_id: Training job ID for WebUI API.
+            webui_base_url: Base URL for WebUI API.
+            layers_to_capture: Layer names to capture. If None, auto-detects key layers.
+            capture_frequency: Steps between captures (higher = less overhead).
+            max_samples: Max samples per layer to limit memory.
+            enabled: Whether reporting is enabled. Set False to disable without removing callback.
+        """
+        self.model = model
+        self.job_id = job_id
+        self.webui_base_url = webui_base_url.rstrip("/")
+        self.capture_frequency = capture_frequency
+        self.max_samples = max_samples
+        self.enabled = enabled
+        self._step_count = 0
+        self._last_input_batch: tf.Tensor | None = None
+
+        # Auto-detect layers if not specified
+        if layers_to_capture is None:
+            self.layers_to_capture = self._auto_detect_layers()
+        else:
+            self.layers_to_capture = layers_to_capture
+
+        # Build layer extraction models
+        self._extraction_models: dict[str, tf.keras.Model] = {}
+        self._build_extraction_models()
+
+        logger.info(
+            f"ActivationReporterCallback initialized: "
+            f"job_id={job_id}, layers={self.layers_to_capture}, freq={capture_frequency}"
+        )
+
+    def _auto_detect_layers(self) -> list[str]:
+        """Auto-detect key layers for visualization."""
+        detected = []
+        for layer in self.model.layers:
+            name_lower = layer.name.lower()
+            # Capture embedding, attention, and reasoning blocks
+            if any(
+                key in name_lower
+                for key in ["embed", "block_0", "block_1", "attention", "moe", "output"]
+            ):
+                detected.append(layer.name)
+                if len(detected) >= 6:  # Limit to 6 layers
+                    break
+        return detected if detected else ["embedding"]
+
+    def _build_extraction_models(self) -> None:
+        """Build sub-models for extracting intermediate layer outputs."""
+        for layer_name in self.layers_to_capture:
+            try:
+                layer = self.model.get_layer(layer_name)
+                extraction_model = tf.keras.Model(
+                    inputs=self.model.input,
+                    outputs=layer.output,
+                    name=f"activation_extractor_{layer_name}",
+                )
+                self._extraction_models[layer_name] = extraction_model
+                logger.debug(f"Built extraction model for layer: {layer_name}")
+            except ValueError:
+                logger.warning(f"Layer '{layer_name}' not found in model, skipping")
+            except Exception as e:
+                logger.warning(f"Could not build extractor for '{layer_name}': {e}")
+
+    def set_input_batch(self, input_batch: tf.Tensor) -> None:
+        """Set the current input batch for activation extraction.
+
+        This should be called by the training loop before on_batch_end.
+
+        Args:
+            input_batch: Current training input tensor.
+        """
+        self._last_input_batch = input_batch
+
+    def on_batch_end(self, step: int, result: StepResult) -> bool:
+        if not self.enabled or self._last_input_batch is None:
+            return True
+
+        self._step_count += 1
+        if self._step_count % self.capture_frequency != 0:
+            return True
+
+        # Extract and report activations for each layer
+        for layer_name, extractor in self._extraction_models.items():
+            try:
+                # Get activations (first batch element, downsampled)
+                activations = extractor(self._last_input_batch, training=False)
+                self._report_activation(layer_name, activations)
+            except Exception as e:
+                logger.debug(f"Failed to extract activation for {layer_name}: {e}")
+
+        return True
+
+    def _report_activation(self, layer_name: str, activations: tf.Tensor) -> None:
+        """Send activation data to WebUI API."""
+        import json
+        import urllib.error
+        import urllib.request
+
+        try:
+            # Convert to numpy and downsample for efficiency
+            act_np = activations.numpy()
+            if act_np.ndim > 2:
+                act_np = act_np[0]  # First batch element
+            if act_np.ndim == 1:
+                # Reshape 1D to 2D for surface visualization
+                size = int(act_np.shape[0] ** 0.5)
+                act_np = act_np[: size * size].reshape(size, size)
+
+            # Downsample large tensors
+            max_size = self.max_samples
+            if act_np.shape[0] > max_size or act_np.shape[1] > max_size:
+                import numpy as np
+
+                indices_0 = np.linspace(
+                    0, act_np.shape[0] - 1, min(max_size, act_np.shape[0]), dtype=int
+                )
+                indices_1 = np.linspace(
+                    0, act_np.shape[1] - 1, min(max_size, act_np.shape[1]), dtype=int
+                )
+                act_np = act_np[np.ix_(indices_0, indices_1)]
+
+            # Send to WebUI API
+            url = f"{self.webui_base_url}/api/activations/cache/{self.job_id}/{layer_name}"
+            data = json.dumps({"activations": act_np.tolist()}).encode("utf-8")
+            request = urllib.request.Request(
+                url,
+                data=data,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+
+            with urllib.request.urlopen(request, timeout=2.0) as response:
+                if response.status == 200:
+                    logger.debug(f"Reported activation for {layer_name}")
+
+        except urllib.error.URLError as e:
+            # WebUI not running - silently skip
+            logger.debug(f"WebUI not reachable: {e}")
+        except Exception as e:
+            logger.debug(f"Failed to report activation: {e}")
+
+
 # =============================================================================
 # Training Engine
 # =============================================================================
@@ -1028,6 +1210,7 @@ class TrainingEngine:
         optimizer: tf.keras.optimizers.Optimizer,
         config: TrainingConfig | EnterpriseTrainingConfig | None = None,
         loss_fn: Callable[[tf.Tensor, tf.Tensor], tf.Tensor] | None = None,
+        gradient_audit: GradientAudit | None = None,
     ):
         """Initialize training engine.
 
@@ -1037,9 +1220,12 @@ class TrainingEngine:
             config: Training configuration. Uses EnterpriseTrainingConfig defaults if None.
             loss_fn: Optional custom loss function. If None, uses config.loss_function.
                      Signature: loss_fn(y_true, y_pred) -> tf.Tensor
+            gradient_audit: Optional GradientAudit instance for connectivity diagnostics.
         """
         self.model = model
         self.optimizer = optimizer
+        self._gradient_audit = gradient_audit
+        self._last_gradient_audit = None
 
         # =====================================================================
         # LITE EDITION LIMIT VALIDATION
@@ -1049,7 +1235,6 @@ class TrainingEngine:
         from types import SimpleNamespace
 
         from highnoon._native._limits import (
-            LimitExceededError,
             is_lite,
             validate_model_config,
             validate_param_count,
@@ -1657,7 +1842,19 @@ class TrainingEngine:
             self._last_hessian_data = (inputs, labels)
 
         with tf.GradientTape() as tape:
-            predictions = self.model(inputs, training=True)
+            raw_output = self.model(inputs, training=True)
+
+            # Handle dict-style model outputs (e.g., HSMN returns {'logits': ...})
+            if isinstance(raw_output, dict):
+                predictions = raw_output.get("logits", raw_output.get("output"))
+                if predictions is None:
+                    # Fallback: use first tensor value if no known keys
+                    for v in raw_output.values():
+                        if hasattr(v, "shape"):
+                            predictions = v
+                            break
+            else:
+                predictions = raw_output
 
             # PHASE 1 FIX: Trigger lazy discovery after first forward pass
             # Model weights are now built, so evolution_time_bias exists
@@ -1768,13 +1965,17 @@ class TrainingEngine:
         # Reset NaN counter on valid loss
         self._nan_count = 0
 
-        # Compute gradients
-        gradients = tape.gradient(loss, self.model.trainable_variables)
+        # Compute gradients (capture variable list once to keep ordering stable)
+        trainable_vars = self.model.trainable_variables
+        gradients = tape.gradient(loss, trainable_vars)
+
+        if self._gradient_audit is not None:
+            self._last_gradient_audit = self._gradient_audit.analyze(
+                self.model.trainable_variables, gradients
+            )
 
         # Filter None gradients
-        grad_var_pairs = [
-            (g, v) for g, v in zip(gradients, self.model.trainable_variables) if g is not None
-        ]
+        grad_var_pairs = [(g, v) for g, v in zip(gradients, trainable_vars) if g is not None]
 
         if not grad_var_pairs:
             logger.warning(f"No valid gradients at step {self._global_step}")
@@ -1785,11 +1986,57 @@ class TrainingEngine:
                 effective_learning_rate=self._current_lr,
             )
 
+        if self._gradient_audit is not None:
+            for grad, var in grad_var_pairs:
+                if isinstance(grad, tf.IndexedSlices):
+                    continue
+                grad_shape = grad.shape
+                var_shape = var.shape
+                if not grad_shape.is_fully_defined() or not var_shape.is_fully_defined():
+                    if tf.executing_eagerly():
+                        grad_shape = tuple(tf.shape(grad).numpy().tolist())
+                        var_shape = tuple(tf.shape(var).numpy().tolist())
+                else:
+                    grad_shape = tuple(grad_shape.as_list())
+                    var_shape = tuple(var_shape.as_list())
+                if grad_shape != var_shape:
+                    logger.error(
+                        "[GradientAudit] Pre-GaLore shape mismatch for %s: grad=%s var=%s",
+                        var.name,
+                        grad_shape,
+                        var_shape,
+                    )
+
         gradients_only = [g for g, _ in grad_var_pairs]
         vars_only = [v for _, v in grad_var_pairs]
 
+        def _safe_global_norm(grads: list[tf.Tensor]) -> tf.Tensor:
+            safe_grads = []
+            for grad in grads:
+                if grad is None:
+                    continue
+                if isinstance(grad, tf.IndexedSlices):
+                    grad_values = grad.values
+                    if grad_values.dtype.is_complex:
+                        safe_grads.append(tf.abs(grad_values))
+                    else:
+                        safe_grads.append(grad_values)
+                    continue
+                if grad.dtype.is_complex:
+                    safe_grads.append(tf.abs(grad))
+                else:
+                    safe_grads.append(grad)
+            if not safe_grads:
+                return tf.constant(0.0, dtype=tf.float32)
+            return tf.linalg.global_norm(safe_grads)
+
         # Check for NaN in gradients
-        has_nan_grad = any(tf.reduce_any(tf.math.is_nan(g)) for g in gradients_only)
+        def _grad_has_nan(grad: tf.Tensor) -> tf.Tensor:
+            if isinstance(grad, tf.IndexedSlices):
+                return tf.reduce_any(tf.math.is_nan(grad.values))
+            return tf.reduce_any(tf.math.is_nan(grad))
+
+        has_nan_grad = any(_grad_has_nan(g) for g in gradients_only)
         if has_nan_grad:
             self._nan_count += 1
             logger.warning(f"NaN gradient at step {self._global_step}: count={self._nan_count}")
@@ -1800,8 +2047,8 @@ class TrainingEngine:
                 effective_learning_rate=self._current_lr,
             )
 
-        # Compute gradient norm
-        gradient_norm = tf.linalg.global_norm(gradients_only)
+        # Compute gradient norm (safe for complex tensors)
+        gradient_norm = _safe_global_norm(gradients_only)
         grad_norm_val = float(gradient_norm.numpy())
 
         # PHASE 1 FIX: Emergency gradient handling for gradient explosion
@@ -1857,6 +2104,12 @@ class TrainingEngine:
             original_norm = grad_norm_val
             compressed_gradients = []
             for grad, var in zip(gradients_only, vars_only):
+                if "dual_path_embedding/hd_projection/kernel" in var.name:
+                    logger.info(
+                        "[GALORE] Pre-compress %s grad_shape=%s",
+                        var.name,
+                        grad.shape,
+                    )
                 # Phase 130.2: Register VQC layer gradients for variance-aware rank boosting
                 if hasattr(self._galore, "register_vqc_gradient"):
                     var_name_lower = var.name.lower()
@@ -1873,13 +2126,27 @@ class TrainingEngine:
             # Increment step counter for projection update tracking
             self._galore.step()
             if original_norm > 0:
-                compressed_norm = float(tf.linalg.global_norm(gradients_only).numpy())
+                compressed_norm = float(_safe_global_norm(gradients_only).numpy())
                 galore_compression_ratio = compressed_norm / original_norm
 
         # Clip gradients (in compressed space if GaLore enabled)
         # Use emergency clip value if gradient explosion was detected
         clip_norm = emergency_grad_clip if emergency_mode else self.config.max_grad_norm
-        clipped_grads, _ = tf.clip_by_global_norm(gradients_only, clip_norm, use_norm=gradient_norm)
+        norm_for_clip = tf.cast(gradient_norm, tf.float32)
+        clip_scale = tf.minimum(1.0, clip_norm / (norm_for_clip + 1e-6))
+        clipped_grads = []
+        for grad in gradients_only:
+            if isinstance(grad, tf.IndexedSlices):
+                scaled_values = grad.values * tf.cast(clip_scale, grad.values.dtype)
+                clipped_grads.append(
+                    tf.IndexedSlices(
+                        values=scaled_values,
+                        indices=grad.indices,
+                        dense_shape=grad.dense_shape,
+                    )
+                )
+            else:
+                clipped_grads.append(grad * tf.cast(clip_scale, grad.dtype))
 
         # Decompress gradients back to original shapes for applying to variables
         if self._galore is not None and galore_var_names:
@@ -1888,6 +2155,28 @@ class TrainingEngine:
                 decompressed_grad = self._galore.decompress(clipped_grad, var_name)
                 decompressed_grads.append(decompressed_grad)
             clipped_grads = decompressed_grads
+        if self._gradient_audit is not None and tf.executing_eagerly():
+            for grad, var in zip(clipped_grads, vars_only):
+                if isinstance(grad, tf.IndexedSlices):
+                    continue
+                grad_shape = grad.shape
+                var_shape = var.shape
+                if not grad_shape.is_fully_defined() or not var_shape.is_fully_defined():
+                    grad_shape = tuple(tf.shape(grad).numpy().tolist())
+                    var_shape = tuple(tf.shape(var).numpy().tolist())
+                else:
+                    grad_shape = tuple(grad_shape.as_list())
+                    var_shape = tuple(var_shape.as_list())
+                if grad_shape != var_shape:
+                    logger.error(
+                        "[GradientAudit] Post-decompress shape mismatch for %s: grad=%s var=%s",
+                        var.name,
+                        grad_shape,
+                        var_shape,
+                    )
+                    raise ValueError(
+                        f"Gradient shape mismatch for {var.name}: grad={grad_shape} var={var_shape}"
+                    )
 
         # Compute effective learning rate with barren plateau mitigation
         effective_lr = self._current_lr
@@ -1956,11 +2245,18 @@ class TrainingEngine:
             logs = {"loss": loss_val, "gradient_norm": grad_norm_val}
 
             # Collect energy_drift from TimeCrystal blocks
+            # UQHA: Also wire energy_drift to downstream KalmanBlock for Q modulation
+            last_energy_drift = None
             for layer in self.model.layers:
                 if hasattr(layer, "_sequence_evolution_metric"):
                     drift = layer._sequence_evolution_metric
                     if drift is not None and hasattr(drift, "numpy"):
-                        logs[f"{layer.name}/energy_drift"] = float(drift.numpy())
+                        drift_val = float(drift.numpy())
+                        logs[f"{layer.name}/energy_drift"] = drift_val
+                        last_energy_drift = drift_val
+                # UQHA: Pass energy_drift to KalmanBlock for Q modulation
+                if hasattr(layer, "set_energy_drift") and last_energy_drift is not None:
+                    layer.set_energy_drift(last_energy_drift)
 
             control_names = self._control_bridge.get_evolution_time_var_names()
 
@@ -1989,6 +2285,9 @@ class TrainingEngine:
             for key, value in quls_components.items():
                 metrics[f"quls/{key}"] = value
 
+        if self._last_gradient_audit is not None:
+            metrics.update(self._last_gradient_audit.summary_metrics())
+
         self._global_step += 1
 
         # Report status to WebUI for HPO dashboard
@@ -2004,6 +2303,10 @@ class TrainingEngine:
             qng_applied=qng_applied,
             galore_compression_ratio=galore_compression_ratio,
         )
+
+    def get_last_gradient_audit(self):
+        """Return the most recent GradientAuditReport, if enabled."""
+        return self._last_gradient_audit
 
     def execute_epoch(
         self,
@@ -2195,6 +2498,7 @@ __all__ = [
     "MemoryManagerCallback",
     "EWCUpdateCallback",
     "LoggingCallback",
+    "ActivationReporterCallback",
     # Engine
     "TrainingEngine",
 ]

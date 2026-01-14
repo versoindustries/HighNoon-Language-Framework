@@ -82,7 +82,7 @@ class InstructionPreprocessor(BasePreprocessor):
                     f"{self.RESPONSE_MARKER}"
                 )
             else:
-                prompt = f"{self.INSTRUCTION_MARKER}{instruction}\n\n" f"{self.RESPONSE_MARKER}"
+                prompt = f"{self.INSTRUCTION_MARKER}{instruction}\n\n{self.RESPONSE_MARKER}"
 
             return prompt, output
 

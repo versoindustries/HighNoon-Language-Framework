@@ -1,0 +1,146 @@
+/* HighNoon Dashboard - Sparkline Component Styles */
+
+/* Sparkline container */
+.sparkline {
+    display: block;
+    overflow: visible;
+}
+
+.sparkline--empty {
+    opacity: 0.5;
+}
+
+/* Line animation */
+.sparkline__line {
+    transition: stroke var(--duration-normal) var(--ease-out-expo);
+}
+
+.sparkline__fill {
+    transition: fill var(--duration-normal) var(--ease-out-expo);
+}
+
+/* Current value dot - pulsing effect */
+.sparkline__current {
+    animation: sparkline-pulse 2s ease-in-out infinite;
+}
+
+@keyframes sparkline-pulse {
+
+    0%,
+    100% {
+        opacity: 1;
+        r: 2;
+    }
+
+    50% {
+        opacity: 0.6;
+        r: 3;
+    }
+}
+
+/* Min/Max points */
+.sparkline__min,
+.sparkline__max {
+    opacity: 0.8;
+}
+
+/* =============================================================================
+   TREND INDICATOR
+   ============================================================================= */
+
+.trend-indicator {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    font-weight: var(--font-medium);
+    transition: color var(--duration-fast);
+}
+
+/* Sizes */
+.trend-indicator--sm {
+    font-size: var(--text-xs);
+}
+
+.trend-indicator--sm .trend-indicator__icon {
+    width: 10px;
+    height: 10px;
+}
+
+.trend-indicator--md {
+    font-size: var(--text-sm);
+}
+
+.trend-indicator--md .trend-indicator__icon {
+    width: 12px;
+    height: 12px;
+}
+
+/* Icon */
+.trend-indicator__icon {
+    flex-shrink: 0;
+}
+
+/* Direction colors */
+.trend-indicator--stable {
+    color: var(--text-muted);
+}
+
+.trend-indicator--positive {
+    color: var(--color-success);
+}
+
+.trend-indicator--negative {
+    color: var(--color-danger);
+}
+
+/* Delta value */
+.trend-indicator__delta {
+    font-variant-numeric: tabular-nums;
+}
+
+/* Animation for direction changes */
+.trend-indicator--up .trend-indicator__icon {
+    animation: trend-bounce-up 0.3s var(--ease-spring);
+}
+
+.trend-indicator--down .trend-indicator__icon {
+    animation: trend-bounce-down 0.3s var(--ease-spring);
+}
+
+@keyframes trend-bounce-up {
+    0% {
+        transform: translateY(2px);
+    }
+
+    50% {
+        transform: translateY(-1px);
+    }
+
+    100% {
+        transform: translateY(0);
+    }
+}
+
+@keyframes trend-bounce-down {
+    0% {
+        transform: translateY(-2px);
+    }
+
+    50% {
+        transform: translateY(1px);
+    }
+
+    100% {
+        transform: translateY(0);
+    }
+}
+
+/* Reduced motion support */
+@media (prefers-reduced-motion: reduce) {
+
+    .sparkline__current,
+    .trend-indicator--up .trend-indicator__icon,
+    .trend-indicator--down .trend-indicator__icon {
+        animation: none;
+    }
+}

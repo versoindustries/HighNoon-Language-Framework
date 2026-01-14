@@ -152,6 +152,22 @@ class UnifiedSmartTunerConfig:
     low_lr_recovery_steps: int = 50  # Steps below threshold to boost LR (over-dampening recovery)
 
     # =========================================================================
+    # Phase 700: Scale-Aware Parameter Ranges
+    # Different model sizes need different tuning parameters.
+    # These are applied based on param_budget when creating the tuner.
+    # =========================================================================
+    # Small models (<1B): Need higher LR, fewer warmup, more aggressive exploration
+    # lr_max_small: float = 3e-2  # Small models can handle higher LR
+    # warmup_steps_small: int = 200
+    # exploration_steps_small: int = 5000
+
+    # Frontier models (7B-20B): Need lower LR, more warmup, careful exploration
+    # lr_max_frontier: float = 5e-3
+    # warmup_steps_frontier: int = 2000
+    # exploration_steps_frontier: int = 20000
+    # max_grad_norm_frontier: float = 2.0  # Allow higher grad norms
+
+    # =========================================================================
     # QUANTUM-NATIVE SETTINGS (Part 6 Enhancement)
     # =========================================================================
 
@@ -298,8 +314,7 @@ class UnifiedSmartTuner:
             self._init_memory()
 
         logger.info(
-            "[SmartTuner] Initialized: mode=%s, lr_initial=%.2e, "
-            "galore_rank=%d, bp_threshold=%.2e",
+            "[SmartTuner] Initialized: mode=%s, lr_initial=%.2e, galore_rank=%d, bp_threshold=%.2e",
             self.config.coordination_mode,
             self.config.lr_initial,
             self.config.galore_rank,
@@ -354,6 +369,13 @@ class UnifiedSmartTuner:
         self._qng = None
         if self.config.use_qng:
             self._init_qng()
+
+        # =====================================================================
+        # PHASE 1001: Adaptive MPS Bond Dimension
+        # =====================================================================
+        # Registered AdaptiveMPSBus for automatic bond dimension adjustment
+        self._adaptive_mps_bus = None
+        self._previous_bp_state = False  # Track BP state for transitions
 
     def _init_vqc_meta_optimizer(self) -> None:
         """Initialize VQC Meta-Optimizer component."""
@@ -455,6 +477,26 @@ class UnifiedSmartTuner:
             self._evolution_bridge = EvolutionTimeControlBridge(self.model)
             self._evolution_bridge.ensure_discovery()
 
+    def register_adaptive_mps_bus(self, bus) -> None:
+        """Register an AdaptiveMPSBus for automatic bond dimension control.
+
+        Phase 1001: When registered, the UnifiedSmartTuner will automatically
+        adjust the MPS bond dimension based on:
+        - Barren plateau detection (increases bond dimension)
+        - Training phase (exploration vs exploitation)
+        - Gradient health (explosion detection)
+
+        Args:
+            bus: An AdaptiveMPSBus instance.
+
+        Example:
+            >>> from highnoon.quantum.unified_bus import AdaptiveMPSBus
+            >>> bus = AdaptiveMPSBus(base_bond_dim=32)
+            >>> tuner.register_adaptive_mps_bus(bus)
+        """
+        self._adaptive_mps_bus = bus
+        logger.info("[SmartTuner] AdaptiveMPSBus registered for bond dimension control")
+
     def orchestrate(
         self,
         step: int,
@@ -546,7 +588,6 @@ class UnifiedSmartTuner:
         vqc_decisions = None
         if self._vqc_meta is not None and not self._emergency_mode:
             try:
-
                 vqc_decisions = self._vqc_meta.compute_tuning_decisions(
                     loss=loss,
                     gradient_norm=gradient_norm,
@@ -675,6 +716,23 @@ class UnifiedSmartTuner:
             )
 
         # =====================================================================
+        # PHASE 3.2.2: Maximum barren plateau LR scale cap
+        # =====================================================================
+        # Prevents LR explosion when multiple boosting factors compound:
+        # - base BP scale (from BP monitor)
+        # - entropy boost (1.5x for high entropy)
+        # - VQC modulation
+        # Cap ensures effective LR stays within optimizer-safe bounds.
+        MAX_BARREN_PLATEAU_SCALE = 5.0
+        if lr_scale > MAX_BARREN_PLATEAU_SCALE:
+            logger.warning(
+                "[SmartTuner] BP LR scale %.2f exceeds max, capping at %.1f",
+                lr_scale,
+                MAX_BARREN_PLATEAU_SCALE,
+            )
+            lr_scale = MAX_BARREN_PLATEAU_SCALE
+
+        # =====================================================================
         # PHASE 2-4: GRADIENT-NORM-AWARE DAMPENING
         # =====================================================================
         # When gradients are high, dampening prevents LR explosion.
@@ -684,8 +742,7 @@ class UnifiedSmartTuner:
             grad_dampening = min(1.0, self.config.gradient_dampening_threshold / gradient_norm)
             grad_dampening = max(self.config.min_gradient_dampening, grad_dampening)
             logger.info(
-                "[SmartTuner] Gradient dampening: grad=%.1f, dampening=%.3f, "
-                "lr_scale=%.2f -> %.2f",
+                "[SmartTuner] Gradient dampening: grad=%.1f, dampening=%.3f, lr_scale=%.2f -> %.2f",
                 gradient_norm,
                 grad_dampening,
                 lr_scale,
@@ -729,6 +786,17 @@ class UnifiedSmartTuner:
         relaxed_clip = self.config.max_grad_norm * 2.0
         if vqc_decisions is not None and vqc_decisions.vqc_computed:
             relaxed_clip *= vqc_decisions.max_grad_norm_multiplier
+
+        # =====================================================================
+        # PHASE 1001: Adaptive MPS Bond Dimension during Barren Plateau
+        # =====================================================================
+        # Notify AdaptiveMPSBus of barren plateau state (if registered)
+        if self._adaptive_mps_bus is not None:
+            if not self._previous_bp_state:
+                # Entering BP mode
+                self._adaptive_mps_bus.set_barren_plateau_mode(True)
+                logger.info("[SmartTuner-MPS] Triggered BP bond increase")
+            self._previous_bp_state = True
 
         return TuningDecisions(
             learning_rate=effective_lr,

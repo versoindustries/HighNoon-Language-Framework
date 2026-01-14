@@ -123,7 +123,22 @@ def structured_sparse_matmul(
 
         # Returns gradients for: matrix_diagonals, vector (None for structure, lower_bands, upper_bands)
         input_grads = (grads[0], grads[1], None, None, None)
-        variable_grads_list = [None] * len(variables) if variables is not None else []
+
+        # GRADIENT FIX: Map C++ gradient outputs to tf.Variables by name pattern
+        # Instead of returning [None] * len(variables) which zeros out all gradients
+        if variables is not None and len(variables) > 0:
+            # grads[0]=grad_matrix_diagonals, grads[1]=grad_vector
+            variable_grads_list = []
+            for v in variables:
+                name = v.name.lower()
+                if "diagonal" in name or "matrix" in name:
+                    variable_grads_list.append(grads[0])
+                elif "vector" in name:
+                    variable_grads_list.append(grads[1])
+                else:
+                    variable_grads_list.append(None)
+        else:
+            variable_grads_list = []
 
         return input_grads, variable_grads_list
 

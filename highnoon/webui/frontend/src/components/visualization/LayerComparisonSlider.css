@@ -1,0 +1,320 @@
+/* LayerComparisonSlider.css - Styles for layer comparison visualization */
+
+/* ========================================================================
+   Main Container
+   ======================================================================== */
+
+.layer-comparison {
+    display: flex;
+    flex-direction: column;
+    background: linear-gradient(135deg, rgba(15, 18, 25, 0.98), rgba(20, 25, 35, 0.95));
+    border-radius: 16px;
+    border: 1px solid rgba(139, 92, 246, 0.3);
+    overflow: hidden;
+    box-shadow:
+        0 4px 24px rgba(0, 0, 0, 0.4),
+        0 0 40px rgba(139, 92, 246, 0.08);
+}
+
+.layer-comparison--empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-secondary, #94a3b8);
+    font-size: 0.875rem;
+}
+
+/* ========================================================================
+   Header
+   ======================================================================== */
+
+.layer-comparison__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.75rem 1rem;
+    background: linear-gradient(90deg, rgba(139, 92, 246, 0.12), transparent);
+    border-bottom: 1px solid rgba(139, 92, 246, 0.2);
+}
+
+.layer-comparison__title {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-weight: 600;
+    font-size: 0.9rem;
+    color: #fff;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.layer-comparison__title svg {
+    color: #8b5cf6;
+}
+
+/* Mode selector */
+.layer-comparison__modes {
+    display: flex;
+    gap: 0.25rem;
+    background: rgba(0, 0, 0, 0.3);
+    border-radius: 8px;
+    padding: 0.25rem;
+}
+
+.comparison-mode-btn {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.4rem 0.65rem;
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    color: var(--text-secondary, #94a3b8);
+    font-size: 0.7rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.comparison-mode-btn:hover {
+    background: rgba(139, 92, 246, 0.15);
+    color: #c4b5fd;
+}
+
+.comparison-mode-btn--active {
+    background: linear-gradient(135deg, #8b5cf6, #6366f1);
+    color: #fff;
+    box-shadow: 0 2px 8px rgba(139, 92, 246, 0.4);
+}
+
+/* Layer visibility toggles */
+.layer-comparison__toggles {
+    display: flex;
+    gap: 0.5rem;
+}
+
+.layer-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.35rem 0.5rem;
+    background: rgba(0, 0, 0, 0.4);
+    border: 1px solid rgba(139, 92, 246, 0.3);
+    border-radius: 6px;
+    color: var(--text-secondary, #94a3b8);
+    font-size: 0.7rem;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.layer-toggle:hover {
+    border-color: #8b5cf6;
+    color: #c4b5fd;
+}
+
+.layer-toggle--active {
+    background: rgba(139, 92, 246, 0.2);
+    border-color: #8b5cf6;
+    color: #8b5cf6;
+}
+
+/* ========================================================================
+   Canvas Area
+   ======================================================================== */
+
+.layer-comparison__canvas {
+    position: relative;
+    display: flex;
+    background: radial-gradient(ellipse at center, rgba(139, 92, 246, 0.05) 0%, transparent 70%);
+}
+
+/* Split view panes */
+.layer-comparison__pane {
+    position: relative;
+    overflow: hidden;
+}
+
+.layer-comparison__pane--left {
+    border-right: 1px solid rgba(139, 92, 246, 0.2);
+}
+
+.layer-comparison__pane--right {
+    /* Right pane styles */
+}
+
+.layer-comparison__pane canvas {
+    display: block;
+    width: 100% !important;
+    height: 100% !important;
+}
+
+/* Layer label overlay */
+.layer-comparison__label {
+    position: absolute;
+    bottom: 0.75rem;
+    left: 0.75rem;
+    padding: 0.35rem 0.65rem;
+    background: rgba(0, 0, 0, 0.85);
+    border: 1px solid rgba(139, 92, 246, 0.4);
+    border-radius: 6px;
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-size: 0.7rem;
+    font-weight: 500;
+    color: #c4b5fd;
+    backdrop-filter: blur(4px);
+}
+
+/* ========================================================================
+   Split Divider
+   ======================================================================== */
+
+.layer-comparison__divider {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 12px;
+    margin-left: -6px;
+    cursor: col-resize;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.layer-comparison__divider-handle {
+    width: 4px;
+    height: 48px;
+    background: linear-gradient(180deg, #8b5cf6, #6366f1);
+    border-radius: 2px;
+    box-shadow:
+        0 0 12px rgba(139, 92, 246, 0.5),
+        0 0 24px rgba(139, 92, 246, 0.3);
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.layer-comparison__divider:hover .layer-comparison__divider-handle {
+    transform: scaleY(1.2);
+    box-shadow:
+        0 0 16px rgba(139, 92, 246, 0.7),
+        0 0 32px rgba(139, 92, 246, 0.4);
+}
+
+.layer-comparison__divider::before,
+.layer-comparison__divider::after {
+    content: '';
+    position: absolute;
+    left: 50%;
+    width: 1px;
+    height: 100%;
+    background: linear-gradient(
+        180deg,
+        transparent 0%,
+        rgba(139, 92, 246, 0.5) 20%,
+        rgba(139, 92, 246, 0.5) 80%,
+        transparent 100%
+    );
+}
+
+/* ========================================================================
+   Footer Stats
+   ======================================================================== */
+
+.layer-comparison__footer {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1.5rem;
+    padding: 0.6rem 1rem;
+    background: linear-gradient(90deg, rgba(139, 92, 246, 0.08), transparent);
+    border-top: 1px solid rgba(139, 92, 246, 0.15);
+}
+
+.layer-comparison__footer .stat {
+    font-size: 0.7rem;
+    color: var(--text-secondary, #94a3b8);
+}
+
+.layer-comparison__footer .stat strong {
+    color: #c4b5fd;
+    margin-right: 0.25rem;
+}
+
+/* ========================================================================
+   Stacked Layer Labels (used by StackedLayerViz)
+   ======================================================================== */
+
+.layer-stack-label {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    padding: 0.4rem 0.6rem;
+    background: rgba(0, 0, 0, 0.9);
+    border: 1px solid rgba(139, 92, 246, 0.5);
+    border-radius: 6px;
+    backdrop-filter: blur(8px);
+    white-space: nowrap;
+}
+
+.layer-stack-label__name {
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-size: 0.65rem;
+    font-weight: 600;
+    color: #c4b5fd;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.layer-stack-label__stats {
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-size: 0.55rem;
+    color: var(--text-secondary, #94a3b8);
+}
+
+/* Stack indicator */
+.layer-stack-indicator {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.2rem;
+    padding: 0.5rem 0.75rem;
+    background: rgba(0, 0, 0, 0.9);
+    border: 1px solid rgba(34, 197, 94, 0.5);
+    border-radius: 8px;
+    backdrop-filter: blur(8px);
+}
+
+.layer-stack-indicator__count {
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-size: 1.25rem;
+    font-weight: 700;
+    color: #22c55e;
+}
+
+.layer-stack-indicator__label {
+    font-size: 0.5rem;
+    font-weight: 600;
+    color: var(--text-secondary, #94a3b8);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+/* ========================================================================
+   Responsive
+   ======================================================================== */
+
+@media (max-width: 768px) {
+    .layer-comparison__header {
+        flex-wrap: wrap;
+        gap: 0.5rem;
+    }
+
+    .layer-comparison__modes {
+        order: 3;
+        width: 100%;
+        justify-content: center;
+    }
+
+    .layer-comparison__divider-handle {
+        height: 32px;
+    }
+}

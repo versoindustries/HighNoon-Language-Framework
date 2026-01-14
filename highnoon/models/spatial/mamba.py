@@ -204,20 +204,14 @@ class SpatialBlock(FusedReasoningBlockMixin, tf.keras.layers.Layer):
             self.out_proj.build(tf.TensorShape([None, self.d_inner]))
 
         # --- START: FIX ---
-        # Define the internal, compiled function with a fixed input signature.
-        # This prevents Keras from retracing the function for every new input shape.
+        # GRADIENT FIX: Don't use get_concrete_function() - it breaks gradient tape
+        # propagation for downstream layers (like QuantumEnhancedBlock's Port-Hamiltonian).
+        # Instead, use the tf.function directly which preserves gradient flow.
         if self._call_3d_impl is None:
-            # Compile `_call_3d` once with a concrete signature so sequences of different
-            # lengths reuse the same trace instead of triggering retracing.
-            input_dtype = tf.dtypes.as_dtype(self.compute_dtype or tf.float32)
-            call_signature = tf.TensorSpec(
-                shape=[None, None, self.embedding_dim], dtype=input_dtype, name="x_3d"
-            )
-            compiled = tf.function(
+            self._call_3d_impl = tf.function(
                 self._call_3d,
                 reduce_retracing=True,
             )
-            self._call_3d_impl = compiled.get_concrete_function(call_signature)
         # --- END: FIX ---
         super().build(input_shape)
         # --- END: DEFINITIVE FIX ---
@@ -293,6 +287,12 @@ class SpatialBlock(FusedReasoningBlockMixin, tf.keras.layers.Layer):
         output = tf.reshape(
             output, [original_3d_shape[0], original_3d_shape[1], self.embedding_dim]
         )
+
+        # GRADIENT FIX: Wrap output with tf.identity to ensure gradient tape tracking
+        # continues for downstream layers (e.g., QuantumEnhancedBlock's Port-Hamiltonian).
+        # Without this, C++ ops can create tensors that don't propagate gradients.
+        output = tf.identity(output)
+
         # --- END: DEFINITIVE FIX for Retracing ---
         return output
 
@@ -645,6 +645,9 @@ class ReasoningMamba2Block(FusedReasoningBlockMixin, tf.keras.layers.Layer):
             tf.print(
                 f"[{self.name}] --- ReasoningMamba2Block.call END ---", output_stream=sys.stderr
             )
+
+        # GRADIENT FIX: Wrap output with tf.identity for gradient tape preservation
+        output = tf.identity(output)
 
         return output, new_state
 

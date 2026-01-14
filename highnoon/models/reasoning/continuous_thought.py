@@ -51,7 +51,10 @@ from highnoon.config import (
     COCONUT_USE_VQC_AMPLITUDES,
     CONTINUOUS_THOUGHT_STEPS,
     USE_CONTINUOUS_THOUGHT,
+    USE_FFT_THOUGHT,
+    USE_FREQ_PERSISTENT_STATE,
 )
+from highnoon.quantum.coherence_bus import coherence_bus
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +87,7 @@ def _load_multipath_ops() -> bool:
             fused_coconut_crystallize,
             fused_coconut_dfs_collapse,
             fused_coconut_retrieve,
+            fused_fft_projector_forward,
         )
 
         if fused_coconut_bfs_available():
@@ -93,6 +97,9 @@ def _load_multipath_ops() -> bool:
             _fused_coconut_dfs = fused_coconut_dfs_collapse
             _fused_coconut_crystallize = fused_coconut_crystallize
             _fused_coconut_retrieve = fused_coconut_retrieve
+            global _fused_fft_projector
+            _fused_fft_projector = fused_fft_projector_forward
+
             logger.debug("Phase 87 CoCoNut multi-path ops loaded (with S19 crystallization)")
             return True
     except ImportError as e:
@@ -133,17 +140,48 @@ class ThoughtProjector(layers.Layer):
         self.embedding_dim = embedding_dim
         self.hidden_dim = hidden_dim or (4 * embedding_dim)
         self.dropout_rate = dropout_rate
+        self.use_fft = USE_FFT_THOUGHT
 
-        # Two-layer MLP with GELU activation
-        self.dense_1 = layers.Dense(
-            self.hidden_dim,
-            activation="gelu",
-            name=f"{name}_dense_1",
-        )
-        self.dense_2 = layers.Dense(
-            embedding_dim,
-            name=f"{name}_dense_2",
-        )
+        if self.use_fft:
+            # UQHA Phase 2.1: FFT Convolution Weights
+            # Reduces complexity from O(D²) to O(D log D)
+            self.freq_weights_1 = self.add_weight(
+                name=f"{name}_freq_w1",
+                shape=(2, self.embedding_dim),
+                initializer="glorot_uniform",
+                trainable=True,
+            )
+            self.bias_1 = self.add_weight(
+                name=f"{name}_bias_1",
+                shape=(self.embedding_dim,),
+                initializer="zeros",
+                trainable=True,
+            )
+            self.freq_weights_2 = self.add_weight(
+                name=f"{name}_freq_w2",
+                shape=(2, self.embedding_dim),
+                initializer="glorot_uniform",
+                trainable=True,
+            )
+            self.bias_2 = self.add_weight(
+                name=f"{name}_bias_2",
+                shape=(self.embedding_dim,),
+                initializer="zeros",
+                trainable=True,
+            )
+            _load_multipath_ops()
+        else:
+            # Two-layer MLP with GELU activation
+            self.dense_1 = layers.Dense(
+                self.hidden_dim,
+                activation="gelu",
+                name=f"{name}_dense_1",
+            )
+            self.dense_2 = layers.Dense(
+                embedding_dim,
+                name=f"{name}_dense_2",
+            )
+
         self.layer_norm = layers.LayerNormalization(
             epsilon=1e-6,
             name=f"{name}_norm",
@@ -154,12 +192,14 @@ class ThoughtProjector(layers.Layer):
         self,
         thought: tf.Tensor,
         training: bool = False,
+        persistent_freq: bool = False,
     ) -> tf.Tensor:
         """Apply thought projection.
 
         Args:
             thought: Current thought state [batch, dim].
             training: Whether in training mode.
+            persistent_freq: Whether input is already in frequency domain (UQHA Ph 2.2).
 
         Returns:
             Evolved thought state [batch, dim].
@@ -167,10 +207,26 @@ class ThoughtProjector(layers.Layer):
         # Residual connection with pre-norm
         residual = thought
 
-        # Layer norm -> dense -> GELU -> dense -> dropout
-        x = self.layer_norm(thought)
-        x = self.dense_1(x)
-        x = self.dense_2(x)
+        if self.use_fft and _fused_fft_projector is not None:
+            # UQHA Phase 2.1: FFT Convolution Path
+            x = self.layer_norm(thought)
+            x = _fused_fft_projector(
+                x,
+                self.freq_weights_1,
+                self.bias_1,
+                self.freq_weights_2,
+                self.bias_2,
+                self.layer_norm.gamma,
+                self.layer_norm.beta,
+                dim=self.embedding_dim,
+                persistent_freq=persistent_freq,
+            )
+        else:
+            # Legacy Dense Path
+            x = self.layer_norm(thought)
+            x = self.dense_1(x)
+            x = self.dense_2(x)
+
         x = self.dropout(x, training=training)
 
         # Residual connection
@@ -179,8 +235,10 @@ class ThoughtProjector(layers.Layer):
     def build(self, input_shape: tf.TensorShape) -> None:
         """Build layer weights."""
         self.layer_norm.build(input_shape)
-        self.dense_1.build(input_shape)
-        self.dense_2.build(tf.TensorShape([None, self.hidden_dim]))
+        if not self.use_fft:
+            # Only build dense layers when not using FFT path
+            self.dense_1.build(input_shape)
+            self.dense_2.build(tf.TensorShape([None, self.hidden_dim]))
         super().build(input_shape)
 
     def get_config(self) -> dict[str, Any]:
@@ -359,6 +417,18 @@ class ContinuousThoughtBlock(layers.Layer):
             # Extract context for amplitude scoring (mean pool last dim)
             context = tf.reduce_mean(hidden_states, axis=1)  # [batch, dim]
 
+            # UQHA Phase 2.1: FFT weights if enabled
+            if USE_FFT_THOUGHT:
+                p_d1_w = self.thought_projector.freq_weights_1
+                p_d1_b = self.thought_projector.bias_1
+                p_d2_w = self.thought_projector.freq_weights_2
+                p_d2_b = self.thought_projector.bias_2
+            else:
+                p_d1_w = self.thought_projector.dense_1.kernel
+                p_d1_b = self.thought_projector.dense_1.bias
+                p_d2_w = self.thought_projector.dense_2.kernel
+                p_d2_b = self.thought_projector.bias_2
+
             output, path_amplitudes = _fused_coconut_bfs(
                 hidden_states=hidden_states,
                 context=context,
@@ -368,10 +438,10 @@ class ContinuousThoughtBlock(layers.Layer):
                 aggregator_bias=self.thought_aggregator.bias,
                 projector_norm_gamma=self.thought_projector.layer_norm.gamma,
                 projector_norm_beta=self.thought_projector.layer_norm.beta,
-                projector_dense1_weight=self.thought_projector.dense_1.kernel,
-                projector_dense1_bias=self.thought_projector.dense_1.bias,
-                projector_dense2_weight=self.thought_projector.dense_2.kernel,
-                projector_dense2_bias=self.thought_projector.dense_2.bias,
+                projector_dense1_weight=p_d1_w,
+                projector_dense1_bias=p_d1_b,
+                projector_dense2_weight=p_d2_w,
+                projector_dense2_bias=p_d2_b,
                 broadcast_weight=self.broadcast_projection.kernel,
                 broadcast_bias=self.broadcast_projection.bias,
                 output_norm_gamma=self.output_norm.gamma,
@@ -379,7 +449,28 @@ class ContinuousThoughtBlock(layers.Layer):
                 num_paths=self.num_paths,
                 num_thought_steps=self.num_thought_steps,
                 prune_threshold=0.1,
+                use_fft=USE_FFT_THOUGHT,
+                persistent_freq_state=USE_FREQ_PERSISTENT_STATE,
             )
+
+            # UQHA Phase 3.1: Coherence Bus (S4)
+            # Calculate entropy of path amplitudes to derive coherence
+            # Higher coherence (1.0) means one path dominates
+            # Lower coherence (0.0) means all paths are equal (uniform)
+            # NOTE: Skip coherence bus registration during symbolic graph construction
+            # (Keras compute_output_spec) to avoid TensorFlow FuncGraph scope issues.
+            # Check if we're inside a TensorFlow function graph (symbolic tracing mode).
+            if not tf.inside_function():
+                entropy = -tf.reduce_sum(
+                    path_amplitudes * tf.math.log(path_amplitudes + 1e-10), axis=-1
+                )
+                import math
+
+                max_entropy_py = math.log(max(self.num_paths, 1))
+                coherence = tf.constant(1.0, dtype=entropy.dtype) - (
+                    entropy / (max_entropy_py + 1e-10)
+                )
+                coherence_bus.register(self.name, coherence)
 
             # Phase 130.4: VQC amplitudes for analysis (do NOT replace forward amplitudes)
             # The path_amplitudes from C++ fused_coconut_bfs are connected to the gradient

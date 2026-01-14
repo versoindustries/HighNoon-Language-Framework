@@ -268,7 +268,7 @@ class IntelligentVocabController:
         """
         if name not in PRETRAINED_CODEBOOKS:
             available = list(PRETRAINED_CODEBOOKS.keys())
-            raise ValueError(f"Unknown pretrained codebook '{name}'. " f"Available: {available}")
+            raise ValueError(f"Unknown pretrained codebook '{name}'. Available: {available}")
 
         # Resolve path relative to project root
         codebook_path = Path(__file__).parent.parent.parent / PRETRAINED_CODEBOOKS[name]

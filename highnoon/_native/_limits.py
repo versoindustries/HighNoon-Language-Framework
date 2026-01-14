@@ -337,8 +337,7 @@ def warn_near_limits(config: Any, threshold: float = 0.8) -> list[str]:
         usage = num_experts / MAX_MOE_EXPERTS
         if usage >= threshold and num_experts <= MAX_MOE_EXPERTS:
             msg = (
-                f"num_moe_experts={num_experts} is at {usage:.0%} of "
-                f"Lite limit ({MAX_MOE_EXPERTS})"
+                f"num_moe_experts={num_experts} is at {usage:.0%} of Lite limit ({MAX_MOE_EXPERTS})"
             )
             warnings.append(msg)
             log.warning(f"[NEAR LIMIT] {msg}")
@@ -361,8 +360,7 @@ def warn_near_limits(config: Any, threshold: float = 0.8) -> list[str]:
         usage = max_seq / MAX_CONTEXT_LENGTH
         if usage >= threshold and max_seq <= MAX_CONTEXT_LENGTH:
             msg = (
-                f"max_seq_length={max_seq} is at {usage:.0%} of "
-                f"Lite limit ({MAX_CONTEXT_LENGTH:,})"
+                f"max_seq_length={max_seq} is at {usage:.0%} of Lite limit ({MAX_CONTEXT_LENGTH:,})"
             )
             warnings.append(msg)
             log.warning(f"[NEAR LIMIT] {msg}")

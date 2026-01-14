@@ -1,0 +1,141 @@
+/* HUDTelemetryStrip.css - Styles for F1-style telemetry strip chart */
+
+.hud-telemetry-strip {
+    display: flex;
+    flex-direction: column;
+    background: rgba(10, 10, 15, 0.95);
+    backdrop-filter: blur(12px);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+}
+
+.hud-telemetry-strip__labels {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100px;
+    z-index: 10;
+    background: linear-gradient(90deg, rgba(10, 10, 15, 0.98) 70%, transparent);
+}
+
+.hud-telemetry-strip__label {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    padding: 0 var(--spacing-sm);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.hud-telemetry-strip__label:last-child {
+    border-bottom: none;
+}
+
+.hud-telemetry-strip__label-text {
+    font-family: 'Outfit', var(--font-sans);
+    font-size: 9px;
+    font-weight: var(--font-semibold);
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.hud-telemetry-strip__value {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: var(--font-bold);
+}
+
+.hud-telemetry-strip__unit {
+    font-size: 9px;
+    font-weight: var(--font-normal);
+    color: var(--text-muted);
+    margin-left: 2px;
+}
+
+.hud-telemetry-strip__chart {
+    position: relative;
+    flex: 1;
+    margin-left: 100px;
+}
+
+.hud-telemetry-strip__canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+}
+
+.hud-telemetry-strip__time-labels {
+    display: flex;
+    justify-content: space-between;
+    padding: var(--spacing-xs) var(--spacing-sm);
+    padding-left: 110px;
+    font-family: var(--font-mono);
+    font-size: 9px;
+    color: var(--text-muted);
+    background: rgba(0, 0, 0, 0.3);
+    border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.hud-telemetry-strip__time-labels span:last-child {
+    color: var(--quantum-primary);
+    font-weight: var(--font-semibold);
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+    .hud-telemetry-strip__labels {
+        width: 70px;
+    }
+
+    .hud-telemetry-strip__chart {
+        margin-left: 70px;
+    }
+
+    .hud-telemetry-strip__time-labels {
+        padding-left: 80px;
+    }
+
+    .hud-telemetry-strip__label-text {
+        font-size: 8px;
+    }
+
+    .hud-telemetry-strip__value {
+        font-size: 10px;
+    }
+}
+
+/* Compact variant */
+.hud-telemetry-strip--compact .hud-telemetry-strip__labels {
+    width: 60px;
+}
+
+.hud-telemetry-strip--compact .hud-telemetry-strip__chart {
+    margin-left: 60px;
+}
+
+.hud-telemetry-strip--compact .hud-telemetry-strip__time-labels {
+    padding-left: 70px;
+    font-size: 8px;
+}
+
+/* Highlight animation for out-of-bounds values */
+@keyframes alertPulse {
+
+    0%,
+    100% {
+        box-shadow: inset 0 0 0 0 transparent;
+    }
+
+    50% {
+        box-shadow: inset 0 0 10px rgba(239, 68, 68, 0.3);
+    }
+}
+
+.hud-telemetry-strip__label--alert {
+    animation: alertPulse 1s infinite;
+}
+
+.hud-telemetry-strip__label--alert .hud-telemetry-strip__value {
+    color: var(--color-danger) !important;
+}

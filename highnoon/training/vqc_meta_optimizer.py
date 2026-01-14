@@ -255,23 +255,19 @@ class VQCMetaOptimizer:
     def _check_native_vqc_available(self) -> bool:
         """Check if native C++ VQC ops are available.
 
+        V2 MIGRATION: Uses quantum_foundation_ops unified API.
+
         Raises:
             RuntimeError: If native VQC ops are not available.
         """
         try:
-            from highnoon._native.ops.vqc_expectation import vqc_expectation_available
+            from highnoon._native.ops.quantum_foundation_ops import run_vqc
 
-            available = vqc_expectation_available()
-            if available:
-                logger.info("[VQCMetaOptimizer] Using native C++ VQC ops")
-                return True
-            else:
-                raise RuntimeError(
-                    "VQC Meta-Optimizer requires native C++ VQC ops. "
-                    "Please compile the vqc_expectation op."
-                )
+            # If import succeeds, VQC is available
+            logger.info("[VQCMetaOptimizer] Using quantum_foundation_ops VQC")
+            return True
         except ImportError as e:
-            raise RuntimeError(f"VQC Meta-Optimizer requires vqc_expectation module: {e}") from e
+            raise RuntimeError(f"VQC Meta-Optimizer requires quantum_foundation_ops: {e}") from e
 
     def _init_circuit_params(self) -> None:
         """Initialize trainable VQC parameters.
@@ -499,7 +495,9 @@ class VQCMetaOptimizer:
         return self._decode_expectations(expectations)
 
     def _run_native_vqc(self, data_angles: tf.Tensor) -> tf.Tensor:
-        """Run VQC using native C++ operator.
+        """Run VQC using quantum_foundation_ops unified API.
+
+        V2 MIGRATION: Uses run_vqc from quantum_foundation_ops.
 
         Args:
             data_angles: Encoded training state angles.
@@ -507,9 +505,9 @@ class VQCMetaOptimizer:
         Returns:
             Expectation values tensor.
         """
-        from highnoon._native.ops.vqc_expectation import run_vqc_expectation
+        from highnoon._native.ops.quantum_foundation_ops import run_vqc
 
-        expectations = run_vqc_expectation(
+        expectations = run_vqc(
             data_angles=data_angles,
             circuit_params=self.circuit_params,
             entangler_pairs=self.entangler_pairs,

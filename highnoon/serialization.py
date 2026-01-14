@@ -109,7 +109,7 @@ def save_model(
             logger.info(f"[Serialization] Removed existing directory: {path}")
         else:
             raise FileExistsError(
-                f"Model directory already exists: {path}. " "Use overwrite=True to replace."
+                f"Model directory already exists: {path}. Use overwrite=True to replace."
             )
 
     path.mkdir(parents=True, exist_ok=True)

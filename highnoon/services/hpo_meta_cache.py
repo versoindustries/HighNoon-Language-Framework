@@ -287,7 +287,7 @@ class MetaLearningCache:
                     f"""
                     UPDATE sweep_results
                     SET accessed_at = CURRENT_TIMESTAMP
-                    WHERE sweep_id IN ({','.join('?' * len(sweep_ids))})
+                    WHERE sweep_id IN ({",".join("?" * len(sweep_ids))})
                     """,
                     sweep_ids,
                 )

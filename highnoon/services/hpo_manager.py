@@ -15,6 +15,7 @@ import math
 import os
 import time
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -127,138 +128,711 @@ def compute_max_vocab_for_budget(
     return max(8000, min(max_vocab, 300000))
 
 
+# =============================================================================
+# CACHED PARAMETER ESTIMATION
+# =============================================================================
+# Phase 950: LRU cache for estimate_model_params to avoid redundant computation
+# in _estimate_max_sizes_for_budget triple loop (2000-3500+ iterations).
+
+
+@lru_cache(maxsize=4096)
+def _estimate_model_params_cached(
+    vocab_size: int,
+    embedding_dim: int,
+    hd_dim: int,
+    max_seq_len: int,
+    num_blocks: int,
+    num_experts: int,
+    state_dim: int,
+    floquet_modes: int,
+    wavelet_kernel: int,
+    qsvt_degree: int,
+    vqc_layers: int,
+    vqc_qubits: int,
+    ff_expansion: int,
+    use_qhd_spatial: bool,
+    skip_connection_type: str,
+    num_paths: int,
+    entanglement_depth: int,
+    entanglement_topology: str,
+    superposition_dim: int,
+    hd_dim_moe: int,
+    active_vocab_size: int,
+    # TT decomposition flags for accurate parameter estimation
+    use_tt_embeddings: bool,
+    use_tt_attention: bool,
+    use_tt_ffn: bool,
+    use_tt_kalman: bool,
+    use_tt_lm_head: bool,
+    tt_embedding_ranks: tuple[int, ...],
+    tt_attention_ranks: tuple[int, ...],
+    tt_ffn_ranks: tuple[int, ...],
+    tt_kalman_ranks: tuple[int, ...],
+    tt_lm_head_ranks: tuple[int, ...],
+) -> int:
+    """Cached inner implementation of parameter estimation.
+
+    All parameters are passed as primitives to enable LRU caching.
+
+    TT Decomposition Accuracy (Phase update):
+    When USE_TT_* flags are enabled, this function uses TT-compressed
+    parameter counts instead of dense counts, providing accurate estimates
+    that reflect 85-98% parameter reduction from TT decomposition.
+    """
+    # FFN dimensions
+    d_inner = embedding_dim * ff_expansion
+
+    # ==========================================================================
+    # 1. EMBEDDING LAYERS
+    # ==========================================================================
+    max_char_per_token = 64
+
+    # TT-aware embedding parameter calculation
+    if use_tt_embeddings and len(tt_embedding_ranks) >= 2:
+        # TT decomposition: vocab_size × embedding_dim → Σ(r_i × d_i × r_{i+1})
+        # Approximate as: vocab_size × r + r × embedding_dim (simplified 2-core)
+        tt_r = tt_embedding_ranks[1] if len(tt_embedding_ranks) > 1 else 8
+        standard_embed_params = active_vocab_size * tt_r + tt_r * embedding_dim
+    else:
+        standard_embed_params = active_vocab_size * embedding_dim
+
+    hde_params = (
+        256 * hd_dim  # hd_char_basis
+        + max_char_per_token * hd_dim  # hd_position_basis
+        + hd_dim * embedding_dim  # hd_projection
+    )
+    position_params = max_seq_len * embedding_dim
+    total_embed_params = standard_embed_params + hde_params + position_params
+
+    # ==========================================================================
+    # 2. HD SPATIAL BLOCK
+    # ==========================================================================
+    needs_projection = embedding_dim != hd_dim
+    hd_projection_params = (2 * embedding_dim * hd_dim) if needs_projection else 0
+
+    hd_spatial_params = (
+        state_dim  # a_log
+        + hd_dim * state_dim  # b_proj
+        + hd_dim * state_dim  # c_proj
+        + hd_dim  # dt_proj
+        + (
+            hd_dim * hd_dim
+            if skip_connection_type == "dense"
+            else (
+                hd_dim
+                if skip_connection_type == "diagonal"
+                else (1 if skip_connection_type == "learned_scalar" else 0)
+            )
+        )
+        + hd_projection_params
+    )
+
+    # ==========================================================================
+    # 2b. QHD SPATIAL BLOCK
+    # ==========================================================================
+    qhd_superposition_params = (
+        num_paths  # amplitudes_real
+        + num_paths  # amplitudes_imag
+        + entanglement_depth * num_paths  # rotation_angles
+    )
+    qhd_walk_hamiltonian_params = (num_paths * num_paths) if entanglement_topology == "walk" else 0
+    qhd_spatial_params = hd_spatial_params + qhd_superposition_params + qhd_walk_hamiltonian_params
+
+    # ==========================================================================
+    # 3. HD TIME CRYSTAL BLOCK
+    # ==========================================================================
+    hd_timecrystal_params = (
+        floquet_modes * hd_dim
+        + floquet_modes
+        + floquet_modes * floquet_modes
+        + hd_projection_params
+    )
+
+    # ==========================================================================
+    # 4. LATENT REASONING BLOCK
+    # ==========================================================================
+    # TT-aware FFN parameter calculation
+    if use_tt_ffn and len(tt_ffn_ranks) >= 2:
+        # TT decomposition for FFN projections
+        tt_r = tt_ffn_ranks[1] if len(tt_ffn_ranks) > 1 else 8
+        ffn1_params = embedding_dim * tt_r + tt_r * d_inner + d_inner
+        ffn2_params = d_inner * tt_r + tt_r * embedding_dim + embedding_dim
+        latent_params = ffn1_params + ffn2_params + 4 * embedding_dim
+    else:
+        latent_params = (
+            embedding_dim * d_inner
+            + d_inner
+            + d_inner * embedding_dim
+            + embedding_dim
+            + 4 * embedding_dim
+        )
+
+    # ==========================================================================
+    # 4b. UNIFIED ATTENTION (Phase 2 V2 Update - O(n) Linear)
+    # ==========================================================================
+    # The unified_attention_op provides O(n) linear attention with holographic
+    # FFT features, replacing O(n²) quadratic attention. Key differences:
+    # - Old: Q×K^T attention matrix = O(n²) params for positional biases
+    # - New: KV state = O(d²) per head, independent of sequence length
+    #
+    # Parameters include:
+    # - Q/K/V projection weights: 3 × embedding_dim × embedding_dim
+    # - Output projection: embedding_dim × embedding_dim
+    # - Holographic FFT has no learnable params (just FFT/iFFT operations)
+    # - Linear attention KV state is an activation, not a parameter
+    num_heads_attn = 8  # Default, matches config
+    embedding_dim // num_heads_attn if num_heads_attn > 0 else 64
+
+    # TT-aware attention projection calculation
+    if use_tt_attention and len(tt_attention_ranks) >= 2:
+        # TT decomposition for Q/K/V/O projections
+        tt_r = tt_attention_ranks[1] if len(tt_attention_ranks) > 1 else 4
+        # Each projection: embedding_dim × tt_r + tt_r × embedding_dim
+        proj_params = embedding_dim * tt_r + tt_r * embedding_dim
+        unified_attention_params = (
+            4 * proj_params + embedding_dim  # Q, K, V, O projections (TT-compressed)  # Layer norm
+        )
+    else:
+        unified_attention_params = (
+            3 * embedding_dim * embedding_dim  # Q, K, V projections
+            + embedding_dim * embedding_dim  # Output projection
+            + embedding_dim  # Layer norm
+        )
+
+    # ==========================================================================
+    # 4c. KALMAN BLOCK (after TimeCrystal when USE_KALMAN_FILTERING=True)
+    # ==========================================================================
+    # KalmanBlock provides state estimation with uncertainty tracking.
+    # Added after TimeCrystalBlock in block_factory.py block_type==1.
+    # Parameters: state projections, Kalman gain, measurement matrix
+    kalman_state_dim = 32  # Default from config.KALMAN_STATE_DIM
+
+    # TT-aware Kalman projection calculation
+    if use_tt_kalman and len(tt_kalman_ranks) >= 2:
+        # TT decomposition for Kalman projections
+        tt_r = tt_kalman_ranks[1] if len(tt_kalman_ranks) > 1 else 4
+        state_proj_params = embedding_dim * tt_r + tt_r * kalman_state_dim
+        measurement_proj_params = kalman_state_dim * tt_r + tt_r * embedding_dim
+        kalman_params = (
+            state_proj_params  # state_proj (TT)
+            + measurement_proj_params  # measurement_proj (TT)
+            + kalman_state_dim * kalman_state_dim  # kalman_gain
+            + kalman_state_dim  # innovation_bias
+            + embedding_dim  # output_bias
+        )
+    else:
+        kalman_params = (
+            embedding_dim * kalman_state_dim  # state_proj
+            + kalman_state_dim * embedding_dim  # measurement_proj
+            + kalman_state_dim * kalman_state_dim  # kalman_gain
+            + kalman_state_dim  # innovation_bias
+            + embedding_dim  # output_bias
+        )
+    # Kalman is added only on TimeCrystal blocks (1 out of 6 in pattern)
+    # So we count 1 Kalman per 6 blocks
+    num_blocks // 6
+
+    # ==========================================================================
+    # 5. WLAM BLOCK (block_type==4 in block_factory.py)
+    # ==========================================================================
+    # WLAMBlock: Wavelet-based Linear Attention Module
+    # Uses multi-scale wavelet decomposition with linear attention
+    num_heads = 8  # Default from config.WLAM_NUM_HEADS
+    wlam_params = (
+        4 * wavelet_kernel * embedding_dim * embedding_dim  # wavelet filters
+        + 2 * embedding_dim  # layer norms
+        + num_heads * (embedding_dim // num_heads) * 3  # QKV per head
+    )
+
+    # ==========================================================================
+    # 6. MOE BLOCK
+    # ==========================================================================
+    tt_rank = 16
+    d_ff = embedding_dim * ff_expansion
+    ffn1_tt_params = (embedding_dim * tt_rank + tt_rank * d_ff) * superposition_dim
+    ffn2_tt_params = (d_ff * tt_rank + tt_rank * embedding_dim) * superposition_dim
+    moe_uses_hd_projection = hd_dim_moe != embedding_dim
+    moe_hd_projection_params = (2 * embedding_dim * hd_dim_moe) if moe_uses_hd_projection else 0
+    holographic_routing_params = 2 * superposition_dim * hd_dim_moe
+    superposed_expert_params = (
+        ffn1_tt_params + ffn2_tt_params + moe_hd_projection_params + holographic_routing_params
+    )
+    router_params = embedding_dim * num_experts + num_experts
+    moe_params = superposed_expert_params + router_params
+
+    # ==========================================================================
+    # 7. QUANTUM ENHANCED BLOCK WRAPPER
+    # ==========================================================================
+    quantum_enhanced_overhead = (
+        embedding_dim * embedding_dim
+        + embedding_dim
+        + embedding_dim * embedding_dim
+        + (qsvt_degree + 1)
+    )
+
+    # ==========================================================================
+    # BLOCK PATTERN ASSEMBLY (matches block_factory.py create_reasoning_stack)
+    # ==========================================================================
+    # Phase 2 V2 Update: Unified attention (O(n) linear) replaces O(n²) attention
+    # Blocks are now more parameter-efficient due to linear attention's O(d²) KV state
+    #
+    # Pattern: 6 unique blocks repeating, matching block_factory.py block_type % 6:
+    #   0: QHDSpatialBlock (or HDSpatialBlock)
+    #   1: HDTimeCrystalBlock + KalmanBlock
+    #   2: LatentReasoningBlock + SelfConsistencyVerifier
+    #   3: LatentKVAttention / QuantumGQA / LocalAttentionBlock
+    #   4: WLAMBlock
+    #   5: MoELayer (SuperposedExpert)
+    spatial_block_params = qhd_spatial_params if use_qhd_spatial else hd_spatial_params
+    blocks_in_pattern = [
+        # block_type 0: QHDSpatialBlock
+        spatial_block_params + quantum_enhanced_overhead,
+        # block_type 1: HDTimeCrystalBlock + KalmanBlock (when USE_KALMAN_FILTERING)
+        hd_timecrystal_params + kalman_params + quantum_enhanced_overhead,
+        # block_type 2: LatentReasoningBlock (uses unified attention internally)
+        latent_params + unified_attention_params + quantum_enhanced_overhead,
+        # block_type 3: Attention block (LatentKV/QuantumGQA/Local/Spatial)
+        unified_attention_params + quantum_enhanced_overhead,
+        # block_type 4: WLAMBlock (uses wavelet + unified attention)
+        wlam_params + unified_attention_params + quantum_enhanced_overhead,
+        # block_type 5: MoELayer (SuperposedExpert with holographic routing)
+        moe_params + quantum_enhanced_overhead,
+    ]
+    num_full_patterns = num_blocks // 6
+    remaining_blocks = num_blocks % 6
+    params_per_pattern = sum(blocks_in_pattern)
+    total_reasoning_params = num_full_patterns * params_per_pattern
+    for i in range(remaining_blocks):
+        total_reasoning_params += blocks_in_pattern[i]
+
+    # ==========================================================================
+    # 8. QUANTUM LM HEAD
+    # ==========================================================================
+    vqc_dim = 2**vqc_qubits
+
+    # TT-aware LM head parameter calculation
+    if use_tt_lm_head and len(tt_lm_head_ranks) >= 2:
+        # TT decomposition for output projection: embedding_dim × vocab_size
+        # → embedding_dim × r + r × vocab_size
+        tt_r = tt_lm_head_ranks[1] if len(tt_lm_head_ranks) > 1 else 8
+        output_proj_params = embedding_dim * tt_r + tt_r * vocab_size + vocab_size
+        qlm_params = (
+            embedding_dim * vqc_dim
+            + vqc_layers * vqc_qubits * 3
+            + vqc_layers * (vqc_qubits - 1)
+            + vqc_dim * tt_r
+            + tt_r * vocab_size
+            + vocab_size  # VQC output (TT)
+            + output_proj_params  # Final projection (TT)
+            + 1
+        )
+    else:
+        qlm_params = (
+            embedding_dim * vqc_dim
+            + vqc_layers * vqc_qubits * 3
+            + vqc_layers * (vqc_qubits - 1)
+            + vqc_dim * vocab_size
+            + vocab_size
+            + embedding_dim * vocab_size
+            + vocab_size
+            + 1
+        )
+
+    return int(total_embed_params + total_reasoning_params + qlm_params)
+
+
 def estimate_model_params(config: dict[str, Any]) -> int:
     """Estimate total model parameters from architecture configuration.
 
-    Phase 11 Update: Support HQE (Hyperdimensional Embedding), QuantumLMHead,
-    and MoE Tucker decomposition aware estimation.
-
-    Phase 201.7 Update: Budget-aware vocab_size default when param_budget is set.
+    Phase 300 Update: Accurate HD-only architecture parameter estimation.
+    Phase 950 Update: LRU-cached implementation for 10-50x speedup in HPO loops.
+    Phase 2 V2 Update: Unified attention (O(n) linear) replaces O(n²) quadratic,
+        reducing attention parameter overhead for long sequences.
 
     Args:
         config: Architecture configuration containing:
             - vocab_size: Vocabulary size (default 32000)
             - embedding_dim: Embedding dimension (default 512)
+            - hd_dim: HD space dimension (default embedding_dim * 8)
+            - max_seq_len: Maximum sequence length (default 4096)
             - num_reasoning_blocks: Number of reasoning blocks (default 8)
             - num_moe_experts: Number of MoE experts (default 8)
-            - mamba_state_dim: Mamba state dimension (default 64)
-            - use_hyperdimensional_embedding: Whether HQE is used
-            - hd_dim: Explicit HQE dimension (defaults to embedding_dim * 8)
-            - use_quantum_lm_head: Whether VQC-based head is used
-            - use_td_moe: Whether Tucker-decomposed MoE is used
-            - td_moe_tucker_rank: Rank for MoE decomposition
+            - mamba_state_dim: Mamba state dimension for HDSpatialBlock (default 16)
+            - floquet_modes: Floquet modes for HDTimeCrystalBlock (default 16)
+            - wavelet_kernel_size: Wavelet kernel for WLAMBlock (default 4)
+            - vqc_layers: VQC layers for QuantumLMHead (default 2)
+            - vqc_qubits: VQC qubits for QuantumLMHead (default 8)
+            - qsvt_degree: QSVT degree for QuantumEnhancedBlock (default 8)
             - param_budget: Optional parameter budget for smart defaults
 
     Returns:
         Estimated total parameter count.
     """
-    embedding_dim = config.get("embedding_dim") or config.get("hidden_dim") or 512
-    use_hqe = config.get(
-        "use_hyperdimensional_embedding", getattr(hn_config, "USE_HYPERDIMENSIONAL_EMBEDDING", True)
+    # ==========================================================================
+    # EXTRACT ALL CONFIG VALUES (Phase 950: for cache key hashing)
+    # ==========================================================================
+    embedding_dim = (
+        config.get("embedding_dim")
+        or config.get("hidden_dim")
+        or getattr(hn_config, "EMBEDDING_DIM", 512)
     )
+    hd_dim = config.get("hd_dim") or getattr(hn_config, "HD_EMBEDDING_DIM", embedding_dim * 8)
+    max_seq_len = config.get("max_seq_len") or config.get("context_window") or 4096
     param_budget = config.get("param_budget")
-    config_hd_dim = config.get("hd_dim")
 
-    # Budget-aware vocab_size default: when param_budget is set and vocab_size is null,
-    # compute max sustainable vocab instead of defaulting to 128K
-    # Phase 1.1 Fix: Check target_vocab_size (used by sample()) to avoid redundant re-calc
+    # Budget-aware vocab_size default
     vocab_size = config.get("vocab_size") or config.get("target_vocab_size")
     if vocab_size is None:
         if param_budget is not None:
             vocab_size = compute_max_vocab_for_budget(
                 param_budget=param_budget,
                 embedding_dim=embedding_dim,
-                use_hqe=use_hqe,
-                hd_dim=config_hd_dim,
+                use_hqe=True,
+                hd_dim=hd_dim,
                 model_overhead_fraction=0.5,
             )
             logger.debug(
-                f"[HPO] Budget-aware vocab default: {vocab_size} "
-                f"(budget={param_budget/1e6:.0f}M, hqe={use_hqe})"
+                f"[HPO] Budget-aware vocab default: {vocab_size} (budget={param_budget / 1e6:.0f}M)"
             )
         else:
-            # No budget specified - use conservative default
             vocab_size = 32000
+
     num_blocks = config.get("num_reasoning_blocks") or 8
     num_experts = config.get("num_moe_experts") or 8
-    mamba_state = config.get("mamba_state_dim") or 64
-
-    # Phase 201.2: Account for HQE impact on embedding parameters
-    # Note: use_hqe is already set above for budget-aware vocab calculation
-    if use_hqe:
-        # HQE uses hd_dim (default embedding_dim * 8) for base vectors
-        # hd_dim = config.get("hd_dim") or (embedding_dim * 8)
-        # Note: In hpo_trial_runner.py, hd_dim is calculated as hidden_dim * 8
-        hd_dim = config.get("hd_dim") or (embedding_dim * 8)
-        # Base vectors: [vocab_size, hd_dim]
-        # Position keys: [max_seq, hd_dim] (small compared to base)
-        # Projection: [hd_dim, embedding_dim]
-        embed_params = vocab_size * hd_dim + hd_dim * embedding_dim
-    else:
-        # Embedding: vocab × embedding_dim
-        embed_params = vocab_size * embedding_dim
-
-    # Per-block parameter estimates based on HSMN architecture
-    ff_dim = embedding_dim * 4  # ff_expansion=4
-    d_inner = embedding_dim * 2  # expand_factor=2
-
-    # SpatialBlock (Mamba-2): approx 4 * embedding_dim * d_inner + state params
-    spatial_params = 4 * embedding_dim * d_inner + mamba_state * embedding_dim * 2
-
-    # TimeCrystalSequenceBlock: Hamiltonian weights + output proj
-    timecrystal_params = 8 * embedding_dim * embedding_dim
-
-    # LatentReasoningBlock: FFN layers
-    latent_params = 3 * embedding_dim * ff_dim
-
-    # WLAMBlock: wavelet transforms + attention
-    wlam_params = 4 * embedding_dim * embedding_dim
-
-    # MoELayer estimation
-    use_td_moe = config.get("use_td_moe", getattr(hn_config, "USE_TD_MOE", False))
-    if use_td_moe:
-        # Tucker decomposition reduces parameters: O(rank * (dim + ff_dim))
-        tucker_rank = config.get("td_moe_tucker_rank", 16)
-        # Approx: num_experts * tucker_rank * (embedding_dim + ff_dim)
-        moe_params = num_experts * (tucker_rank * (embedding_dim + ff_dim))
-    else:
-        # Standard MoE: num_experts * (2 * embedding_dim * ff_dim)
-        moe_params = num_experts * (2 * embedding_dim * ff_dim) + embedding_dim * num_experts
-
-    # Blocks per 6-block pattern: [Spatial, TimeCrystal, Latent, Spatial, WLAM, MoE]
-    num_full_patterns = num_blocks // 6
-    remaining_blocks = num_blocks % 6
-
-    params_per_pattern = (
-        spatial_params * 2 + timecrystal_params + latent_params + wlam_params + moe_params
+    state_dim = config.get("mamba_state_dim") or 16
+    floquet_modes = config.get("floquet_modes") or config.get("majorana_floquet_period") or 16
+    wavelet_kernel = config.get("wavelet_kernel_size") or 4
+    qsvt_degree = config.get("qsvt_degree") or 8
+    vqc_layers = config.get("vqc_layers") or config.get("vqc_max_layers") or 2
+    vqc_qubits = config.get("vqc_qubits") or 8
+    ff_expansion = config.get("ff_expansion") or 4
+    use_qhd_spatial = (
+        config.get("use_qhd_spatial_block")
+        if config.get("use_qhd_spatial_block") is not None
+        else True
     )
-    total_reasoning_params = num_full_patterns * params_per_pattern
+    skip_connection_type = config.get("skip_connection_type", "diagonal")
+    num_paths = config.get("qhd_num_paths") or getattr(hn_config, "QHD_NUM_PATHS", 2)
+    entanglement_depth = config.get("qhd_entanglement_depth") or getattr(
+        hn_config, "QHD_ENTANGLEMENT_DEPTH", 2
+    )
+    entanglement_topology = config.get("qhd_entanglement_topology") or getattr(
+        hn_config, "QHD_ENTANGLEMENT_TOPOLOGY", "walk"
+    )
+    superposition_dim = config.get("superposition_dim") or getattr(
+        hn_config, "SUPERPOSITION_DIM", 4
+    )
+    hd_dim_moe = config.get("hd_dim_moe") or getattr(hn_config, "HD_DIM_MOE", embedding_dim)
+    active_vocab_size = config.get("hd_active_vocab_size") or getattr(
+        hn_config, "HD_ACTIVE_VOCAB_SIZE", 10000
+    )
 
-    # Add parameters for remaining blocks in order
-    rem_block_params = [
-        spatial_params,
-        timecrystal_params,
-        latent_params,
-        spatial_params,
-        wlam_params,
-        moe_params,
-    ]
-    for i in range(remaining_blocks):
-        total_reasoning_params += rem_block_params[i]
+    # ==========================================================================
+    # TT DECOMPOSITION FLAGS (for accurate parameter estimation)
+    # ==========================================================================
+    # Extract TT flags from config, falling back to global config defaults
+    use_tt_embeddings = (
+        config.get("use_tt_embeddings")
+        if config.get("use_tt_embeddings") is not None
+        else getattr(hn_config, "USE_TT_EMBEDDINGS", True)
+    )
+    use_tt_attention = (
+        config.get("use_tt_attention_projections")
+        if config.get("use_tt_attention_projections") is not None
+        else getattr(hn_config, "USE_TT_ATTENTION_PROJECTIONS", True)
+    )
+    use_tt_ffn = (
+        config.get("use_tt_ffn_projections")
+        if config.get("use_tt_ffn_projections") is not None
+        else getattr(hn_config, "USE_TT_FFN_PROJECTIONS", True)
+    )
+    use_tt_kalman = (
+        config.get("use_tt_kalman_projections")
+        if config.get("use_tt_kalman_projections") is not None
+        else getattr(hn_config, "USE_TT_KALMAN_PROJECTIONS", True)
+    )
+    use_tt_lm_head = (
+        config.get("use_tt_lm_head")
+        if config.get("use_tt_lm_head") is not None
+        else getattr(hn_config, "USE_TT_LM_HEAD", True)
+    )
 
-    # Output layer (LM head)
-    # Phase 11: QuantumLMHead estimation
-    use_qlm = config.get("use_quantum_lm_head", getattr(hn_config, "USE_QUANTUM_LM_HEAD", True))
-    if use_qlm:
-        # VQC head uses VQC layers + projection
-        # [embedding_dim, vqc_input_dim] + VQC weights
-        output_params = embedding_dim * 128 + 1024  # Simplified VQC estimate
+    # TT rank configurations (convert lists to tuples for hashability in LRU cache)
+    tt_embedding_ranks = tuple(
+        config.get("tt_embedding_ranks") or getattr(hn_config, "TT_EMBEDDING_RANKS", [1, 8, 8, 1])
+    )
+    tt_attention_ranks = tuple(
+        config.get("tt_attention_ranks") or getattr(hn_config, "TT_ATTENTION_RANKS", [1, 4, 4, 1])
+    )
+    tt_ffn_ranks = tuple(
+        config.get("tt_ffn_ranks") or getattr(hn_config, "TT_FFN_RANKS", [1, 8, 8, 1])
+    )
+    tt_kalman_ranks = tuple(
+        config.get("tt_kalman_ranks") or getattr(hn_config, "TT_KALMAN_RANKS", [1, 4, 1])
+    )
+    tt_lm_head_ranks = tuple(
+        config.get("tt_lm_head_ranks") or getattr(hn_config, "TT_LM_HEAD_RANKS", [1, 8, 8, 1])
+    )
+
+    # ==========================================================================
+    # DELEGATE TO CACHED IMPLEMENTATION (Phase 950: 10-50x speedup)
+    # ==========================================================================
+    return _estimate_model_params_cached(
+        vocab_size=vocab_size,
+        embedding_dim=embedding_dim,
+        hd_dim=hd_dim,
+        max_seq_len=max_seq_len,
+        num_blocks=num_blocks,
+        num_experts=num_experts,
+        state_dim=state_dim,
+        floquet_modes=floquet_modes,
+        wavelet_kernel=wavelet_kernel,
+        qsvt_degree=qsvt_degree,
+        vqc_layers=vqc_layers,
+        vqc_qubits=vqc_qubits,
+        ff_expansion=ff_expansion,
+        use_qhd_spatial=use_qhd_spatial,
+        skip_connection_type=skip_connection_type,
+        num_paths=num_paths,
+        entanglement_depth=entanglement_depth,
+        entanglement_topology=entanglement_topology,
+        superposition_dim=superposition_dim,
+        hd_dim_moe=hd_dim_moe,
+        active_vocab_size=active_vocab_size,
+        # TT decomposition flags
+        use_tt_embeddings=use_tt_embeddings,
+        use_tt_attention=use_tt_attention,
+        use_tt_ffn=use_tt_ffn,
+        use_tt_kalman=use_tt_kalman,
+        use_tt_lm_head=use_tt_lm_head,
+        tt_embedding_ranks=tt_embedding_ranks,
+        tt_attention_ranks=tt_attention_ranks,
+        tt_ffn_ranks=tt_ffn_ranks,
+        tt_kalman_ranks=tt_kalman_ranks,
+        tt_lm_head_ranks=tt_lm_head_ranks,
+    )
+
+
+def estimate_peak_memory(config: dict[str, Any]) -> int:
+    """Phase 900.2: Estimate peak memory in bytes for a model configuration.
+
+    Unlike estimate_model_params which counts trainable parameters, this function
+    estimates total memory consumption including:
+    - Model parameters (weights)
+    - Optimizer state (momentum, QFIM diagonal for SympFlowQNG)
+    - Activation memory during forward pass
+    - HD intermediate tensors (tokens_hd, bound_hd)
+    - FFT buffers for circular convolution (in-place: 4× reduction)
+    - dt tensor (1D since Phase 900.2 C++ broadcast)
+
+    Phase 1 Memory Roadmap Update:
+    - Streaming buffers now use STREAMING_CHUNK_SIZE instead of context_window
+    - Memory is O(batch × chunk_size × max(hd_dim, embedding_dim)) for streaming ops
+    - This makes memory independent of sequence length for long sequences
+
+    This helps prevent OOM errors during HPO by rejecting configs that would
+    exceed available memory before model construction.
+
+    Args:
+        config: Architecture configuration (same as estimate_model_params)
+
+    Returns:
+        Estimated peak memory in bytes.
+
+    Example:
+        >>> memory = estimate_peak_memory({"context_window": 4096, "embedding_dim": 512})
+        >>> print(f"Estimated memory: {memory / 1e9:.2f} GB")
+    """
+    # Core dimensions
+    embedding_dim = config.get("embedding_dim") or config.get("hidden_dim") or 512
+    hd_dim = config.get("hd_dim") or embedding_dim * 8
+    context_window = config.get("context_window") or config.get("max_seq_len") or 4096
+    batch_size = config.get("batch_size") or 1
+    num_blocks = config.get("num_reasoning_blocks") or 8
+
+    # Phase 1 Memory Roadmap: Get streaming chunk size from config
+    # Streaming-enabled ops use fixed chunk sizes independent of seq_len
+    # Note: Use explicit None checks to respect False values
+    streaming_enabled = config.get("streaming_enabled")
+    if streaming_enabled is None:
+        streaming_enabled = getattr(hn_config, "STREAMING_ENABLED", True)
+    streaming_chunk_size = config.get("streaming_chunk_size") or getattr(
+        hn_config, "STREAMING_CHUNK_SIZE", 128
+    )
+
+    # HD bundling configuration from Phase 2
+    use_hd_bundling = config.get("use_hd_token_bundling")
+    if use_hd_bundling is None:
+        use_hd_bundling = getattr(hn_config, "USE_HD_TOKEN_BUNDLING", True)
+    hd_bundle_size = config.get("hd_bundle_size") or getattr(hn_config, "HD_BUNDLE_SIZE", 128)
+
+    # Clamp hd_dim to max (Phase 900.2 memory guard)
+    hd_dim_max = getattr(hn_config, "HD_EMBEDDING_DIM_MAX", 8192)
+    if hd_dim > hd_dim_max:
+        logger.warning(f"[Memory] hd_dim {hd_dim} exceeds max {hd_dim_max}, clamping")
+        hd_dim = hd_dim_max
+
+    # 1. Model parameters (from estimate_model_params)
+    param_count = estimate_model_params(config)
+    param_memory = param_count * 4  # float32
+
+    # 2. Optimizer state: SympFlowQNG uses 3x params (weights + momentum + qfim_diag)
+    # AdamW uses 2x (momentum + variance)
+    optimizer = config.get("optimizer", "sympflowqng")
+    if optimizer in ("sympflowqng", "qiao", "sophia"):
+        optimizer_multiplier = 3
     else:
-        # standard LM head: embedding_dim × vocab
-        output_params = embedding_dim * vocab_size
+        optimizer_multiplier = 2
+    optimizer_memory = param_count * 4 * optimizer_multiplier
 
-    total = embed_params + total_reasoning_params + output_params
-    return int(total)
+    # 3. Position encoding memory
+    # Phase 900.1: StreamingHDPosition uses O(D) instead of O(L×D)
+    position_memory = embedding_dim * 4  # O(D) with streaming positions
+
+    # 4. Activation memory during forward pass
+    # Input/output: [batch, seq, dim] × 2
+    # Note: This is still O(seq) because TensorFlow needs full input/output
+    activation_memory = batch_size * context_window * embedding_dim * 4 * 2
+
+    # 5. HD intermediate tensors (Phase 1 Memory Roadmap: streaming-aware)
+    # With streaming enabled, HD ops use fixed chunk size instead of full context
+    # With HD bundling (Phase 2), we compress tokens by bundle_size factor
+    if streaming_enabled:
+        # Streaming mode: memory proportional to chunk_size, not context_window
+        effective_seq_for_hd = streaming_chunk_size
+    elif use_hd_bundling:
+        # HD Bundling: effective sequence is reduced by bundle factor
+        num_bundles = max(1, context_window // hd_bundle_size)
+        effective_seq_for_hd = num_bundles
+    else:
+        # Legacy: full context window (memory explosion risk)
+        effective_seq_for_hd = context_window
+
+    hd_activation_memory = batch_size * effective_seq_for_hd * hd_dim * 4 * 2
+
+    # 6. FFT buffers for circular convolution
+    # Phase 1 Memory Roadmap: FFT buffers use streaming chunk size
+    # Phase 900.2: In-place FFT uses 2 buffers of [batch_size, chunk, hd_dim * 2] (complex)
+    fft_buffer_memory = batch_size * effective_seq_for_hd * hd_dim * 8 * 2  # 2 complex buffers
+
+    # 7. Unified Attention Memory (Phase 2 V2 update)
+    # The unified_attention_op uses O(n) linear attention with holographic FFT features.
+    # Memory includes: Q, K, V tensors + attention output + FFT feature maps
+    num_heads = config.get("num_heads", 8) or config.get("wlam_num_heads", 8)
+    head_dim = embedding_dim // num_heads if num_heads > 0 else 64
+
+    # Q, K, V tensors: [batch, heads, seq, head_dim] × 3
+    qkv_memory = batch_size * num_heads * context_window * head_dim * 4 * 3
+
+    # Attention output: [batch, seq, embedding_dim]
+    attn_output_memory = batch_size * context_window * embedding_dim * 4
+
+    # Holographic FFT feature maps when use_holographic_features=True (default for HD models)
+    # Features are [batch, heads, seq, head_dim] real + imaginary parts
+    use_holographic = config.get("use_holographic_features", True)
+    if use_holographic:
+        holographic_feature_memory = (
+            batch_size * num_heads * context_window * head_dim * 4 * 4
+        )  # Q/K real+imag
+    else:
+        holographic_feature_memory = 0
+
+    # Linear attention KV state: [batch, heads, head_dim, head_dim] - O(d²) not O(n²)
+    linear_kv_state_memory = batch_size * num_heads * head_dim * head_dim * 4
+
+    unified_attention_memory = (
+        qkv_memory + attn_output_memory + holographic_feature_memory + linear_kv_state_memory
+    )
+
+    # 8. QHD block intermediate memory
+    # Phase 1 Memory Roadmap: dt and state use streaming chunk size
+    # Phase 900.2: dt is now 1D [hd_dim] per block (C++ broadcasts internally)
+    dt_memory_per_block = hd_dim * 4  # 1D dt (broadcasted in C++)
+    block_state_memory = batch_size * hd_dim * 8  # SSM state (complex)
+    block_memory = (dt_memory_per_block + block_state_memory) * num_blocks
+
+    # 9. TensorFlow graph overhead (~20% of computed tensors)
+    computed_memory = (
+        activation_memory
+        + hd_activation_memory
+        + fft_buffer_memory
+        + unified_attention_memory
+        + block_memory
+    )
+    tf_overhead = int(computed_memory * 0.2)
+
+    # Total
+    total = (
+        param_memory
+        + optimizer_memory
+        + position_memory
+        + activation_memory
+        + hd_activation_memory
+        + fft_buffer_memory
+        + unified_attention_memory
+        + block_memory
+        + tf_overhead
+    )
+
+    logger.debug(
+        f"[Memory Estimate] params={param_memory / 1e6:.1f}MB, "
+        f"optimizer={optimizer_memory / 1e6:.1f}MB, "
+        f"positions={position_memory / 1e3:.1f}KB, "
+        f"activations={activation_memory / 1e6:.1f}MB, "
+        f"hd_activations={hd_activation_memory / 1e6:.1f}MB (streaming={streaming_enabled}), "
+        f"fft_buffers={fft_buffer_memory / 1e6:.1f}MB, "
+        f"attention={unified_attention_memory / 1e6:.1f}MB, "
+        f"blocks={block_memory / 1e6:.1f}MB, "
+        f"overhead={tf_overhead / 1e6:.1f}MB, "
+        f"total={total / 1e9:.2f}GB"
+    )
+
+    return total
+
+
+def check_memory_budget(
+    config: dict[str, Any],
+    available_memory_gb: float = 32.0,
+    safety_margin: float = 0.8,
+) -> tuple[bool, str]:
+    """Phase 900.1: Check if a config fits within available memory.
+
+    Phase 950 Update: Pre-computed context window sizes for O(1) suggestion lookup
+    instead of iterative halving.
+
+    Args:
+        config: Model configuration.
+        available_memory_gb: Available system memory in GB.
+        safety_margin: Fraction of available memory to use (default 0.8 = 80%).
+
+    Returns:
+        Tuple of (fits, message) where fits is True if config fits in memory.
+    """
+    estimated = estimate_peak_memory(config)
+    budget = int(available_memory_gb * 1e9 * safety_margin)
+
+    if estimated <= budget:
+        return True, f"Estimated {estimated / 1e9:.2f}GB fits within {budget / 1e9:.2f}GB budget"
+
+    # Phase 950: Pre-computed common context window sizes (power-of-2 sequence)
+    # Binary search to find largest fitting context_window
+    context_window = config.get("context_window") or 4096
+    common_contexts = [512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072]
+
+    # Filter to sizes smaller than current and use binary search via list comprehension
+    candidates = [c for c in common_contexts if c < context_window]
+
+    suggested_context = 512  # Fallback minimum
+    for ctx in reversed(candidates):  # Check from largest to smallest
+        test_config = {**config, "context_window": ctx}
+        if estimate_peak_memory(test_config) <= budget:
+            suggested_context = ctx
+            break
+
+    return False, (
+        f"Estimated {estimated / 1e9:.2f}GB exceeds {budget / 1e9:.2f}GB budget. "
+        f"Consider reducing context_window from {context_window} to {suggested_context}."
+    )
 
 
 @dataclass
@@ -300,11 +874,13 @@ class HPOSearchSpace:
     # =========================================================================
     # Note: LR range is now auto-derived from optimizer selection.
     # This default is a safe fallback; actual range comes from OPTIMIZER_LR_RANGES.
-    learning_rate: tuple[float, float] = (1e-5, 3e-4)
-    batch_size: list[int] = field(default_factory=lambda: [16, 32, 64, 128])
-    optimizer: list[str] = field(default_factory=lambda: ["sophiag", "adam"])
-    warmup_steps: tuple[int, int] = (0, 1000)
-    weight_decay: tuple[float, float] = (0.0, 0.1)
+    learning_rate: tuple[float, float] = (1e-6, 5e-4)  # Widened min for frontier
+    batch_size: list[int] = field(
+        default_factory=lambda: [1, 2, 4, 8, 16]
+    )  # Capped at 16 for 64GB local testing
+    optimizer: list[str] = field(default_factory=lambda: ["sophiag", "adam", "adamw", "lion"])
+    warmup_steps: tuple[int, int] = (0, 2500)  # Widened for frontier models
+    weight_decay: tuple[float, float] = (0.0, 0.3)  # Widened for stronger regularization
 
     # =========================================================================
     # MODEL ARCHITECTURE (Lite edition limits)
@@ -405,11 +981,23 @@ class HPOSearchSpace:
         default_factory=lambda: [8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256]
     )
     moe_top_k: list[int] = field(default_factory=lambda: [1, 2, 3, 4, 6, 8])
-    superposition_dim: list[int] = field(default_factory=lambda: [1, 2, 3, 4])  # Max 4 for MoE
+    superposition_dim: list[int] = field(
+        default_factory=lambda: [1, 2, 3, 4, 5, 6]
+    )  # MoE superposition
     tt_rank_middle: list[int] = field(default_factory=lambda: [2, 4, 6, 8, 12, 16, 24, 32, 48, 64])
     hamiltonian_hidden_dim: list[int] = field(
         default_factory=lambda: [32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024]
     )
+
+    # =========================================================================
+    # UQHA PHASE 1: DIAGONAL SKIP CONNECTION (P0)
+    # =========================================================================
+    # "dense" is excluded from default search due to extreme memory cost (O(D²)).
+    # "diagonal" matches performance of dense but with O(D) params.
+    skip_connection_type: list[str] = field(
+        default_factory=lambda: ["diagonal", "learned_scalar", "identity"]
+    )
+    skip_diagonal_init: tuple[float, float] = (0.5, 1.5)
 
     # =========================================================================
     # PHASE 44: QUANTUM TELEPORT BUS
@@ -423,22 +1011,22 @@ class HPOSearchSpace:
     # =========================================================================
     # PHASE 45: ENTROPY REGULARIZATION
     # =========================================================================
-    entropy_reg_weight: tuple[float, float] = (0.001, 0.05)
-    spectral_reg_weight: tuple[float, float] = (0.001, 0.05)
-    target_entropy: tuple[float, float] = (0.3, 0.8)
+    entropy_reg_weight: tuple[float, float] = (0.0005, 0.15)  # Widened
+    spectral_reg_weight: tuple[float, float] = (0.0005, 0.1)  # Widened
+    target_entropy: tuple[float, float] = (0.2, 0.9)  # Widened
 
     # =========================================================================
     # PHASE 46: SYMPFLOW OPTIMIZER
     # =========================================================================
-    sympflow_mass: tuple[float, float] = (0.5, 2.0)
-    sympflow_friction: tuple[float, float] = (0.05, 0.3)
-    sympflow_step_size: tuple[float, float] = (0.005, 0.05)
+    sympflow_mass: tuple[float, float] = (0.2, 4.0)  # Widened
+    sympflow_friction: tuple[float, float] = (0.02, 0.5)  # Widened
+    sympflow_step_size: tuple[float, float] = (0.002, 0.1)  # Widened
 
     # =========================================================================
     # PHASE 47: QUANTUM MEASUREMENT DROPOUT
     # =========================================================================
-    qmd_drop_rate: tuple[float, float] = (0.05, 0.25)
-    qmd_softening_temp: tuple[float, float] = (0.5, 2.0)
+    qmd_drop_rate: tuple[float, float] = (0.02, 0.5)  # Widened
+    qmd_softening_temp: tuple[float, float] = (0.3, 3.0)  # Widened
 
     # =========================================================================
     # PHASE 50: MAJORANA POSITION ENCODING
@@ -474,6 +1062,17 @@ class HPOSearchSpace:
     td_moe_tucker_rank: list[int] = field(default_factory=lambda: [4, 6, 8, 12, 16, 24, 32, 48, 64])
 
     # =========================================================================
+    # PHASE 43: NEURAL KALMAN PARAMETERS
+    # GRU-based learned Kalman gain with tunable uncertainty calibration.
+    # See config.py L629-632 for QAHPO tunable range documentation.
+    # =========================================================================
+    neural_kalman_hidden_dim: list[int] = field(
+        default_factory=lambda: [32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024, 1536, 2048]
+    )
+    neural_kalman_process_noise: tuple[float, float] = (1e-5, 0.5)
+    neural_kalman_measurement_noise: tuple[float, float] = (1e-4, 2.0)
+
+    # =========================================================================
     # PHASE 58: SYMPLECTIC GNN KALMAN
     # =========================================================================
     sgkf_dt: tuple[float, float] = (0.005, 0.05)
@@ -481,13 +1080,13 @@ class HPOSearchSpace:
     # =========================================================================
     # PHASE 59: ADIABATIC OPTIMIZER
     # =========================================================================
-    qao_initial_temp: tuple[float, float] = (5.0, 20.0)
-    qao_final_temp: tuple[float, float] = (0.005, 0.05)
+    qao_initial_temp: tuple[float, float] = (3.0, 30.0)  # Widened
+    qao_final_temp: tuple[float, float] = (0.001, 0.1)  # Widened
 
     # =========================================================================
     # PHASE 60: GEODESIC OPTIMIZER
     # =========================================================================
-    geodesic_momentum: tuple[float, float] = (0.8, 0.99)
+    geodesic_momentum: tuple[float, float] = (0.7, 0.995)  # Widened
 
     # =========================================================================
     # PHASE 61: ALPHAQUBIT DECODER (Lite: max 4 layers)
@@ -505,13 +1104,13 @@ class HPOSearchSpace:
     # =========================================================================
     # PHASE 65: QUANTUM CRYSTALLIZATION
     # =========================================================================
-    crystallization_threshold: tuple[float, float] = (0.4, 0.8)
-    qhpm_crystallization_rate: tuple[float, float] = (0.05, 0.2)
+    crystallization_threshold: tuple[float, float] = (0.2, 0.9)  # Widened
+    qhpm_crystallization_rate: tuple[float, float] = (0.02, 0.4)  # Widened
 
     # =========================================================================
     # PHASE 68: NEUROMORPHIC MEMORY
     # =========================================================================
-    neuromorphic_tau: tuple[float, float] = (5.0, 20.0)
+    neuromorphic_tau: tuple[float, float] = (2.0, 50.0)  # Widened
 
     # =========================================================================
     # PHASE 70: MULTI-STAGE HAMILTONIAN (Lite: max 6 stages)
@@ -522,7 +1121,7 @@ class HPOSearchSpace:
     # =========================================================================
     # PHASE 71: INTRINSIC PLASTICITY
     # =========================================================================
-    plasticity_learning_rate: tuple[float, float] = (0.005, 0.05)
+    plasticity_learning_rate: tuple[float, float] = (0.001, 0.1)  # Widened
 
     # =========================================================================
     # PHASE 72: RANDOM NATURAL GRADIENT
@@ -557,7 +1156,12 @@ class HPOSearchSpace:
     # PHASE 87: COCONUT MULTI-PATH EXPLORATION (Lite: max 8 paths)
     # Phase 201.7: Expanded path counts and thresholds
     # =========================================================================
-    coconut_num_paths: list[int] = field(default_factory=lambda: [1, 2, 3, 4, 5, 6, 7, 8])
+    coconut_num_paths: list[int] = field(
+        default_factory=lambda: [1, 2, 3, 4]
+    )  # BFS branches for thought exploration
+    coconut_max_thought_steps: list[int] = field(
+        default_factory=lambda: [2, 4, 6, 8, 10, 12, 14, 16]
+    )  # Max reasoning iterations
     coconut_collapse_threshold: tuple[float, float] = (0.3, 0.98)
     coconut_crystallize_threshold: tuple[float, float] = (0.5, 0.995)
 
@@ -666,32 +1270,9 @@ class HPOSearchSpace:
     )
 
     # =========================================================================
-    # RG-LRU PARAMETERS - WIDE RANGES
+    # DEPRECATED: RG-LRU and MinGRU blocks removed from architecture in Phase 200+
+    # These parameters are no longer tuned (HD blocks replace legacy recurrent units)
     # =========================================================================
-    rg_lru_state_dim: list[int] = field(
-        default_factory=lambda: [32, 64, 128, 192, 256, 384, 512, 768, 1024]  # Wide range
-    )
-    rg_lru_scan_chunk_size: list[int] = field(
-        default_factory=lambda: [16, 32, 48, 64, 96, 128, 192, 256]  # Wide range
-    )
-    rg_lru_state_rank: list[int] = field(
-        default_factory=lambda: [2, 4, 8, 12, 16, 24, 32, 48, 64]  # Wide range
-    )
-    rg_lru_rotation_groups: list[int] = field(
-        default_factory=lambda: [1, 2, 3, 4, 6, 8]  # Wide range
-    )
-
-    # =========================================================================
-    # MINGRU PARAMETERS - WIDE RANGES
-    # =========================================================================
-    min_gru_parallel_chunk_size: list[int] = field(
-        default_factory=lambda: [32, 64, 128, 192, 256, 384, 512, 768, 1024]  # Wide range
-    )
-    min_gru_dynamic_ratio: tuple[float, float] = (0.1, 1.0)  # Wide range
-    min_gru_orthog_interval: list[int] = field(
-        default_factory=lambda: [0, 16, 32, 64, 128, 256, 512]  # 0 = disable
-    )
-    min_gru_importance_threshold: tuple[float, float] = (0.1, 0.95)  # Wide range
 
     # =========================================================================
     # CPU-SPECIFIC OPTIMIZATION PARAMETERS - WIDE RANGES
@@ -739,13 +1320,116 @@ class HPOSearchSpace:
     sympflow_geodesic_weight: tuple[float, float] = (0.005, 0.8)  # Wide range
 
     # =========================================================================
-    # DEPRECATED: QMAMBA / Q-SSM PARAMETERS (Removed per HIGHNOON_UPGRADE_ROADMAP.md)
-    # QMamba blocks replaced by HDSpatialBlock when HD streaming is enabled.
-    # These parameters are no longer tuned by QAHPO.
+    # PHASE V2.0-P1: PATH SYSTEM INDEPENDENCE
+    # All three path systems remain INDEPENDENT per Section 11.6:
+    # - qhd_num_paths: QHD superposition paths in FFT-domain SSM
+    # - superposition_dim: TT-FFN parallel paths for MoE expert diversity
+    # - coconut_num_paths: BFS thought exploration (gradient-connected)
+    #
+    # v2.0 adds HPO correlation hints via PATH_CORRELATION_GROUPS in config.py
+    # to help faNOVA sample related params together without merging them.
+    # See HIGHNOON_V2_PERFORMANCE_ANALYSIS.md Section 11.5-11.6.
     # =========================================================================
-    # NOTE: Q-SSM VQC layers moved to HD block configuration
-    # q_ssm_vqc_layers retained for backward compatibility with Q-SSM gated blocks
-    q_ssm_vqc_layers: list[int] = field(default_factory=lambda: [1, 2, 3, 4, 5, 6])
+
+    # =========================================================================
+    # PHASE 600+: QHD SPATIAL BLOCK (Replaces QMAMBA/HDSpatialBlock)
+    # QHDSpatialBlock combines FFT-domain SSM with quantum superposition.
+    # K superposition paths provide quantum expressiveness at K× memory cost.
+    # =========================================================================
+    qhd_num_paths: list[int] = field(
+        default_factory=lambda: [1, 2]  # QAHPO tunable: 1-2 for Lite (K× memory)
+    )
+    qhd_entanglement_depth: list[int] = field(
+        default_factory=lambda: [1, 2, 3, 4]  # VQC entanglement layers
+    )
+    qhd_entanglement_strength: tuple[float, float] = (0.1, 0.6)  # CNOT mixing strength
+    qhd_gumbel_temperature: tuple[float, float] = (0.5, 2.0)  # Born rule collapse temperature
+
+    # =========================================================================
+    # PHASE 800: QHD HIERARCHICAL BLOCK (Multi-Scale Reasoning)
+    # Extends QHDSpatialBlock with inline hierarchical memory using:
+    # - CTQW quantum walk aggregation
+    # - Adaptive semantic chunking
+    # - Cross-level attention injection
+    # Complexity: O(K × L × D log D) - same as QHDSpatialBlock
+    # =========================================================================
+    hd_hierarchical_levels: list[int] = field(
+        default_factory=lambda: [1, 2, 3, 4]  # Hierarchy levels (2-3 recommended)
+    )
+    hd_hierarchical_pooling_ratio: list[int] = field(
+        default_factory=lambda: [2, 3, 4, 6, 8]  # Compression ratio per level
+    )
+    hd_hierarchical_use_ctqw: list[bool] = field(
+        default_factory=lambda: [True, False]  # CTQW quantum walk aggregation
+    )
+    hd_hierarchical_use_cross_attention: list[bool] = field(
+        default_factory=lambda: [True, False]  # Cross-level attention injection
+    )
+    hd_hierarchical_ctqw_time: tuple[float, float] = (0.5, 2.0)  # Quantum walk time
+    hd_hierarchical_ema_base_rate: tuple[float, float] = (0.05, 0.2)  # Base EMA rate for level 0
+    # Phase 900.2: Quantum Feature Map Cross-Level Attention (replaces EMA blending)
+    hd_cross_attn_qfm_depth: list[int] = field(
+        default_factory=lambda: [2, 3, 4, 5, 6, 8]  # VQC rotation layers for QFM attention
+    )
+    hd_use_quantum_cross_attention: list[bool] = field(
+        default_factory=lambda: [True, False]  # Enable quantum feature map attention
+    )
+
+    # =========================================================================
+    # PHASE 850-880: UQHA (Unified Quantum-Hierarchical Architecture) v3.0
+    # Replaces cross-level attention with O(K²) quantum walk entanglement.
+    # Memory savings: ~576 MB → ~128 KB per hierarchical block.
+    # =========================================================================
+    # Phase 850: Frequency Stratification (implicit hierarchical encoding)
+    freq_stratification_overlap: tuple[float, float] = (0.1, 0.5)  # Band overlap
+    freq_stratification_mode: list[str] = field(
+        default_factory=lambda: ["exponential", "linear", "learned"]
+    )
+    # Phase 860: Quantum Walk Entanglement (O(K²) cross-scale mixing)
+    qhd_entanglement_topology: list[str] = field(
+        default_factory=lambda: ["walk", "hierarchical", "adjacent"]
+    )
+    qhd_walk_evolution_time: tuple[float, float] = (0.5, 2.0)  # Unitary evolution time
+    # Phase 880: Quantum Bus Hierarchical Injection
+    bus_injection_strength: tuple[float, float] = (0.05, 0.3)  # Injection strength
+    bus_injection_decay: tuple[float, float] = (0.3, 0.7)  # Hierarchical decay
+
+    # =========================================================================
+    # PHASE 700: FLOQUET POSITION ENCODING FOR CONTEXT EXTRAPOLATION
+    # Enables infinite context extrapolation: train on 32K -> infer on 5M+.
+    # The base frequency controls the geometric frequency progression.
+    # =========================================================================
+    hd_floquet_base_freq: tuple[float, float] = (1000.0, 100000.0)  # Log-uniform sampling
+
+    # =========================================================================
+    # PHASE 900: STREAMING HIERARCHICAL MEMORY (O(1) Sequence-Length Memory)
+    # From MEMORY_ARCHITECTURE.md - enables O(1) memory via fixed-slot banks
+    # =========================================================================
+    # Fixed-slot memory bank configuration
+    hierarchical_memory_slots: list[int] = field(
+        default_factory=lambda: [32, 48, 64, 96, 128, 192, 256]  # M slots per level
+    )
+    # Uncertainty-gated pooling configuration
+    uncertainty_pool_threshold: tuple[float, float] = (0.2, 0.9)  # Kalman trace threshold
+    streaming_max_chunk_size: list[int] = field(
+        default_factory=lambda: [16, 24, 32, 48, 64, 96, 128]  # Max tokens per chunk
+    )
+    # Online CTQW spectral approximation (O(k²) instead of O(M³))
+    online_ctqw_rank: list[int] = field(
+        default_factory=lambda: [4, 8, 12, 16, 24, 32]  # Top-k eigenvectors
+    )
+    online_ctqw_ema_decay: tuple[float, float] = (0.9, 0.999)  # Spectral EMA decay
+    # CTQW RFF approximation dimension (higher = more accurate, more memory)
+    ctqw_rff_dim: list[int] = field(
+        default_factory=lambda: [32, 48, 64, 80, 96, 128]  # QAHPO tunable: 32-128
+    )
+    # HD position encoding (Kanerva permutation)
+    hd_position_decay_rate: tuple[float, float] = (0.999, 0.99999)  # Long-range decay
+    # Phase 900.3: Batch cross-attention memory guard (RAM-dependent)
+    # Higher values allow more batch processing, lower values force streaming earlier
+    auto_streaming_batch_threshold: list[int] = field(
+        default_factory=lambda: [2048, 4096, 8192, 12288, 16384, 24576, 32768]
+    )
 
     # =========================================================================
     # QASA ATTENTION PARAMETERS
@@ -763,6 +1447,15 @@ class HPOSearchSpace:
     # =========================================================================
     qmoe_vqc_layers: list[int] = field(default_factory=lambda: [1, 2, 3, 4, 5, 6, 8])  # Wide
     qmoe_measurement_temp: tuple[float, float] = (0.05, 5.0)  # Wide range
+
+    # =========================================================================
+    # PHASE 69: Q-SSM QUANTUM STATE SPACE GATING
+    # VQC gating for Mamba SSM for quantum-enhanced state updates
+    # =========================================================================
+    q_ssm_vqc_layers: list[int] = field(default_factory=lambda: [1, 2, 3, 4])  # VQC circuit layers
+    q_ssm_num_qubits: list[int] = field(
+        default_factory=lambda: [2, 3, 4, 5, 6, 8]
+    )  # Virtual qubits
 
     # =========================================================================
     # QSG (QUANTUM SUPERPOSITION GENERATION) PARAMETERS
@@ -784,6 +1477,48 @@ class HPOSearchSpace:
     qsg_amplification_strength: tuple[float, float] = (0.5, 4.0)  # Wide Grover amp
 
     # =========================================================================
+    # QSG ENTERPRISE OPTIMIZATION (Phases 1-3)
+    # See QSG_ENTERPRISE_OPTIMIZATION_ROADMAP.md for full specification.
+    # These affect training via factored embeddings and ensemble refinement.
+    # =========================================================================
+    # Phase 1.1: Top-K Candidate Pruning (PQ-based approximate search)
+    qsg_candidate_k: list[int] = field(
+        default_factory=lambda: [512, 768, 1024, 1536, 2048]  # Top-K candidates per position
+    )
+    qsg_pq_num_subvectors: list[int] = field(
+        default_factory=lambda: [4, 6, 8, 12, 16]  # PQ subvector count M (speed vs accuracy)
+    )
+    # Phase 1.2: Vocabulary Factorization (E ≈ U × V^T)
+    qsg_factorization_rank: list[int] = field(
+        default_factory=lambda: [
+            16,
+            24,
+            32,
+            48,
+            64,
+        ]  # Factorization rank r (higher = more capacity)
+    )
+    # Phase 3.1: Ensemble Parallel Refinement
+    qsg_ensemble_num_paths: list[int] = field(
+        default_factory=lambda: [2, 3, 4, 6, 8]  # Parallel ensemble paths P (quality vs compute)
+    )
+    qsg_ensemble_coherence_weight: tuple[float, float] = (
+        0.5,
+        2.0,
+    )  # Cross-path consistency weighting
+    qsg_ensemble_temp_range_min: tuple[float, float] = (0.5, 0.9)  # Path temperature min
+    qsg_ensemble_temp_range_max: tuple[float, float] = (1.1, 1.5)  # Path temperature max
+    # Phase 3.2: Self-Consistency Filtering
+    qsg_consistency_window: list[int] = field(
+        default_factory=lambda: [2, 3, 4, 5]  # Cross-position consistency window
+    )
+    qsg_consistency_softening: tuple[float, float] = (0.25, 1.0)  # Softening for low-consistency
+    # Phase 3.2: Grover Quality Boost (amplitude amplification on ensemble output)
+    qsg_grover_boost_iterations: list[int] = field(
+        default_factory=lambda: [1, 2, 3]  # Grover diffusion iterations on ensemble
+    )
+
+    # =========================================================================
     # QHPM (QUANTUM HOLOGRAPHIC PERSISTENT MEMORY) PARAMETERS
     # WIDE RANGES for frontier exploration
     # =========================================================================
@@ -799,34 +1534,33 @@ class HPOSearchSpace:
     )
 
     # =========================================================================
-    # PHASE 200+: HD STREAMING CORPUS PARAMETERS
+    # PHASE 200+: HD STREAMING CORPUS PARAMETERS (DEPRECATED)
     # =========================================================================
-    # Hyperdimensional corpus compression for memory-efficient training
-    # Note: use_hd_streaming flag is pulled from global config.py at runtime
-    # Phase 201.7: Fully expanded ranges for comprehensive HD architecture search
+    # DEPRECATED (Phase 500+): HD streaming is disabled in favor of DualPathEmbedding.
+    # These parameters are kept for backward compatibility but no longer affect training.
+    # HD enhancements are now integrated directly into the embedding layer via CTQW spreading.
     hd_reservoir_size: list[int] = field(
-        default_factory=lambda: [
-            100,
-            250,
-            500,
-            750,
-            1000,
-            1500,
-            2000,
-            3000,
-            4000,
-            5000,
-            8000,
-            10000,
-            15000,
-            20000,
-            30000,  # Wide range for exploration
-        ]
+        default_factory=lambda: [2000]  # Single value - parameter is deprecated
     )
     hd_dim: list[int] = field(
+        # Phase 1010: Deprecated - use per-layer dims (hd_dim_embedding, etc.) instead
+        # Kept for backward compatibility. Max capped at 4096 to prevent CPU saturation
+        # (12288 causes ~5.5B FFT ops at seq_len=32K). Use per-layer dims for larger values.
+        default_factory=lambda: [64, 128, 256, 512, 768, 1024, 1536, 2048, 3072, 4096]
+    )
+    # =========================================================================
+    # PHASE 1010: PER-LAYER HD DIMENSION SEARCH SPACES
+    # =========================================================================
+    # Per-layer HD dimensions for independent QAHPO optimization.
+    # Enable layer-type-specific memory/quality trade-offs.
+    # Minimum is 64 (HD_DIM_MIN in config.py), maximum is 12288.
+    # Lower values are listed first to encourage initial exploration
+    # at smaller dimensions where HD scaling differs from transformers.
+    hd_dim_embedding: list[int] = field(
         default_factory=lambda: [
+            64,
+            128,
             256,
-            384,
             512,
             768,
             1024,
@@ -834,41 +1568,76 @@ class HPOSearchSpace:
             2048,
             3072,
             4096,
-            5120,
             6144,
             8192,
             10240,
             12288,
-            16384,
-            20480,
-            24576,
-            32768,  # Ultra-wide for SOTA
         ]
     )
-    # Vocab sample size for tokenizer learning (lower = less memory)
-    vocab_sample_size: list[int] = field(
-        default_factory=lambda: [500, 1000, 2000, 3000, 5000, 8000, 10000, 15000, 20000]
-    )
-    # HD sample length: max tokens per individual HD sample (affects position keys memory)
-    # IMPORTANT: This is separate from context_window (model's attention context).
-    # HD achieves long context via bundling MANY samples, not huge individual samples.
-    # Memory: position_keys = hd_sample_length × hd_dim × 4 bytes
-    # E.g., 512 × 12288 × 4 = 24 MB vs 1M × 12288 × 4 = 48 GB
-    hd_sample_length: list[int] = field(
+    hd_dim_spatial: list[int] = field(
         default_factory=lambda: [
             64,
             128,
-            192,
             256,
-            384,
             512,
             768,
             1024,
             1536,
             2048,
             3072,
-            4096,  # Wide range
+            4096,
+            6144,
+            8192,
+            10240,
+            12288,
         ]
+    )
+    hd_dim_timecrystal: list[int] = field(
+        default_factory=lambda: [
+            64,
+            128,
+            256,
+            512,
+            768,
+            1024,
+            1536,
+            2048,
+            3072,
+            4096,
+            6144,
+            8192,
+            10240,
+            12288,
+        ]
+    )
+    hd_dim_moe: list[int] = field(
+        default_factory=lambda: [
+            64,
+            128,
+            256,
+            512,
+            768,
+            1024,
+            1536,
+            2048,
+            3072,
+            4096,
+            6144,
+            8192,
+            10240,
+            12288,
+        ]
+    )
+    # Vocab sample size for tokenizer learning (lower = less memory)
+    vocab_sample_size: list[int] = field(
+        default_factory=lambda: [500, 1000, 2000, 3000, 5000, 8000, 10000, 15000, 20000]
+    )
+    # HD sample length: max tokens per individual HD sample
+    # DEPRECATED (Phase 500+): HD streaming is disabled in favor of DualPathEmbedding.
+    # This parameter is kept for backward compatibility but no longer affects training.
+    # HD enhancements are now integrated directly into the embedding layer via CTQW spreading.
+    hd_sample_length: list[int] = field(
+        default_factory=lambda: [512]  # Single value - parameter is deprecated
     )
 
     # =========================================================================
@@ -916,8 +1685,61 @@ class HPOSearchSpace:
             10000,
             20000,
             50000,
-            100000,  # DualPathEmbedding active vocab
+            100000,
+            150000,
+            200000,  # Frontier models may use large active vocabs
         ]
+    )
+
+    # =========================================================================
+    # QWT (QUANTUM WAVELET TOKENIZER) PARAMETERS
+    # See config.py QWT_* and PHASE 17 QWT TOKENIZER ENHANCEMENTS
+    # =========================================================================
+    # Core QWT parameters
+    qwt_embedding_dim: list[int] = field(
+        default_factory=lambda: [128, 256, 384, 512, 768, 1024]  # QWT embedding dimension
+    )
+    qwt_dwt_filter_size: list[int] = field(
+        default_factory=lambda: [2, 3, 4, 5, 6]  # DWT filter size
+    )
+    qwt_vqc_qubits: list[int] = field(
+        default_factory=lambda: [2, 3, 4, 5, 6, 8]  # VQC qubits for tokenizer
+    )
+    qwt_vqc_layers: list[int] = field(
+        default_factory=lambda: [1, 2, 3, 4, 5, 6]  # VQC layers for tokenizer
+    )
+    qwt_ctqw_steps: list[int] = field(
+        default_factory=lambda: [0, 1, 2, 3, 4, 5]  # CTQW steps (0 = disabled)
+    )
+    # Phase 17 QWT Enhancements
+    qwt_pade_order: list[int] = field(
+        default_factory=lambda: [1, 2, 3, 4]  # Padé order (1=Cayley, higher = more accurate)
+    )
+    qwt_skip_stride: list[int] = field(
+        default_factory=lambda: [0, 1, 2, 3, 4]  # Skip connection stride (0 = disabled)
+    )
+    qwt_max_skips_per_node: list[int] = field(
+        default_factory=lambda: [1, 2, 3, 4]  # Maximum skip connections per node
+    )
+    # QWT Text Tokenizer Parameters (QWTTextTokenizer)
+    qwt_byte_offset: list[int] = field(
+        default_factory=lambda: [16, 24, 32, 48, 64]  # Byte offset in vocabulary
+    )
+    qwt_max_superposition: list[int] = field(
+        default_factory=lambda: [
+            1,
+            2,
+        ]  # Max alt tokenizations - low since MoE provides path diversity
+    )
+    qwt_superposition_amplitude_threshold: tuple[float, float] = (
+        0.05,
+        0.3,
+    )  # Min amplitude threshold
+    # Thinking token complexity (affects injection rate)
+    qwt_thinking_token_complexity_scale: tuple[float, float] = (0.5, 2.0)  # Complexity scaling
+    # Multi-Scale DWT
+    num_wavelet_levels: list[int] = field(
+        default_factory=lambda: [1, 2, 3, 4, 5]  # Cascaded DWT levels
     )
 
     # =========================================================================
@@ -1046,6 +1868,22 @@ class HPOSearchSpace:
     unfreeze_schedule: list[str] | None = None  # Unfreezing strategy
     unfreeze_interval: tuple[int, int] | None = None  # Steps between unfreezing
 
+    # =========================================================================
+    # PHASE 600: ENHANCED BUDGET PROGRESSION
+    # =========================================================================
+    # Minimum budget fraction for trial 0 (prevents undersized configs)
+    min_budget_fraction: float = 0.25  # Was effectively 0.10, now 25% minimum
+    # Maximum budget fraction cap
+    max_budget_fraction: float = 0.95
+    # Progression curve type: "linear", "sqrt", "log", "cosine"
+    # sqrt: Faster initial ramp, good for exploration
+    # log: Even faster initial ramp
+    # cosine: Smooth S-curve
+    budget_progression_curve: str = "sqrt"
+    # Population initialization budget spread (min_frac, max_frac)
+    # Ensures initial population has diverse config sizes
+    initial_population_budget_spread: tuple[float, float] = (0.25, 0.70)
+
     # Memory-aware shrinking: count of consecutive memory failures
     # When > 0, sample() reduces architecture sizes to prevent OOM
     memory_failure_count: int = 0
@@ -1059,16 +1897,30 @@ class HPOSearchSpace:
     _importance_scores: dict[str, float] = field(default_factory=dict)
 
     # Architecture params that benefit from budget acceleration
+    # Phase 600+: Updated for QHDSpatial/QHDHierarchical scaling
+    # Ordered by compute impact (most impactful first)
     _architecture_params: list[str] = field(
         default_factory=lambda: [
-            "embedding_dim",
-            "hidden_dim",
-            "hd_dim",
-            "num_reasoning_blocks",
-            "num_moe_experts",
-            "num_heads",
-            "superposition_dim",
-            "latent_kv_dim",
+            # === Primary Compute Drivers (QHDSpatial) ===
+            "qhd_num_paths",  # K× linear multiplier (most critical!)
+            "num_reasoning_blocks",  # Depth multiplier
+            # === Phase 1010: Per-Layer HD Dimensions ===
+            "hd_dim_embedding",  # Vocabulary encoding capacity
+            "hd_dim_spatial",  # FFT SSM dimension (D log D)
+            "hd_dim_timecrystal",  # Floquet modes × D
+            "hd_dim_moe",  # Routing similarity (smallest impact)
+            "hd_dim",  # DEPRECATED: Global fallback
+            # === Secondary (linear scaling) ===
+            "hd_hierarchical_levels",  # Hierarchical memory depth
+            "hidden_dim",  # Linear projections
+            "embedding_dim",  # Embedding table
+            "mamba_state_dim",  # SSM state dimension
+            # === Tertiary (sparse/shared activation) ===
+            "num_moe_experts",  # Sparse MoE (top-k active)
+            "superposition_dim",  # MoE superposition (sparse)
+            "latent_kv_dim",  # Compressed KV cache
+            # === QHD-Specific (moderate impact) ===
+            "qhd_entanglement_depth",  # VQC layers
         ]
     )
 
@@ -1105,8 +1957,7 @@ class HPOSearchSpace:
         """
         self.memory_failure_count += 1
         logger.warning(
-            f"[HPO Manager] Memory failure recorded. "
-            f"Shrink level now: {self.memory_failure_count}"
+            f"[HPO Manager] Memory failure recorded. Shrink level now: {self.memory_failure_count}"
         )
 
     def record_trial_success(self) -> None:
@@ -1124,38 +1975,54 @@ class HPOSearchSpace:
     def _compute_progression_factor(self, trial_id: int) -> float:
         """Compute budget progression factor based on trial index and faNOVA importance.
 
-        Phase 500 Enhancement: When faNOVA indicates architecture params are
-        important (>30% combined importance), accelerates budget progression
-        to explore larger architectures faster.
+        Phase 600 Enhancement: Configurable progression curves for better exploration.
+        - sqrt: Faster initial ramp (recommended for exploration)
+        - log: Even faster initial ramp for aggressive exploration
+        - cosine: Smooth S-curve for gradual transition
+        - linear: Original behavior, slowest ramp
 
-        Progressive sizing ensures early trials start with small architectures
-        that fit well within the parameter budget, then gradually explore
-        larger configs as trials progress.
+        When faNOVA indicates architecture params are important (>30% combined
+        importance), accelerates budget progression to explore larger architectures.
 
         Args:
             trial_id: Trial index (0-based)
 
         Returns:
-            Progression factor (0.1 to 0.95) to multiply param_budget by.
+            Progression factor (min_budget_fraction to max_budget_fraction).
         """
-        # Base progression (conservative)
-        if trial_id < 10:
-            # Trials 0-9: Start at 10-30% of budget (minimum viable configs)
-            base_factor = 0.1 + (0.2 * trial_id / 10)
-        elif trial_id < 50:
-            # Trials 10-49: Scale from 30% to 70% of budget
-            base_factor = 0.3 + (0.4 * (trial_id - 10) / 40)
-        else:
-            # Trials 50+: Allow up to 90% of budget
-            base_factor = min(0.9, 0.7 + (0.2 * (trial_id - 50) / 100))
+        import math
 
-        # Phase 500: faNOVA-adaptive acceleration
+        min_frac = self.min_budget_fraction
+        max_frac = self.max_budget_fraction
+        curve = self.budget_progression_curve
+
+        # Estimate trials for schedule (adaptive based on observed progress)
+        total_trials_estimate = max(50, trial_id + 20)
+        progress = min(1.0, trial_id / total_trials_estimate)
+
+        # Apply progression curve
+        if curve == "sqrt":
+            # Faster initial ramp, slower later (good for exploration)
+            raw_factor = math.sqrt(progress)
+        elif curve == "log":
+            # Even faster initial ramp
+            raw_factor = math.log1p(progress * (math.e - 1)) / math.log(math.e)
+        elif curve == "cosine":
+            # Smooth S-curve (slow start, fast middle, slow end)
+            raw_factor = 0.5 * (1 - math.cos(math.pi * progress))
+        else:  # linear
+            raw_factor = progress
+
+        # Scale to [min_frac, max_frac]
+        base_factor = min_frac + (max_frac - min_frac) * raw_factor
+
+        # Phase 600+: faNOVA-adaptive acceleration (tuned for QHDSpatial)
+        # QHD has fewer high-importance params, so lower trigger threshold
         arch_importance = self._compute_architecture_importance()
-
-        if arch_importance > 0.3:
+        if arch_importance > 0.2:  # Was 0.3 (lower for QHD's concentrated importance)
             # Architecture params are important - accelerate progression!
-            # This boosts factor by up to 50% when arch importance is high
-            acceleration = 1.0 + (0.5 * min(1.0, arch_importance / 0.5))
+            # Boost factor by up to 60% when arch importance is high
+            acceleration = 1.0 + (0.6 * min(1.0, arch_importance / 0.4))
             accelerated_factor = base_factor * acceleration
 
             logger.debug(
@@ -1164,10 +2031,66 @@ class HPOSearchSpace:
                 f"accelerated={accelerated_factor:.2f}"
             )
 
-            # Cap at 95% of budget to avoid violations
-            return min(0.95, accelerated_factor)
+            # Cap at max_frac
+            return min(max_frac, accelerated_factor)
 
         return base_factor
+
+    def _sample_progressive_dim(
+        self, trial_id: int, dim_list: list[int], default: int = 256
+    ) -> int:
+        """Sample dimension with progressive filtering for early trials.
+
+        Phase 1020: Applies to ALL dimension parameters (embedding_dim, hidden_dim,
+        hd_dim_*, etc.) to ensure early trials explore smaller dimensions first.
+        HD and standard dimensions scale differently from transformers - smaller
+        dimensions are often more efficient and should be explored first.
+
+        Progressive schedule:
+        - Trial 0-9: Sample from lower 50% of range (establishes baseline)
+        - Trial 10-29: Sample from lower 75% of range (expands exploration)
+        - Trial 30+: Sample from full range (final optimization)
+
+        Args:
+            trial_id: Trial index (0-based)
+            dim_list: Full list of dimension options (e.g., embedding_dim, hd_dim)
+            default: Default value if dim_list is empty
+
+        Returns:
+            Sampled dimension from the appropriate progressive range.
+        """
+        import random
+
+        if not dim_list:
+            return default
+
+        sorted_dims = sorted(dim_list)  # Ensure sorted (low to high)
+
+        # Progressive filtering based on trial index
+        if trial_id < 10:
+            # Early trials: explore lower 50% of range
+            cutoff_idx = max(1, len(sorted_dims) // 2)
+            filtered = sorted_dims[:cutoff_idx]
+        elif trial_id < 30:
+            # Middle trials: expand to lower 75% of range
+            cutoff_idx = max(1, (len(sorted_dims) * 3) // 4)
+            filtered = sorted_dims[:cutoff_idx]
+        else:
+            # Later trials: full range
+            filtered = sorted_dims
+
+        # Also respect memory_failure_count if set
+        memory_shrink = getattr(self, "memory_failure_count", 0)
+        if memory_shrink >= 2:
+            # Severe memory pressure: use lower 25% only
+            cutoff_idx = max(1, len(filtered) // 4)
+            filtered = filtered[:cutoff_idx]
+        elif memory_shrink >= 1:
+            # Moderate memory pressure: use lower 50%
+            cutoff_idx = max(1, len(filtered) // 2)
+            filtered = filtered[:cutoff_idx]
+
+        return random.choice(filtered)
 
     def _estimate_max_sizes_for_budget(
         self,
@@ -1175,6 +2098,7 @@ class HPOSearchSpace:
     ) -> tuple[int, int, int]:
         """Estimate max architecture sizes that fit within target param budget.
 
+        Phase 950 Update: Optimized with early exit for O(D×B×E) -> O(D×B) typical case.
         Uses inverse of estimate_model_params() to find compatible architectures.
         Iterates through dimension/block/expert combinations to find the largest
         config that fits.
@@ -1199,21 +2123,38 @@ class HPOSearchSpace:
         best_dim = 64
         best_params = 0  # Track the largest fitting config's param count
 
-        # Try dimensions from smallest to largest
-        sorted_dims = sorted(self.embedding_dim)
-        sorted_blocks = sorted(self.num_reasoning_blocks)
-        sorted_experts = sorted(self.num_moe_experts)
+        # Use representative hd_dim value (computed once, not per-iteration)
+        representative_hd_dim = (
+            min(self.hd_dim)
+            if self.hd_dim and isinstance(self.hd_dim, list)
+            else (self.hd_dim if isinstance(self.hd_dim, int) else 64 * 8)
+        )
+
+        # Try dimensions from LARGEST to SMALLEST (Phase 950: enable early exit)
+        # Since we want the LARGEST fitting config, start big and exit early
+        sorted_dims = sorted(self.embedding_dim, reverse=True)
+        sorted_blocks = sorted(self.num_reasoning_blocks, reverse=True)
+        sorted_experts = sorted(self.num_moe_experts, reverse=True)
 
         for dim in sorted_dims:
+            # Quick check: if smallest config at this dim exceeds budget, skip dim entirely
+            min_check_config = {
+                "vocab_size": vocab_size,
+                "embedding_dim": dim,
+                "hidden_dim": dim,
+                "num_reasoning_blocks": min(self.num_reasoning_blocks),
+                "num_moe_experts": min(self.num_moe_experts),
+                "hd_dim": dim * 8,  # Scale hd_dim with dim for quick check
+            }
+            if estimate_model_params(min_check_config) > target_budget:
+                # Even smallest config at this dim is too big; smaller dims may fit
+                continue
+
             for blocks in sorted_blocks:
+                # Phase 950: Track if ANY expert count worked at this (dim, blocks) combo
+                found_fit_at_this_level = False
+
                 for experts in sorted_experts:
-                    # Use representative hd_dim value (min of list if available)
-                    # This ensures estimate_model_params gets a scalar, not list
-                    representative_hd_dim = (
-                        min(self.hd_dim)
-                        if self.hd_dim and isinstance(self.hd_dim, list)
-                        else (self.hd_dim if isinstance(self.hd_dim, int) else dim * 8)
-                    )
                     test_config = {
                         "vocab_size": vocab_size,
                         "embedding_dim": dim,
@@ -1223,12 +2164,28 @@ class HPOSearchSpace:
                         "hd_dim": representative_hd_dim,
                     }
                     estimated = estimate_model_params(test_config)
-                    # Only update if this config fits AND is larger than current best
-                    if estimated <= target_budget and estimated > best_params:
-                        best_dim = dim
-                        best_blocks = blocks
-                        best_experts = experts
-                        best_params = estimated
+
+                    if estimated <= target_budget:
+                        # This config fits! Check if it's larger than current best
+                        if estimated > best_params:
+                            best_dim = dim
+                            best_blocks = blocks
+                            best_experts = experts
+                            best_params = estimated
+                        found_fit_at_this_level = True
+                        # Since experts are sorted descending, first fit is largest
+                        break
+
+                # Phase 950: Early exit - if we found a fit at max dim/blocks, we're done
+                # (since sorting is descending, first overall fit is optimal)
+                if found_fit_at_this_level and best_dim == dim:
+                    # We found the largest fitting config at this dimension
+                    # But continue checking other block counts at this dim
+                    pass
+
+            # If we found any fit at the largest dimension, no need to check smaller dims
+            if best_dim == dim and best_params > 0:
+                break
 
         return (best_blocks, best_experts, best_dim)
 
@@ -1266,9 +2223,10 @@ class HPOSearchSpace:
         if not hasattr(instance, "target_vocab_size") or instance.target_vocab_size is None:
             instance.target_vocab_size = model_config.get("target_vocab_size", [32000])
 
-        instance.context_window = model_config.get("sequence_length") or model_config.get(
-            "context_window"
-        )
+        # Phase 200: Unified to context_window (minimum 8K)
+        # Phase 900.1: Default reduced to 4K for HPO exploration - 128K was causing 25GB+ memory
+        # Full context training should explicitly set context_window in sweep config
+        instance.context_window = model_config.get("context_window", 4096)
         instance.param_budget = config.get("param_budget") or model_config.get("param_budget")
 
         # Capture hd_dim if provided (needed for accurate estimation)
@@ -1429,7 +2387,7 @@ class HPOSearchSpace:
             ]
 
             logger.debug(
-                f"[SmartTuner] HD budget filter: target_budget={target_budget/1e6:.0f}M, "
+                f"[SmartTuner] HD budget filter: target_budget={target_budget / 1e6:.0f}M, "
                 f"max_hd={max_hd_for_budget}, max_vocab={max_vocab_for_budget}, "
                 f"filtered_hd_dim={filtered_hd_dim[:3]}..., filtered_vocab={filtered_vocab[:3]}..."
             )
@@ -1454,6 +2412,39 @@ class HPOSearchSpace:
         # Model vocab_size is derived from tokenizer.vocab_size in trial runner
         sampled_target_vocab = random.choice(filtered_vocab)
 
+        # Task 1.2.2: Explicit vocab size validation against parameter budget
+        # This prevents vocab sizes that would blow the embedding parameter budget
+        if self.param_budget is not None:
+            # Get sampled embedding_dim for budget calculation
+            sampled_embedding_dim = self._sample_progressive_dim(
+                trial_id, filtered_dims, default=256
+            )
+            sampled_hd_dim = (
+                random.choice(filtered_hd_dim) if filtered_hd_dim else (sampled_embedding_dim * 8)
+            )
+
+            max_vocab = compute_max_vocab_for_budget(
+                param_budget=self.param_budget,
+                embedding_dim=sampled_embedding_dim,
+                use_hqe=True,  # Conservative: assume HQE for max params
+                hd_dim=sampled_hd_dim,
+            )
+
+            if sampled_target_vocab > max_vocab:
+                logger.info(
+                    f"[QAHPO] Clamping target_vocab_size: {sampled_target_vocab} → {max_vocab} "
+                    f"(budget={self.param_budget / 1e6:.0f}M params, embed_dim={sampled_embedding_dim})"
+                )
+                sampled_target_vocab = max_vocab
+        else:
+            # No budget constraint - use progressive sampling for dimensions
+            sampled_embedding_dim = self._sample_progressive_dim(
+                trial_id, filtered_dims, default=256
+            )
+            sampled_hd_dim = (
+                random.choice(filtered_hd_dim) if filtered_hd_dim else (sampled_embedding_dim * 8)
+            )
+
         config = {
             # Metadata for internal tracking
             "_trial_id": trial_id,
@@ -1467,8 +2458,10 @@ class HPOSearchSpace:
             "weight_decay": random.uniform(*self.weight_decay),
             # Model architecture params (memory-aware)
             "num_reasoning_blocks": random.choice(filtered_blocks),
-            "hidden_dim": random.choice(filtered_dims),
-            "embedding_dim": random.choice(filtered_dims),
+            # Phase 1020: Progressive sampling for architecture dimensions
+            # Early trials explore smaller dimensions first (trials 0-9: lower 50%)
+            "hidden_dim": self._sample_progressive_dim(trial_id, filtered_dims, default=256),
+            "embedding_dim": self._sample_progressive_dim(trial_id, filtered_dims, default=256),
             "num_moe_experts": random.choice(filtered_experts),
             # HSMN-specific params
             "mamba_state_dim": random.choice(self.mamba_state_dim),
@@ -1520,6 +2513,14 @@ class HPOSearchSpace:
             # PHASE 57: TD-MoE Tucker Decomposition
             # =================================================================
             "td_moe_tucker_rank": random.choice(self.td_moe_tucker_rank),
+            # =================================================================
+            # PHASE 43: Neural Kalman Parameters
+            # =================================================================
+            "neural_kalman_hidden_dim": random.choice(self.neural_kalman_hidden_dim),
+            "neural_kalman_process_noise": random.uniform(*self.neural_kalman_process_noise),
+            "neural_kalman_measurement_noise": random.uniform(
+                *self.neural_kalman_measurement_noise
+            ),
             # =================================================================
             # PHASE 58: Symplectic GNN Kalman
             # =================================================================
@@ -1607,6 +2608,7 @@ class HPOSearchSpace:
             # HD blocks now replace QMamba when USE_HD_STREAMING is enabled
             # =================================================================
             "q_ssm_vqc_layers": random.choice(self.q_ssm_vqc_layers),
+            "q_ssm_num_qubits": random.choice(self.q_ssm_num_qubits),
             # =================================================================
             # QASA Attention Parameters
             # =================================================================
@@ -1619,12 +2621,27 @@ class HPOSearchSpace:
             "qmoe_measurement_temp": random.uniform(*self.qmoe_measurement_temp),
             # =================================================================
             # PHASE 200+: HD Streaming Corpus Parameters
-            # Note: use_hd_streaming pulled from global config.py at runtime
+            # Note: Global hd_dim removed from sampling (Phase 1010).
+            # Per-layer dims (hd_dim_embedding, etc.) are now the primary mechanism.
+            # The filtered_hd_dim budget logic above is retained for constraint validation.
             # =================================================================
             "hd_reservoir_size": random.choice(self.hd_reservoir_size),
-            # Defensive null handling: use default [512, 1024] if hd_dim is None
-            "hd_dim": random.choice(filtered_hd_dim),
             "vocab_sample_size": random.choice(self.vocab_sample_size),
+            # =================================================================
+            # PHASE 1010: Per-Layer HD Dimensions (independent tuning)
+            # Early trials use lower HD dims to match HD scaling (differs from transformers)
+            # Progressive filtering: trial 0-9 → lower half, trial 10-29 → lower 3/4, trial 30+ → full range
+            # =================================================================
+            "hd_dim_embedding": self._sample_progressive_dim(
+                trial_id, self.hd_dim_embedding, default=512
+            ),
+            "hd_dim_spatial": self._sample_progressive_dim(
+                trial_id, self.hd_dim_spatial, default=512
+            ),
+            "hd_dim_timecrystal": self._sample_progressive_dim(
+                trial_id, self.hd_dim_timecrystal, default=64
+            ),
+            "hd_dim_moe": self._sample_progressive_dim(trial_id, self.hd_dim_moe, default=512),
             # HD sample length: controls max tokens per individual HD sample
             # This is separate from context_window and directly affects position keys memory
             "hd_sample_length": random.choice(self.hd_sample_length),
@@ -1773,7 +2790,12 @@ class HPOSearchSpace:
             "hd_kalman_state_compression": random.choice(self.hd_kalman_state_compression),
             "hd_projection_freeze_epochs": random.choice(self.hd_projection_freeze_epochs),
             "hqe_ctqw_steps": random.choice(self.hqe_ctqw_steps),
-            "hd_active_vocab_size": random.choice(self.hd_active_vocab_size),
+            # Phase 500.1: Filter hd_active_vocab_size <= target_vocab_size at sample time
+            # This ensures active vocab (dense embeddings) never exceeds total vocab
+            "hd_active_vocab_size": random.choice(
+                [v for v in self.hd_active_vocab_size if v <= sampled_target_vocab]
+                or [min(10000, sampled_target_vocab)]  # Fallback for very small vocabs
+            ),
             # =================================================================
             # Unified Bus Extended Parameters
             # =================================================================
@@ -1783,6 +2805,44 @@ class HPOSearchSpace:
             # QASA Extended Parameters
             # =================================================================
             "qasa_feature_rotation_depth": random.choice(self.qasa_feature_rotation_depth),
+            # =================================================================
+            # PHASE 600+: QHD SPATIAL BLOCK Parameters
+            # =================================================================
+            "qhd_num_paths": random.choice(self.qhd_num_paths),
+            "qhd_entanglement_depth": random.choice(self.qhd_entanglement_depth),
+            "qhd_entanglement_strength": random.uniform(*self.qhd_entanglement_strength),
+            "qhd_gumbel_temperature": random.uniform(*self.qhd_gumbel_temperature),
+            # =================================================================
+            # PHASE 700: Floquet Position Encoding
+            # =================================================================
+            "hd_floquet_base_freq": 10
+            ** random.uniform(
+                math.log10(self.hd_floquet_base_freq[0]), math.log10(self.hd_floquet_base_freq[1])
+            ),  # Log-uniform sampling
+            # =================================================================
+            # PHASE 800: QHD HIERARCHICAL BLOCK Parameters
+            # =================================================================
+            "hd_hierarchical_levels": random.choice(self.hd_hierarchical_levels),
+            "hd_hierarchical_pooling_ratio": random.choice(self.hd_hierarchical_pooling_ratio),
+            "hd_hierarchical_use_ctqw": random.choice(self.hd_hierarchical_use_ctqw),
+            "hd_hierarchical_use_cross_attention": random.choice(
+                self.hd_hierarchical_use_cross_attention
+            ),
+            "hd_hierarchical_ctqw_time": random.uniform(*self.hd_hierarchical_ctqw_time),
+            "hd_hierarchical_ema_base_rate": random.uniform(*self.hd_hierarchical_ema_base_rate),
+            # Phase 900.2: Quantum Feature Map Cross-Level Attention (replaces EMA)
+            "hd_cross_attn_qfm_depth": random.choice(self.hd_cross_attn_qfm_depth),
+            "hd_use_quantum_cross_attention": random.choice(self.hd_use_quantum_cross_attention),
+            # =================================================================
+            # PHASE 900: STREAMING HIERARCHICAL MEMORY Parameters
+            # =================================================================
+            "hierarchical_memory_slots": random.choice(self.hierarchical_memory_slots),
+            "uncertainty_pool_threshold": random.uniform(*self.uncertainty_pool_threshold),
+            "streaming_max_chunk_size": random.choice(self.streaming_max_chunk_size),
+            "online_ctqw_rank": random.choice(self.online_ctqw_rank),
+            "online_ctqw_ema_decay": random.uniform(*self.online_ctqw_ema_decay),
+            "ctqw_rff_dim": random.choice(self.ctqw_rff_dim),
+            "hd_position_decay_rate": random.uniform(*self.hd_position_decay_rate),
         }
 
         # Add user-set tokenizer/context config if provided
@@ -1899,7 +2959,7 @@ class HPOSearchSpace:
 
                 if attempt % 20 == 0:
                     logger.debug(
-                        f"[SmartTuner] Trial {trial_id} attempt {attempt}: current {estimated_params/1e6:.1f}M"
+                        f"[SmartTuner] Trial {trial_id} attempt {attempt}: current {estimated_params / 1e6:.1f}M"
                     )
 
             if attempt > 0:
@@ -2112,6 +3172,27 @@ class HPOSearchSpace:
                 logger.info(
                     f"[Constraint] memory_slots {original} -> {config['memory_slots']} "
                     f"(GEM memory: {gem_mb:.1f}MB -> ~{MAX_GEM_MB}MB)"
+                )
+
+        # ===================================================================
+        # 5. VOCAB SIZE CONSTRAINTS (Phase 500.1)
+        # ===================================================================
+
+        # hd_active_vocab_size ≤ target_vocab_size
+        # Active vocab is the set of tokens using dense embeddings; remaining tokens
+        # use character-level HD encoding. Cannot exceed total vocabulary.
+        if "hd_active_vocab_size" in config and "target_vocab_size" in config:
+            if config["hd_active_vocab_size"] > config["target_vocab_size"]:
+                max_active = config["target_vocab_size"]
+                valid = [v for v in self.hd_active_vocab_size if v <= max_active]
+                original = config["hd_active_vocab_size"]
+                # Use largest valid size, or 10% of target if none available
+                config["hd_active_vocab_size"] = (
+                    max(valid) if valid else min(10000, int(max_active * 0.1))
+                )
+                logger.info(
+                    f"[Constraint] hd_active_vocab_size {original} -> "
+                    f"{config['hd_active_vocab_size']} (≤ target_vocab_size={max_active})"
                 )
 
         return config

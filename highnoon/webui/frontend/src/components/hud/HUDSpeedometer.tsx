@@ -1,7 +1,8 @@
 // HUDSpeedometer.tsx - Arc-style speedometer gauge for core metrics
 // F1/Jet cockpit style with animated needle and glow effects
 
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
+import { Sparkline, TrendIndicator } from '../charts/Sparkline';
 import './HUDGauges.css';
 
 interface HUDSpeedometerProps {
@@ -20,6 +21,12 @@ interface HUDSpeedometerProps {
     formatValue?: (value: number) => string;
     size?: 'sm' | 'md' | 'lg';
     animated?: boolean;
+    /** Historical values for sparkline (most recent last) */
+    history?: number[];
+    /** Show sparkline mini-chart below gauge */
+    showSparkline?: boolean;
+    /** Show trend indicator arrow */
+    showTrend?: boolean;
 }
 
 const SIZE_CONFIG = {
@@ -40,6 +47,9 @@ export function HUDSpeedometer({
     formatValue,
     size = 'md',
     animated = true,
+    history = [],
+    showSparkline = false,
+    showTrend = false,
 }: HUDSpeedometerProps) {
     const [animatedValue, setAnimatedValue] = useState(0);
     const animationRef = useRef<number | null>(null);
@@ -273,6 +283,36 @@ export function HUDSpeedometer({
                 <span className="hud-speedometer__label">{label}</span>
                 {sublabel && <span className="hud-speedometer__sublabel">{sublabel}</span>}
             </div>
+
+            {/* Sparkline and Trend Indicator */}
+            {(showSparkline || showTrend) && history.length > 1 && (
+                <div className="hud-speedometer__trend-row">
+                    {showSparkline && (
+                        <Sparkline
+                            data={history}
+                            width={config.diameter - 20}
+                            height={20}
+                            decreaseIsGood={inverse}
+                            fill={true}
+                        />
+                    )}
+                    {showTrend && (
+                        <TrendIndicator
+                            direction={
+                                history.length >= 2
+                                    ? history[history.length - 1] < history[history.length - 2]
+                                        ? 'down'
+                                        : history[history.length - 1] > history[history.length - 2]
+                                            ? 'up'
+                                            : 'stable'
+                                    : 'stable'
+                            }
+                            isPositive={!inverse}
+                            size="sm"
+                        />
+                    )}
+                </div>
+            )}
         </div>
     );
 }

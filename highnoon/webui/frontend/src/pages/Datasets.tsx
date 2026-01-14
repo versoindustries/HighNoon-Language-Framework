@@ -1,11 +1,13 @@
 // HighNoon Dashboard - Datasets Page
 import { useState, useEffect, useCallback } from 'react';
-import { Search, Plus, RefreshCw, ExternalLink, Download, Database, AlertCircle, Trash2 } from 'lucide-react';
+import { Search, Plus, RefreshCw, ExternalLink, Download, Database, AlertCircle, Trash2, Lock, Settings, AlertTriangle } from 'lucide-react';
 import { Card, Button, Modal, ConfirmModal } from '../components/ui';
 import { DatasetDetailModal } from '../components/DatasetDetail';
-import { datasetApi } from '../api/client';
+import { datasetApi, settingsApi } from '../api/client';
 import type { DatasetInfo, HuggingFaceDataset } from '../api/types';
 import './Datasets.css';
+
+const API_BASE = 'http://localhost:8000';
 
 export function Datasets() {
     const [datasets, setDatasets] = useState<DatasetInfo[]>([]);
@@ -22,6 +24,20 @@ export function Datasets() {
     const [addingDataset, setAddingDataset] = useState<string | null>(null);
     const [deletingDataset, setDeletingDataset] = useState<string | null>(null);
     const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+
+    // HuggingFace token state
+    const [hfTokenConfigured, setHfTokenConfigured] = useState(false);
+    const [gatedWarningDataset, setGatedWarningDataset] = useState<HuggingFaceDataset | null>(null);
+
+    // Fetch HF token status
+    const fetchHfTokenStatus = useCallback(async () => {
+        try {
+            const status = await settingsApi.getHfTokenStatus();
+            setHfTokenConfigured(status.configured);
+        } catch {
+            // Silent fail - assume no token
+        }
+    }, []);
 
     // Load datasets on mount
     const loadDatasets = useCallback(async () => {
@@ -40,7 +56,8 @@ export function Datasets() {
 
     useEffect(() => {
         loadDatasets();
-    }, [loadDatasets]);
+        fetchHfTokenStatus();
+    }, [loadDatasets, fetchHfTokenStatus]);
 
     const filteredDatasets = datasets.filter((ds) => {
         if (filter !== 'all' && ds.source !== filter) return false;
@@ -63,8 +80,15 @@ export function Datasets() {
         }
     };
 
-    const handleAddDataset = async (dataset: HuggingFaceDataset) => {
+    const handleAddDataset = async (dataset: HuggingFaceDataset, forceAdd = false) => {
+        // Check if gated and no token configured
+        if (dataset.gated && !hfTokenConfigured && !forceAdd) {
+            setGatedWarningDataset(dataset);
+            return;
+        }
+
         setAddingDataset(dataset.id);
+        setGatedWarningDataset(null);
         try {
             const added = await datasetApi.addHuggingFace(dataset.id);
             setDatasets([...datasets, added]);
@@ -277,6 +301,12 @@ export function Datasets() {
                                         <div className="hf-result-header">
                                             <span className="hf-result-author">{dataset.author}</span>
                                             <span className="hf-result-name">{dataset.name}</span>
+                                            {dataset.gated && (
+                                                <span className="hf-gated-badge" title="This dataset requires authentication">
+                                                    <Lock size={12} />
+                                                    Gated
+                                                </span>
+                                            )}
                                         </div>
                                         <p className="hf-result-description">{dataset.description}</p>
                                         <div className="hf-result-meta">
@@ -340,6 +370,55 @@ export function Datasets() {
                 variant="danger"
                 loading={deletingDataset === confirmDeleteId}
             />
+
+            {/* Gated Dataset Warning Modal */}
+            <Modal
+                open={!!gatedWarningDataset}
+                onClose={() => setGatedWarningDataset(null)}
+                title="Gated Dataset"
+                size="md"
+            >
+                <div className="gated-warning-content">
+                    <div className="gated-warning-icon">
+                        <AlertTriangle size={48} />
+                    </div>
+                    <h3>Authentication Required</h3>
+                    <p>
+                        <strong>{gatedWarningDataset?.id}</strong> is a gated dataset that requires
+                        authentication to access. You'll need to configure your HuggingFace token
+                        in Settings to download and use this dataset for training.
+                    </p>
+                    <div className="gated-warning-actions">
+                        <Button
+                            variant="primary"
+                            leftIcon={<Settings size={16} />}
+                            onClick={() => {
+                                setGatedWarningDataset(null);
+                                setIsSearchModalOpen(false);
+                                // Navigate to settings - using window.location for simplicity
+                                window.location.href = '/settings';
+                            }}
+                        >
+                            Configure Token
+                        </Button>
+                        <Button
+                            variant="ghost"
+                            onClick={() => {
+                                if (gatedWarningDataset) {
+                                    handleAddDataset(gatedWarningDataset, true);
+                                }
+                            }}
+                            loading={addingDataset === gatedWarningDataset?.id}
+                        >
+                            Add Anyway
+                        </Button>
+                    </div>
+                    <p className="gated-warning-note">
+                        <Lock size={14} />
+                        Without a token, you may not be able to access this dataset's content.
+                    </p>
+                </div>
+            </Modal>
         </div>
     );
 }

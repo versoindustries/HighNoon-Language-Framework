@@ -27,12 +27,301 @@ The implementation supports:
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import tensorflow as tf
 from tensorflow.keras import layers
 
+from highnoon import config
 from highnoon.models.reasoning.fused_contract import FusedReasoningBlockMixin
+
+logger = logging.getLogger(__name__)
+
+# Lazy-load C++ ops
+_neural_kalman_ops = None
+
+
+def _get_neural_kalman_ops():
+    """Lazy-load NeuralKalman C++ ops."""
+    global _neural_kalman_ops
+    if _neural_kalman_ops is None:
+        try:
+            from highnoon._native import get_op
+
+            _neural_kalman_ops = get_op("highnoon_core")
+            if _neural_kalman_ops is not None and hasattr(_neural_kalman_ops, "NeuralKalmanStep"):
+                logger.info("[KalmanBlock] C++ NeuralKalmanStep op loaded successfully.")
+            else:
+                _neural_kalman_ops = None
+        except Exception as e:
+            logger.debug(f"[KalmanBlock] C++ ops unavailable: {e}")
+            _neural_kalman_ops = None
+    return _neural_kalman_ops
+
+
+def _neural_kalman_step_with_gradient(
+    x_prior: tf.Tensor,
+    z: tf.Tensor,
+    gru_hidden: tf.Tensor,
+    W_z: tf.Tensor,
+    W_r: tf.Tensor,
+    W_h: tf.Tensor,
+    b_z: tf.Tensor,
+    b_r: tf.Tensor,
+    b_h: tf.Tensor,
+    W_out: tf.Tensor,
+    hidden_dim: int,
+    state_dim: int,
+    ops,
+) -> tuple[tf.Tensor, tf.Tensor]:
+    """Wrap NeuralKalmanStep with custom gradient for training support.
+
+    The C++ op does not have registered gradients, so we provide them here
+    using the C++ NeuralKalmanStepBackward op.
+
+    Args:
+        x_prior: Prior state estimate [batch, state_dim].
+        z: Measurement [batch, state_dim].
+        gru_hidden: GRU hidden state [batch, hidden_dim].
+        W_z, W_r, W_h: GRU weight matrices.
+        b_z, b_r, b_h: GRU biases.
+        W_out: Output projection [state_dim, hidden_dim].
+        hidden_dim: GRU hidden dimension.
+        state_dim: State dimension.
+        ops: Loaded C++ ops module.
+
+    Returns:
+        Tuple of (x_posterior, gru_hidden_new).
+    """
+    if not hasattr(ops, "NeuralKalmanStepBackward"):
+        raise RuntimeError(
+            "NeuralKalmanStepBackward op is required for KalmanBlock training. "
+            "Rebuild native ops to enable full C++ gradients."
+        )
+
+    @tf.custom_gradient
+    def _forward(x_prior, z, gru_hidden, W_z, W_r, W_h, b_z, b_r, b_h, W_out):
+        # Call C++ forward pass
+        x_posterior, gru_hidden_new = ops.NeuralKalmanStep(
+            x_prior=x_prior,
+            z=z,
+            gru_hidden=gru_hidden,
+            w_z=W_z,
+            w_r=W_r,
+            w_h=W_h,
+            b_z=b_z,
+            b_r=b_r,
+            b_h=b_h,
+            w_out=W_out,
+            hidden_dim=hidden_dim,
+            state_dim=state_dim,
+            propagate_covariance=config.NEURAL_KALMAN_PROPAGATE_COV,
+            max_innovation=config.NEURAL_KALMAN_MAX_INNOVATION,
+            epsilon=config.NEURAL_KALMAN_EPSILON,
+            grad_clip_norm=config.NEURAL_KALMAN_GRAD_CLIP,
+            enable_adaptive_scaling=config.NEURAL_KALMAN_ADAPTIVE_SCALE,
+            enable_diagnostics=config.NEURAL_KALMAN_DEBUG,
+        )
+
+        # Compute K_gain for backward pass cache using C++ op
+        k_gain = ops.LearnedKalmanGain(
+            gru_hidden=gru_hidden_new,
+            w_out=W_out,
+        )
+
+        def grad_fn(grad_x_posterior, grad_gru_hidden_new, variables=None):
+            """
+            Gradient computation using C++ NeuralKalmanStepBackward op.
+            """
+            # Check if backward op is available
+            # Use C++ backward op for proper analytic gradients
+            grads = ops.NeuralKalmanStepBackward(
+                grad_x_posterior=grad_x_posterior,
+                grad_gru_hidden_new=grad_gru_hidden_new,
+                x_prior=x_prior,
+                z=z,
+                gru_hidden=gru_hidden,
+                w_z=W_z,
+                w_r=W_r,
+                w_h=W_h,
+                b_z=b_z,
+                b_r=b_r,
+                b_h=b_h,
+                w_out=W_out,
+                gru_hidden_new_saved=gru_hidden_new,
+                k_gain_saved=k_gain,
+                hidden_dim=hidden_dim,
+                state_dim=state_dim,
+                max_innovation=config.NEURAL_KALMAN_MAX_INNOVATION,
+                epsilon=config.NEURAL_KALMAN_EPSILON,
+                grad_clip_norm=config.NEURAL_KALMAN_GRAD_CLIP,
+                enable_adaptive_scaling=config.NEURAL_KALMAN_ADAPTIVE_SCALE,
+                enable_diagnostics=config.NEURAL_KALMAN_DEBUG,
+            )
+            # Returns: (grad_x_prior, grad_z, grad_gru_hidden,
+            #           grad_w_z, grad_w_r, grad_w_h,
+            #           grad_b_z, grad_b_r, grad_b_h, grad_w_out)
+            input_grads = (
+                grads[0],  # grad_x_prior
+                grads[1],  # grad_z
+                grads[2],  # grad_gru_hidden
+                grads[3],  # grad_W_z
+                grads[4],  # grad_W_r
+                grads[5],  # grad_W_h
+                grads[6],  # grad_b_z
+                grads[7],  # grad_b_r
+                grads[8],  # grad_b_h
+                grads[9],  # grad_W_out
+            )
+
+            if variables is None:
+                return input_grads
+
+            # Return separate input grads and variable grads
+            variable_grads = [tf.zeros_like(v) for v in variables]
+            return input_grads, variable_grads
+
+        return (x_posterior, gru_hidden_new), grad_fn
+
+    return _forward(x_prior, z, gru_hidden, W_z, W_r, W_h, b_z, b_r, b_h, W_out)
+
+
+def _neural_kalman_step_full_with_gradient(
+    x_prior: tf.Tensor,
+    P_prior: tf.Tensor,
+    z: tf.Tensor,
+    A: tf.Tensor,
+    H: tf.Tensor,
+    Q: tf.Tensor,
+    R: tf.Tensor,
+    gru_hidden: tf.Tensor,
+    W_z: tf.Tensor,
+    W_r: tf.Tensor,
+    W_h: tf.Tensor,
+    b_z: tf.Tensor,
+    b_r: tf.Tensor,
+    b_h: tf.Tensor,
+    W_out: tf.Tensor,
+    hidden_dim: int,
+    state_dim: int,
+    obs_dim: int,
+    ops,
+) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
+    """Full Neural Kalman step with proper Kalman filter equations.
+
+    Implements the complete Kalman filter with:
+    1. State prediction: x_pred = A @ x_prior (orthogonal A keeps ||x|| bounded)
+    2. Covariance prediction: P_pred = P_prior + softplus(Q)
+    3. Innovation: y = z - H @ x_pred
+    4. Kalman gain: K = P_pred / (P_pred + R) (bounded in [0, 1])
+    5. State update: x_post = x_pred + K * (H^T @ innovation)
+    6. Covariance update: P_post = P_pred * (1 - K) (stabilizes over time)
+
+    Args:
+        x_prior: Prior state estimate [batch, state_dim].
+        P_prior: Prior covariance diagonal [batch, state_dim].
+        z: Measurement [batch, obs_dim].
+        A: State transition matrix [state_dim, state_dim] (orthogonal).
+        H: Observation matrix [obs_dim, state_dim].
+        Q: Process noise [state_dim].
+        R: Measurement noise [obs_dim].
+        gru_hidden: GRU hidden state [batch, hidden_dim].
+        W_z, W_r, W_h: GRU weights (auxiliary, for adaptive noise).
+        b_z, b_r, b_h: GRU biases.
+        W_out: GRU output projection.
+        hidden_dim: GRU hidden dimension.
+        state_dim: Kalman state dimension.
+        obs_dim: Observation dimension.
+        ops: Loaded C++ ops module.
+
+    Returns:
+        Tuple of (x_posterior, P_posterior, gru_hidden_new).
+    """
+    # Phase 43.2: Require C++ NeuralKalmanStepFull op - no Python fallback
+    if not hasattr(ops, "NeuralKalmanStepFull"):
+        raise RuntimeError(
+            "C++ NeuralKalmanStepFull op is required. "
+            "Rebuild native ops: @build_secure.sh --lite --debug"
+        )
+
+    # Use C++ implementation with proper backward pass
+    @tf.custom_gradient
+    def _forward_full(
+        x_prior, P_prior, z, A, H, Q, R, gru_hidden, W_z, W_r, W_h, b_z, b_r, b_h, W_out
+    ):
+        # Call C++ forward pass with full Kalman equations
+        x_posterior, P_posterior, gru_hidden_new = ops.NeuralKalmanStepFull(
+            x_prior=x_prior,
+            p_prior=P_prior,
+            z=z,
+            state_trans=A,
+            obs_mat=H,
+            proc_noise=Q,
+            meas_noise=R,
+            gru_hidden=gru_hidden,
+            w_z=W_z,
+            w_r=W_r,
+            w_h=W_h,
+            b_z=b_z,
+            b_r=b_r,
+            b_h=b_h,
+            w_out=W_out,
+            hidden_dim=hidden_dim,
+            state_dim=state_dim,
+            obs_dim=obs_dim,
+            use_full_kalman=True,
+            p_min=config.NEURAL_KALMAN_EPSILON,
+            p_max=10.0,
+            k_max=1.0,
+            max_innovation=config.NEURAL_KALMAN_MAX_INNOVATION,
+            epsilon=config.NEURAL_KALMAN_EPSILON,
+            grad_clip_norm=config.NEURAL_KALMAN_GRAD_CLIP,
+            enable_adaptive_scaling=config.NEURAL_KALMAN_ADAPTIVE_SCALE,
+            enable_diagnostics=config.NEURAL_KALMAN_DEBUG,
+        )
+
+        def grad_fn(grad_x_posterior, grad_P_posterior, grad_gru_hidden_new, variables=None):
+            """Gradient using C++ NeuralKalmanStepFullBackward."""
+            grads = ops.NeuralKalmanStepFullBackward(
+                grad_x_posterior=grad_x_posterior,
+                grad_p_posterior=grad_P_posterior,
+                grad_gru_hidden_new=grad_gru_hidden_new,
+                x_prior=x_prior,
+                p_prior=P_prior,
+                z=z,
+                state_trans=A,
+                obs_mat=H,
+                proc_noise=Q,
+                meas_noise=R,
+                gru_hidden=gru_hidden,
+                w_z=W_z,
+                w_r=W_r,
+                w_h=W_h,
+                b_z=b_z,
+                b_r=b_r,
+                b_h=b_h,
+                w_out=W_out,
+                x_posterior=x_posterior,
+                p_posterior=P_posterior,
+                hidden_dim=hidden_dim,
+                state_dim=state_dim,
+                obs_dim=obs_dim,
+            )
+            # Returns: (grad_x_prior, grad_P_prior, grad_z, grad_A, grad_H,
+            #           grad_Q, grad_R, grad_gru_hidden, grad_w_z, ...)
+            input_grads = tuple(grads[:15])
+
+            if variables is None:
+                return input_grads
+            variable_grads = [tf.zeros_like(v) for v in variables]
+            return input_grads, variable_grads
+
+        return (x_posterior, P_posterior, gru_hidden_new), grad_fn
+
+    return _forward_full(
+        x_prior, P_prior, z, A, H, Q, R, gru_hidden, W_z, W_r, W_h, b_z, b_r, b_h, W_out
+    )
 
 
 class KalmanBlock(FusedReasoningBlockMixin, layers.Layer):
@@ -48,10 +337,16 @@ class KalmanBlock(FusedReasoningBlockMixin, layers.Layer):
     - Process noise covariance Q: models uncertainty in dynamics
     - Observation noise covariance R: models measurement uncertainty
 
+    UQHA Integration:
+    - energy_drift from HDTimeCrystal modulates process noise Q
+    - High drift → increased Q → Kalman filter trusts predictions less
+    - This provides adaptive uncertainty tracking for HNN dynamics
+
     Args:
         state_dim: Dimension of the latent state.
         embedding_dim: Input/output embedding dimension.
         d_inner: Internal feature dimension (default: 2 * state_dim).
+        energy_drift_gain: Scaling factor for energy drift → Q modulation.
         name: Layer name.
 
     Example:
@@ -62,6 +357,8 @@ class KalmanBlock(FusedReasoningBlockMixin, layers.Layer):
         ...     tf.eye(64, batch_shape=[2])  # covariance
         ... )
         >>> output, new_state = block(x, initial_state=initial_state)
+        >>> # Wire energy drift from HDTimeCrystal
+        >>> block.set_energy_drift(0.005)  # High drift = more uncertainty
     """
 
     fused_block_type = "KalmanBlock"
@@ -72,12 +369,17 @@ class KalmanBlock(FusedReasoningBlockMixin, layers.Layer):
         state_dim: int,
         embedding_dim: int,
         d_inner: int | None = None,
+        energy_drift_gain: float = 10.0,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self.state_dim = state_dim
         self.embedding_dim = embedding_dim
         self.d_inner = d_inner or (2 * state_dim)
+        self.energy_drift_gain = energy_drift_gain
+
+        # UQHA: Energy drift modulation for process noise
+        self._energy_drift: float | None = None
 
         # Will be built in build()
         self.input_proj: layers.Dense | None = None
@@ -90,12 +392,27 @@ class KalmanBlock(FusedReasoningBlockMixin, layers.Layer):
         self.Q: tf.Variable | None = None  # Process noise covariance
         self.R: tf.Variable | None = None  # Observation noise covariance
 
+        # GRU weights for Neural Kalman (C++ op)
+        self.gru_hidden_dim = getattr(config, "NEURAL_KALMAN_HIDDEN_DIM", 128)
+        self._prenorm = None
+        self.W_z: tf.Variable | None = None  # GRU update gate weights
+        self.W_r: tf.Variable | None = None  # GRU reset gate weights
+        self.W_h: tf.Variable | None = None  # GRU candidate weights
+        self.b_z: tf.Variable | None = None  # GRU update gate bias
+        self.b_r: tf.Variable | None = None  # GRU reset gate bias
+        self.b_h: tf.Variable | None = None  # GRU candidate bias
+        self.W_out: tf.Variable | None = None  # Output projection to Kalman gain
+
     def build(self, input_shape: tf.TensorShape | tuple) -> None:
         """Build layer weights.
 
         Args:
             input_shape: Shape of input tensor or tuple for stateful call.
         """
+        # Guard for idempotent build - prevent sublayer recreation
+        if self.built:
+            return
+
         # Handle stateful build signature (input_shape, state_shape)
         if isinstance(input_shape, tuple) and len(input_shape) == 2:
             input_shape = input_shape[0]
@@ -178,6 +495,66 @@ class KalmanBlock(FusedReasoningBlockMixin, layers.Layer):
             trainable=True,
         )
 
+        # GRU weights for Neural Kalman C++ op
+        # NOTE: GRU is now AUXILIARY after Phase 43.2 refactor.
+        # Kalman gain is computed via K = P_pred / (P_pred + R), not GRU.
+        # GRU is only used for adaptive noise estimation - set trainable=False.
+        if getattr(config, "USE_NATIVE_NEURAL_KALMAN", True):
+            gru_input_dim = self.state_dim  # Innovation dimension
+            gru_concat_dim = self.gru_hidden_dim + gru_input_dim
+
+            self.W_z = self.add_weight(
+                name="gru_w_z",
+                shape=(self.gru_hidden_dim, gru_concat_dim),
+                initializer="glorot_uniform",
+                trainable=False,
+            )
+            self.W_r = self.add_weight(
+                name="gru_w_r",
+                shape=(self.gru_hidden_dim, gru_concat_dim),
+                initializer="glorot_uniform",
+                trainable=False,
+            )
+            self.W_h = self.add_weight(
+                name="gru_w_h",
+                shape=(self.gru_hidden_dim, gru_concat_dim),
+                initializer="glorot_uniform",
+                trainable=False,
+            )
+            self.b_z = self.add_weight(
+                name="gru_b_z",
+                shape=(self.gru_hidden_dim,),
+                initializer="zeros",
+                trainable=False,
+            )
+            self.b_r = self.add_weight(
+                name="gru_b_r",
+                shape=(self.gru_hidden_dim,),
+                initializer="zeros",
+                trainable=False,
+            )
+            self.b_h = self.add_weight(
+                name="gru_b_h",
+                shape=(self.gru_hidden_dim,),
+                initializer="zeros",
+                trainable=False,
+            )
+            self.W_out = self.add_weight(
+                name="gru_w_out",
+                shape=(self.state_dim, self.gru_hidden_dim),
+                initializer="glorot_uniform",
+                trainable=False,
+            )
+
+        if config.NEURAL_KALMAN_PRENORM:
+            # GRADIENT FIX: Increased epsilon from 1e-5 to 1e-4 to prevent inf gradients
+            # when state_dim=16 features have very low variance
+            self._prenorm = layers.LayerNormalization(
+                axis=-1,
+                epsilon=1e-4,
+                name=f"{self.name}_prenorm",
+            )
+
         super().build(input_shape)
 
     def call(
@@ -200,14 +577,60 @@ class KalmanBlock(FusedReasoningBlockMixin, layers.Layer):
             - state_estimate: Final state [batch, state_dim]
             - state_covariance: Final covariance [batch, state_dim, state_dim]
         """
+        # Require C++ NeuralKalmanStep op - no Python fallback
+        if self.W_z is None:
+            raise RuntimeError(
+                "KalmanBlock requires C++ NeuralKalmanStep op. "
+                "Set USE_NATIVE_NEURAL_KALMAN=True and rebuild native library."
+            )
+
+        ops = _get_neural_kalman_ops()
+        if ops is None:
+            raise RuntimeError(
+                "C++ NeuralKalmanStep op not available. "
+                "Build the native library: cd highnoon/_native/build && cmake .. && make -j$(nproc)"
+            )
+
+        return self._call_native(inputs, initial_state, training)
+
+    def _call_native(
+        self,
+        inputs: tf.Tensor,
+        initial_state: tuple[tf.Tensor, tf.Tensor] | None = None,
+        training: bool = False,
+    ) -> tuple[tf.Tensor, tuple[tf.Tensor, tf.Tensor]]:
+        """Forward pass using full Kalman filter with proper stability guarantees.
+
+        Phase 43.2: Uses proper Kalman filter equations with:
+        - Orthogonal A matrix for bounded state prediction
+        - Covariance tracking for bounded Kalman gain (K ∈ [0, 1])
+        - P update that stabilizes gains over time
+
+        Args:
+            inputs: Input tensor [batch, seq_len, embedding_dim].
+            initial_state: Tuple of (state_estimate, state_covariance).
+            training: Whether in training mode.
+
+        Returns:
+            Tuple of (output, (state_estimate, state_covariance)).
+        """
+        ops = _get_neural_kalman_ops()
+        if ops is None or self.W_z is None:
+            raise RuntimeError(
+                "KalmanBlock requires C++ NeuralKalmanStep op. Python fallback is disabled."
+            )
+
         batch_size = tf.shape(inputs)[0]
         seq_len = tf.shape(inputs)[1]
 
-        # Initialize state if not provided
+        # Initialize state and covariance diagonal
         if initial_state is None:
             state = tf.zeros([batch_size, self.state_dim], dtype=inputs.dtype)
-            # Identity covariance (simplified as diagonal)
-            P_diag = tf.ones([batch_size, self.state_dim], dtype=inputs.dtype)
+            P_diag = (
+                tf.ones([batch_size, self.state_dim], dtype=inputs.dtype)
+                * config.NEURAL_KALMAN_INITIAL_P
+            )
+            gru_hidden = tf.zeros([batch_size, self.gru_hidden_dim], dtype=inputs.dtype)
         else:
             state, P = initial_state
             # Extract diagonal if full covariance provided
@@ -215,55 +638,14 @@ class KalmanBlock(FusedReasoningBlockMixin, layers.Layer):
                 P_diag = tf.linalg.diag_part(P)
             else:
                 P_diag = P
+            gru_hidden = tf.zeros([batch_size, self.gru_hidden_dim], dtype=inputs.dtype)
 
-        # Project input
+        # Project input to observation space
         z = self.input_proj(inputs)  # [B, L, d_inner]
+        if self._prenorm is not None:
+            z = self._prenorm(z)
 
-        # Capture layer variables for use inside while_loop
-        A = self.A
-        H = self.H
-        Q = self.Q
-        R = self.R
-        state_proj = self.state_proj
-        output_proj = self.output_proj
-
-        # Graph-compatible Kalman step function for tf.while_loop
-        def kalman_step(t, state, P_diag, outputs_ta):
-            """Single Kalman filter step."""
-            z_t = z[:, t, :]  # [B, d_inner]
-
-            # Predict step
-            state_pred = tf.linalg.matvec(A, state)  # [B, state_dim]
-            P_pred_diag = P_diag + tf.nn.softplus(Q)  # [B, state_dim]
-
-            # Predicted observation
-            H_state = tf.linalg.matvec(H, state_pred)  # [B, d_inner]
-
-            # Innovation (measurement residual)
-            innovation = z_t - H_state  # [B, d_inner]
-
-            # Innovation covariance (simplified scalar)
-            avg_P = tf.reduce_mean(P_pred_diag, axis=-1, keepdims=True)  # [B, 1]
-            avg_R = tf.reduce_mean(tf.nn.softplus(R))  # scalar
-            S_inv = 1.0 / (avg_P + avg_R + 1e-6)  # [B, 1]
-
-            # Kalman gain (simplified)
-            K_gain = P_pred_diag * S_inv  # [B, state_dim]
-
-            # Update state
-            state_update = state_proj(innovation)  # [B, state_dim]
-            new_state = state_pred + K_gain * state_update
-
-            # Update covariance (simplified Joseph form)
-            new_P_diag = P_pred_diag * (1.0 - K_gain)
-            new_P_diag = tf.maximum(new_P_diag, 1e-6)  # Ensure positive
-
-            # Output projection
-            out_t = output_proj(new_state)
-
-            return t + 1, new_state, new_P_diag, outputs_ta.write(t, out_t)
-
-        # Initialize TensorArray for outputs
+        # Sequential processing using full Kalman filter
         outputs_ta = tf.TensorArray(
             dtype=inputs.dtype,
             size=seq_len,
@@ -271,20 +653,69 @@ class KalmanBlock(FusedReasoningBlockMixin, layers.Layer):
             element_shape=[None, self.embedding_dim],
         )
 
-        # Run while_loop for graph-mode compatible sequence processing
-        _, final_state, final_P_diag, outputs_ta = tf.while_loop(
+        # Capture weights for while_loop closure
+        A = self.A  # Orthogonal state transition [state_dim, state_dim]
+        H = self.H  # Observation matrix [d_inner, state_dim]
+        Q = self.get_effective_Q()  # UQHA: Process noise with energy_drift modulation
+        R = self.R  # Measurement noise [d_inner]
+        W_z = self.W_z
+        W_r = self.W_r
+        W_h = self.W_h
+        b_z = self.b_z
+        b_r = self.b_r
+        b_h = self.b_h
+        W_out = self.W_out
+        output_proj = self.output_proj
+        gru_hidden_dim = self.gru_hidden_dim
+        state_dim = self.state_dim
+        d_inner = self.d_inner
+
+        def full_kalman_step(t, state, P_diag, gru_hidden, outputs_ta):
+            """Single full Kalman step with proper stability guarantees."""
+            z_t = z[:, t, :]  # [B, d_inner] - observation at time t
+
+            # Call full Kalman step with A, H, Q, R, P
+            new_state, new_P_diag, new_gru_hidden = _neural_kalman_step_full_with_gradient(
+                x_prior=state,
+                P_prior=P_diag,
+                z=z_t,
+                A=A,
+                H=H,
+                Q=Q,
+                R=R,
+                gru_hidden=gru_hidden,
+                W_z=W_z,
+                W_r=W_r,
+                W_h=W_h,
+                b_z=b_z,
+                b_r=b_r,
+                b_h=b_h,
+                W_out=W_out,
+                hidden_dim=gru_hidden_dim,
+                state_dim=state_dim,
+                obs_dim=d_inner,
+                ops=ops,
+            )
+
+            # Output projection
+            out_t = output_proj(new_state)
+
+            return t + 1, new_state, new_P_diag, new_gru_hidden, outputs_ta.write(t, out_t)
+
+        # Run while_loop for sequential processing with covariance tracking
+        _, final_state, final_P_diag, _, outputs_ta = tf.while_loop(
             cond=lambda t, *_: t < seq_len,
-            body=kalman_step,
-            loop_vars=[tf.constant(0), state, P_diag, outputs_ta],
-            parallel_iterations=1,  # Sequential processing required for Kalman
+            body=full_kalman_step,
+            loop_vars=[tf.constant(0), state, P_diag, gru_hidden, outputs_ta],
+            parallel_iterations=1,
         )
 
-        # Stack outputs: TensorArray gives [L, B, dim], transpose to [B, L, dim]
+        # Stack outputs
         output = outputs_ta.stack()  # [L, B, embedding_dim]
         output = tf.transpose(output, [1, 0, 2])  # [B, L, embedding_dim]
 
-        # Construct full covariance for state return
-        P = tf.linalg.diag(final_P_diag)  # [B, state_dim, state_dim]
+        # Return final covariance as diagonal matrix
+        P = tf.linalg.diag(final_P_diag)
 
         return output, (final_state, P)
 
@@ -296,9 +727,45 @@ class KalmanBlock(FusedReasoningBlockMixin, layers.Layer):
                 "state_dim": self.state_dim,
                 "embedding_dim": self.embedding_dim,
                 "d_inner": self.d_inner,
+                "energy_drift_gain": self.energy_drift_gain,
             }
         )
         return config
+
+    def set_energy_drift(self, drift: float) -> None:
+        """Set energy drift from HDTimeCrystal for Q modulation.
+
+        UQHA Integration: This method is called by the training engine
+        or block_factory to pass energy_drift metrics from TimeCrystal
+        blocks into the Kalman filter. High drift increases process noise Q,
+        causing the filter to trust predictions less.
+
+        Args:
+            drift: Energy drift value |H_final - H_initial| from TimeCrystal.
+        """
+        self._energy_drift = float(drift)
+        logger.debug(f"[KalmanBlock] Set energy_drift={drift:.6f} for Q modulation")
+
+    def get_energy_drift(self) -> float | None:
+        """Get current energy drift value."""
+        return self._energy_drift
+
+    def get_effective_Q(self) -> tf.Tensor:
+        """Get effective process noise with energy drift modulation.
+
+        Returns:
+            Q modulated by energy drift: Q_eff = Q * (1 + gain * drift)
+        """
+        if self.Q is None:
+            raise ValueError("KalmanBlock not built yet")
+
+        if self._energy_drift is None or self._energy_drift == 0.0:
+            return tf.nn.softplus(self.Q)
+
+        # Scale Q by energy drift: higher drift = more process noise
+        # Q_eff = Q * (1 + energy_drift_gain * drift)
+        drift_scale = 1.0 + self.energy_drift_gain * self._energy_drift
+        return tf.nn.softplus(self.Q) * tf.cast(drift_scale, self.Q.dtype)
 
     def get_weights_for_fused_op(self) -> list[tf.Tensor]:
         """Return weights in order expected by fused kernel."""
@@ -557,4 +1024,24 @@ class ExtendedKalmanBlock(KalmanBlock):
         return config
 
 
-__all__ = ["KalmanBlock", "ExtendedKalmanBlock"]
+# UQHA Phase 1001: TT-compressed Kalman filter for high-dimensional states
+# UQHA Priority 3: Symplectic Kalman (Port-Hamiltonian filter dynamics)
+from highnoon.models.spatial.symplectic_kalman import (
+    SymplecticGNNKalmanLayer,
+    SymplecticKalmanBlock,
+    symplectic_gnn_kalman,
+)
+from highnoon.models.spatial.tensor_network_kalman import (
+    TensorNetworkKalmanBlock,
+    TensorNetworkKalmanFilter,
+)
+
+__all__ = [
+    "KalmanBlock",
+    "ExtendedKalmanBlock",
+    "TensorNetworkKalmanFilter",
+    "TensorNetworkKalmanBlock",
+    "symplectic_gnn_kalman",
+    "SymplecticGNNKalmanLayer",
+    "SymplecticKalmanBlock",
+]

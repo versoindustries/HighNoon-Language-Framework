@@ -1,0 +1,76 @@
+{
+    "name": "highnoon-hsmn",
+    "version": "1.0.0",
+    "description": "HighNoon HSMN Language Model Integration for Claude Code",
+    "author": "Verso Industries",
+    "license": "Apache-2.0",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/versoindustries/HighNoon-Language-Framework"
+    },
+    "keywords": [
+        "highnoon",
+        "hsmn",
+        "language-model",
+        "quantum",
+        "mcp"
+    ],
+    "engines": {
+        "node": ">=18.0.0"
+    },
+    "mcp": {
+        "version": "2024-11-05",
+        "name": "highnoon-mcp",
+        "description": "HighNoon Model Context Protocol Server",
+        "commands": {
+            "hsmn": {
+                "description": "Invoke HighNoon HSMN model for code generation and analysis",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": [
+                                "generate",
+                                "analyze",
+                                "train",
+                                "status"
+                            ],
+                            "description": "Action to perform"
+                        },
+                        "prompt": {
+                            "type": "string",
+                            "description": "Input prompt for generation or analysis"
+                        },
+                        "options": {
+                            "type": "object",
+                            "description": "Additional options for the action"
+                        }
+                    },
+                    "required": [
+                        "action"
+                    ]
+                }
+            }
+        },
+        "resources": [
+            {
+                "uri": "highnoon://model/info",
+                "description": "Current model configuration and status"
+            },
+            {
+                "uri": "highnoon://training/status",
+                "description": "Training run status and metrics"
+            }
+        ],
+        "transport": {
+            "stdio": {
+                "command": "python",
+                "args": [
+                    "-m",
+                    "highnoon.services.agent_server"
+                ]
+            }
+        }
+    }
+}

@@ -99,6 +99,14 @@ def _tensor_ring_forward_reference(
     output = tf.concat(output_parts, axis=-1)
     if bias is not None:
         output = tf.nn.bias_add(output, bias)
+
+    # Gradient stabilization: clip to prevent explosion that causes NaN gradients
+    output = tf.clip_by_value(output, -1e6, 1e6)
+
+    # GRADIENT FIX: Removed tf.where(is_finite, x, zeros) which blocked gradient flow
+    # for NaN elements (gradient of tf.where for false branch is zero).
+    # Let the clip handle stabilization; if NaNs still occur, fix the root cause.
+
     return output
 
 
@@ -217,6 +225,11 @@ def fused_tensor_ring_forward(
             When TensorFlow detects that the function uses tf.Variables (like the
             ring cores), it passes them via the 'variables' kwarg. We must compute
             and return gradients for these variables as a second return value.
+
+            GRADIENT FIX: The cores_in list contains tensor values read from variables.
+            When TensorFlow calls this grad function, 'variables' contains the actual
+            tf.Variables from which cores_in was read. We need to map grad_cores
+            (computed for cores_in tensors) to the corresponding variables.
             """
             with tf.GradientTape(persistent=True) as tape:
                 tape.watch(inputs_in)
@@ -239,14 +252,41 @@ def fused_tensor_ring_forward(
                 watched.append(bias_in)
             grads = tape.gradient(ref, watched, output_gradients=dy)
             grad_inputs = grads[0]
-            grad_cores = grads[1]
+            grad_cores = grads[1]  # This is a list of gradients for cores_in
             grad_bias = grads[2] if bias_provided else None
 
             input_grads = (grad_inputs, grad_cores, grad_bias)
 
             # Compute variable gradients if variables were passed
             if variables:
-                var_grads = tape.gradient(ref, variables, output_gradients=dy)
+                # GRADIENT FIX: Map grad_cores to variables by matching ring_core names
+                # The grad_cores list corresponds to cores_in which came from variables
+                var_grads = []
+                for v in variables:
+                    v_name = v.name.lower()
+                    found_grad = None
+
+                    # Check if this is a ring_core variable
+                    if "ring_core" in v_name:
+                        # Extract index from variable name (e.g., "ring_core_0:0" -> 0)
+                        for idx, _c in enumerate(cores_in):
+                            if f"ring_core_{idx}" in v_name:
+                                # This variable corresponds to cores_in[idx]
+                                if isinstance(grad_cores, list):
+                                    found_grad = grad_cores[idx]
+                                else:
+                                    # grad_cores is a single tensor - shouldn't happen for lists
+                                    found_grad = tape.gradient(ref, v, output_gradients=dy)
+                                break
+                    elif "bias" in v_name and bias_provided:
+                        found_grad = grad_bias
+
+                    if found_grad is None:
+                        # Fallback: compute gradient directly for this variable
+                        found_grad = tape.gradient(ref, v, output_gradients=dy)
+
+                    var_grads.append(found_grad)
+
                 del tape  # Release persistent tape
                 return input_grads, var_grads
 

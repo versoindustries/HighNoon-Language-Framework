@@ -123,6 +123,32 @@ class SweepConfig:
     pbt_exploit_threshold: float = 1.2  # Exploit if 20% worse than best
     pbt_explore_perturbation: float = 0.2  # ±20% perturbation on explore
 
+    # =========================================================================
+    # QAHPO Scheduler Meta-Parameters (Phase 700)
+    # These control the quantum-inspired optimization behavior.
+    # =========================================================================
+    qahpo_population_size: int = 8
+    qahpo_initial_temperature: float = 2.0
+    qahpo_final_temperature: float = 0.1
+    qahpo_tunneling_probability: float = 0.15
+    qahpo_mutation_strength: float = 0.3
+    qahpo_crossover_rate: float = 0.4
+    qahpo_evolution_interval: int = 4
+    qahpo_fanova_importance_boost: float = 3.0
+    qahpo_enable_meta_learning: bool = True
+
+    # =========================================================================
+    # Enterprise HPO Features (Phase 7)
+    # =========================================================================
+    multi_fidelity_scheduler: str = "hyperband"
+    importance_analyzer: str = "shapley"
+    enable_zero_cost_proxy: bool = True
+    enable_early_stopping_predictor: bool = True
+    enable_deep_kernel_gp: bool = True
+    enable_acquisition_portfolio: bool = True
+    enable_regret_tracking: bool = True
+    enable_darts: bool = False
+
     # Additional model config passthrough
     model_config: dict[str, Any] = field(default_factory=dict)
     search_space: dict[str, Any] = field(default_factory=dict)
@@ -613,7 +639,11 @@ class MultiObjectiveScorer:
             Composite score (lower is better)
         """
         # Normalize metrics to [0, 1] range
-        loss_norm = min(result.loss / 10.0, 1.0) if not math.isinf(result.loss) else 1.0
+        loss_norm = (
+            min(result.loss / 10.0, 1.0)
+            if result.loss is not None and not math.isinf(result.loss)
+            else 1.0
+        )
         ppl_norm = min(math.log(result.perplexity + 1) / 10.0, 1.0) if result.perplexity else 0.5
         ece = result.ece if result.ece is not None else 0.1
         efficiency = result.param_count / self.param_budget if result.param_count > 0 else 0.5
@@ -991,7 +1021,7 @@ class SweepExecutor:
                         result.error = "BUDGET_EXCEEDED: " + (result.error or "")
                         return result
 
-                if result.loss == float("inf") or math.isnan(result.loss):
+                if result.loss is None or result.loss == float("inf") or math.isnan(result.loss):
                     failure_type = self.retry_strategy.classify_failure(result.error, result.loss)
                     self._log(
                         "INFO",
@@ -1126,7 +1156,7 @@ class SweepExecutor:
                     mean_confidence = status.get("mean_confidence")
                     # HPOReporter writes 'expected_calibration_error', not 'ece'
                     ece = status.get("expected_calibration_error") or status.get("ece")
-                    param_count = status.get("param_count", 0)
+                    param_count = status.get("param_count", 0) or 0
                     epochs_completed = status.get("epochs_completed", 0)
                     # CRITICAL: Read error from status.json (includes BUDGET_EXCEEDED)
                     error = status.get("error")
@@ -1175,7 +1205,7 @@ class SweepExecutor:
             error = stderr.decode() if stderr else "Unknown error"
 
         # VERBOSE LOGGING: Print trial subprocess output to console for debugging
-        print(f"\n{'='*80}")
+        print(f"\n{'=' * 80}")
 
         # Translate negative exit codes to signal names for better debugging
         exit_code_str = str(process.returncode)
@@ -1240,7 +1270,7 @@ class SweepExecutor:
                 if line.strip():
                     print(f"  ! {line}")
 
-        print(f"{'='*80}\n")
+        print(f"{'=' * 80}\n")
 
         # Log trial output for debugging (for the WebUI logs)
         # Send more lines to WebUI for better visibility
@@ -1427,7 +1457,7 @@ class SweepExecutor:
                 perplexity=trial_data.get("perplexity"),
                 mean_confidence=trial_data.get("mean_confidence"),
                 ece=trial_data.get("ece"),
-                param_count=trial_data.get("param_count", 0),
+                param_count=trial_data.get("param_count", 0) or 0,
                 hyperparams=trial_data.get("hyperparams", {}),
                 epochs_completed=trial_data.get("epochs_completed", 0),
                 wall_time_seconds=trial_data.get("wall_time_seconds", 0),
@@ -1445,7 +1475,7 @@ class SweepExecutor:
                 perplexity=best_data.get("perplexity"),
                 mean_confidence=best_data.get("mean_confidence"),
                 ece=best_data.get("ece"),
-                param_count=best_data.get("param_count", 0),
+                param_count=best_data.get("param_count", 0) or 0,
                 hyperparams=best_data.get("hyperparams", {}),
             )
 

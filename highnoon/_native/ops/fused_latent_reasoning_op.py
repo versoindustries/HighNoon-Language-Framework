@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import tensorflow as tf
 
+from highnoon import config as hn_config
 from highnoon._native import get_op
 
 # Load the C++ op library
@@ -92,6 +93,9 @@ def fused_latent_reasoning(
     @tf.custom_gradient
     def _fused_latent_reasoning_inner(x_in, tng, tnb, tuw, tub, tdw, tdb, ong, onb):
         """Inner function with tensor-only signature."""
+        streaming_chunk_size = (
+            hn_config.STREAMING_CHUNK_SIZE if getattr(hn_config, "STREAMING_ENABLED", True) else 0
+        )
         output, halt_prob = _fused_latent_reasoning_op(
             x=x_in,
             thought_norm_gamma=tng,
@@ -105,6 +109,7 @@ def fused_latent_reasoning(
             num_thought_steps=num_thought_steps,
             use_entropy_guidance=use_entropy_guidance,
             uncertainty_threshold=uncertainty_threshold,
+            streaming_chunk_size=streaming_chunk_size,
         )
 
         def grad(grad_output, grad_halt_prob):
@@ -117,6 +122,7 @@ def fused_latent_reasoning(
                     thought_up_weight=tuw,
                     thought_down_weight=tdw,
                     num_thought_steps=num_thought_steps,
+                    streaming_chunk_size=streaming_chunk_size,
                 )
                 grad_x, grad_gamma, grad_beta, grad_uw, grad_ub, grad_dw, grad_db = grads
                 # Output norms get zero gradients for now

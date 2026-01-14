@@ -63,7 +63,7 @@ def _load_ops():
         _available = False
         logger.warning(f"Failed to load Quantum Coherence Bus ops: {e}")
         raise RuntimeError(
-            "Quantum Coherence Bus native ops not available. " "Run ./build_secure.sh to compile."
+            "Quantum Coherence Bus native ops not available. Run ./build_secure.sh to compile."
         ) from e
     return _available
 

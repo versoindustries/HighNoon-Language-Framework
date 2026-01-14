@@ -10,7 +10,6 @@ Implements MPS as a Keras layer with learnable bond dimensions, supporting:
 - Integration with variational quantum circuits (VQC)
 """
 
-
 import numpy as np
 import tensorflow as tf
 
@@ -117,7 +116,7 @@ class MPSLayer(ControlVarMixin, tf.keras.layers.Layer):
 
         # Metrics
         self._avg_entanglement_metric = tf.keras.metrics.Mean(
-            name=f'{self.name or "mps"}_avg_entanglement'
+            name=f"{self.name or 'mps'}_avg_entanglement"
         )
 
         super().build(input_shape)

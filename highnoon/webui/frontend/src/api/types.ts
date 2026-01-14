@@ -259,6 +259,8 @@ export interface HuggingFaceDataset {
     likes: number;
     tags: string[];
     lastModified: string;
+    gated?: boolean | string;  // false, true, "auto", or "manual"
+    private?: boolean;
 }
 
 // ============================================================================
@@ -300,7 +302,8 @@ export type WebSocketMessage =
     | { type: 'sweep_update'; data: Partial<HPOSweepInfo> }
     | { type: 'log'; data: { level: string; message: string; timestamp: string } }
     | { type: 'finished'; state: JobState }
-    | { type: 'error'; message: string };
+    | { type: 'error'; message: string }
+    | { type: 'pong'; ts: number };
 
 // ============================================================================
 // Lite Edition Limits

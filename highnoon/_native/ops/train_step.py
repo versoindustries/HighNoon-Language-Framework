@@ -123,8 +123,7 @@ def fused_train_step(
     """
     if _train_step_module is None:
         raise NotImplementedError(
-            "The fused_train_step custom op is unavailable. "
-            "Rebuild the C++ ops via build_ops.sh."
+            "The fused_train_step custom op is unavailable. Rebuild the C++ ops via build_ops.sh."
         )
 
     return _train_step_module.train_step(

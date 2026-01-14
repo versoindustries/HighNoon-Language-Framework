@@ -1,0 +1,166 @@
+/* QuantumPopulationViz.css - Quantum population visualization styling */
+
+.quantum-pop {
+    background: var(--card-bg, rgba(15, 23, 42, 0.8));
+    border: 1px solid var(--border-color, rgba(255, 255, 255, 0.1));
+    border-radius: 12px;
+    padding: 16px;
+    transition: background 0.5s ease, box-shadow 0.3s ease;
+}
+
+.quantum-pop--empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 200px;
+    color: var(--text-muted, rgba(255, 255, 255, 0.5));
+    gap: 12px;
+}
+
+.quantum-pop--tunnel-flash {
+    box-shadow: 0 0 30px rgba(139, 92, 246, 0.4), inset 0 0 20px rgba(139, 92, 246, 0.1);
+    animation: tunnel-pulse 0.5s ease-out;
+}
+
+@keyframes tunnel-pulse {
+    0% {
+        box-shadow: 0 0 30px rgba(139, 92, 246, 0.6), inset 0 0 30px rgba(139, 92, 246, 0.2);
+    }
+
+    100% {
+        box-shadow: none;
+    }
+}
+
+/* Header */
+.quantum-pop__header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.quantum-pop__title {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-primary, #fff);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.quantum-pop__stats {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+}
+
+.quantum-pop__stat {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--text-muted, rgba(255, 255, 255, 0.6));
+}
+
+.quantum-pop__stat sub {
+    font-size: 9px;
+}
+
+.quantum-pop__mode {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    padding: 2px 8px;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.1);
+}
+
+.quantum-pop__mode--explore {
+    background: rgba(245, 158, 11, 0.2);
+    color: #fbbf24;
+}
+
+.quantum-pop__mode--exploit {
+    background: rgba(16, 185, 129, 0.2);
+    color: #34d399;
+}
+
+.quantum-pop__mode--warmup {
+    background: rgba(99, 102, 241, 0.2);
+    color: #a5b4fc;
+}
+
+/* Waiting state */
+.quantum-pop__waiting {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 40px;
+    color: var(--text-muted, rgba(255, 255, 255, 0.5));
+    font-size: 13px;
+}
+
+/* Population grid */
+.quantum-pop__grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    justify-content: center;
+    align-items: center;
+    padding: 20px;
+    min-height: 120px;
+}
+
+.quantum-pop__node {
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+    position: relative;
+}
+
+.quantum-pop__node:hover {
+    transform: scale(1.15);
+    z-index: 10;
+}
+
+.quantum-pop__node-rank {
+    font-size: 11px;
+    font-weight: 700;
+    color: rgba(0, 0, 0, 0.7);
+    text-shadow: 0 1px 2px rgba(255, 255, 255, 0.3);
+}
+
+/* Legend */
+.quantum-pop__legend {
+    display: flex;
+    gap: 16px;
+    justify-content: center;
+    margin-top: 16px;
+    padding-top: 12px;
+    border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.quantum-pop__legend-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 10px;
+    color: var(--text-muted, rgba(255, 255, 255, 0.5));
+}
+
+.quantum-pop__legend-gradient {
+    width: 40px;
+    height: 8px;
+    border-radius: 4px;
+    background: linear-gradient(to right, hsl(0, 70%, 55%), hsl(60, 70%, 55%), hsl(120, 70%, 55%));
+}

@@ -133,6 +133,43 @@ class EvolutionTimeControlBridge:
                             self._evolution_time_vars[key] = var
                             logger.info(f"Found via cell attribute: {key} -> {var.name}")
 
+            # STRATEGY 3.5: Inner block access (for QuantumEnhancedBlock wrappers)
+            # QuantumEnhancedBlock wraps TimeCrystal blocks and exposes inner_block
+            if layer_name not in self._evolution_time_vars:
+                if hasattr(layer, "inner_block"):
+                    inner = layer.inner_block
+                    # Check inner block's control_vars (delegated via property)
+                    if hasattr(inner, "control_vars") and isinstance(inner.control_vars, dict):
+                        if "evolution_time" in inner.control_vars:
+                            vars_list = inner.control_vars["evolution_time"]
+                            if vars_list and len(vars_list) > 0:
+                                var = vars_list[0]
+                                if isinstance(var, tf.Variable):
+                                    self._evolution_time_vars[layer_name] = var
+                                    logger.info(
+                                        f"Found via inner_block control_vars: {layer_name} -> {var.name}"
+                                    )
+                    # Check inner block's evolution_time_bias directly
+                    if layer_name not in self._evolution_time_vars and hasattr(
+                        inner, "evolution_time_bias"
+                    ):
+                        var = inner.evolution_time_bias
+                        if isinstance(var, tf.Variable):
+                            self._evolution_time_vars[layer_name] = var
+                            logger.info(
+                                f"Found via inner_block attribute: {layer_name} -> {var.name}"
+                            )
+                    # Check inner block's cell (for TimeCrystalSequenceBlock)
+                    if layer_name not in self._evolution_time_vars and hasattr(inner, "cell"):
+                        inner_cell = inner.cell
+                        if hasattr(inner_cell, "evolution_time_bias"):
+                            var = inner_cell.evolution_time_bias
+                            if isinstance(var, tf.Variable):
+                                self._evolution_time_vars[layer_name] = var
+                                logger.info(
+                                    f"Found via inner_block.cell: {layer_name} -> {var.name}"
+                                )
+
             # STRATEGY 4: Search all non-trainable variables (fallback)
             if layer_name not in self._evolution_time_vars:
                 for var in layer.non_trainable_variables:

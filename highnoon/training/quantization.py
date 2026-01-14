@@ -454,7 +454,6 @@ def export_quantized_model(
     config = config or QuantizationConfig()
 
     try:
-
         # Use TF-MOT for conversion
         converter = tf.lite.TFLiteConverter.from_keras_model(model)
         converter.optimizations = [tf.lite.Optimize.DEFAULT]

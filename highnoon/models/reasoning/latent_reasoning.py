@@ -278,7 +278,7 @@ class LatentReasoningBlock(FusedReasoningBlockMixin, tf.keras.layers.Layer):
         # Phase 12.13: Hierarchical level processors
         if self.use_hierarchical_thought:
             self.level_processors = []
-            for i, _ in enumerate(self.thought_levels):
+            for i in range(self.thought_levels):
                 norm = tf.keras.layers.LayerNormalization(
                     epsilon=1e-6,
                     name=f"{self.name}_level_{i}_norm",
@@ -417,7 +417,8 @@ class LatentReasoningBlock(FusedReasoningBlockMixin, tf.keras.layers.Layer):
         # Query past thoughts (O(M) attention, not O(L))
         query = tf.reduce_mean(hidden, axis=1, keepdims=True)  # [B, 1, D]
         attention_weights = tf.nn.softmax(
-            tf.matmul(query, thought_buffer, transpose_b=True), axis=-1  # [B, 1, M]
+            tf.matmul(query, thought_buffer, transpose_b=True),
+            axis=-1,  # [B, 1, M]
         )
         thought_context = tf.matmul(attention_weights, thought_buffer)  # [B, 1, D]
 

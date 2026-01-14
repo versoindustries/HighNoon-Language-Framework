@@ -26,6 +26,7 @@ import type {
 } from '../api/types';
 import { TrainingConsole } from '../components/TrainingConsole';
 import { HPODashboard } from '../components/HPODashboard';
+import { CurriculumSelector } from '../components/CurriculumSelector';
 import './HPO.css';
 
 // =============================================================================
@@ -77,6 +78,34 @@ const LicenseContext = createContext<LicenseTier>('lite');
 // CONSTANTS
 // =============================================================================
 
+const OPTIMIZER_DESCRIPTIONS: Record<string, string> = {
+    sophiag: "SophiaG (Second-order Clipping): Uses Hessian diagonal approximation for faster convergence and better generalization than Adam. Recommended for most HSMN models.",
+    qiao: "QIAO (Quantum-Inspired Alternating Optimization): Alternates between classical gradient descent and quantum tunneling phases to escape sharp local minima.",
+    grover: "Grover-Q: Applies Grover's search algorithm principles to explore the loss landscape, offering quadratic speedup in finding global optima.",
+    sympflow: "SympFlow (Symplectic Hamiltonian Flow): Preserves phase space volume/energy, providing superior long-term training stability and preventing collapse.",
+    sympflowqng: "SympFlowQNG: Combines Symplectic Flow with Quantum Natural Gradient (Fubini-Study metric) for geometry-aware updates in quantum layers.",
+    adamw: "AdamW: The standard Adam optimizer with decoupled weight decay. robust baseline but less efficient than quantum variants.",
+    adam: "Adam: The classic adaptive moment estimation optimizer. Good baseline but lacks weight decay decoupling.",
+    lion: "Lion (Evolved Sign Momentum): Memory-efficient optimizer discovered via evolution. Uses sign of gradient, strictly lower memory usage than AdamW.",
+    custom: "Custom: User-defined optimizer configuration.",
+};
+
+const SCHEDULER_DESCRIPTIONS: Record<string, string> = {
+    hyperband: "Hyperband: Classic multi-fidelity scheduling using successive halving. Synchronous execution, works without additional infrastructure. Best for single-GPU setups.",
+    asha: "ASHA (Async Successive Halving): Asynchronous scheduling allows trials to run independently. Better GPU utilization on multi-GPU systems. Requires Ray Tune.",
+    mobster: "MOBSTER: Model-Based ASHA uses a Gaussian Process to predict which trials to promote. More sample-efficient but higher overhead. Best for expensive trials.",
+    freeze_thaw: "Freeze-Thaw BO: Dynamically pauses and resumes trials based on learning curve predictions. Ideal for very long trials where early curve shape predicts final performance.",
+    pbt_backtrack: "PBT with Backtracking: Population-Based Training with checkpoint tree. Can backtrack to earlier checkpoints when mutations fail. Best for hyperparameter schedules.",
+};
+
+const ANALYZER_DESCRIPTIONS: Record<string, string> = {
+    fanova: "Standard fANOVA: Functional ANOVA using Random Forest. Fast and reliable importance estimation. Good default choice for most sweeps.",
+    shapley: "Shapley Values: Game-theoretic importance where each hyperparameter's contribution is fairly attributed. More principled than fANOVA but slightly slower.",
+    graph: "Graph fANOVA: Handles conditional hyperparameters (e.g., num_experts only matters if use_moe=True). Best for hierarchical configurations.",
+    causal: "Causal fANOVA: Uses do-calculus to distinguish correlation from causation. Reveals which parameters actually cause performance changes vs. spurious correlations.",
+    streaming: "Streaming fANOVA: O(1) memory updates using Welford's algorithm. Best for very long sweeps (1000+ trials) where memory is a concern.",
+};
+
 // HPO always runs until convergence - no manual mode selection needed
 
 
@@ -102,7 +131,29 @@ function getTierBadge(tier: LicenseTier) {
 
 // Vocab size slider config (max: 256K for expanded tokenizer support)
 const VOCAB_STOPS = [8000, 16000, 32000, 50000, 65536, 100000, 128000, 256000];
-const CONTEXT_STOPS = [512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576, 2097152, 5000000];
+// Context window slider - smoother stops from 8K to 5M
+const CONTEXT_STOPS = [
+    8192,       // 8K (minimum)
+    12288,      // 12K
+    16384,      // 16K
+    24576,      // 24K
+    32768,      // 32K
+    49152,      // 48K
+    65536,      // 64K
+    98304,      // 96K
+    131072,     // 128K (GPT-4 Turbo)
+    196608,     // 192K
+    262144,     // 256K
+    393216,     // 384K
+    524288,     // 512K
+    786432,     // 768K
+    1048576,    // 1M (Gemini baseline)
+    1572864,    // 1.5M
+    2097152,    // 2M (Gemini Pro)
+    3145728,    // 3M
+    4194304,    // 4M
+    5000000,    // 5M (HighNoon max)
+];
 
 // Parameter budget stops (100M to 20B) - expanded for fine-grained control
 const PARAM_STOPS = [
@@ -411,7 +462,7 @@ export function HPO() {
     const [selectedCurriculum, setSelectedCurriculum] = useState<string>('');
 
     // Model configuration - Context window slider (vocab is auto-determined)
-    const [contextWindow, setContextWindow] = useState(4096);
+    const [contextWindow, setContextWindow] = useState(131072);  // Default 128K
 
     // Parameter budget - HPO will find optimal architecture within this constraint
     const [paramBudget, setParamBudget] = useState(1_000_000_000); // Default 1B
@@ -420,6 +471,16 @@ export function HPO() {
     const [advancedOpen, setAdvancedOpen] = useState(false);
     const [searchStrategy] = useState('quantum');  // QAHPO is the only strategy
     const [selectedOptimizers, setSelectedOptimizers] = useState<string[]>(['sophiag']);
+
+    // Enterprise HPO Features
+    const [multiFidelityScheduler, setMultiFidelityScheduler] = useState('hyperband');
+    const [importanceAnalyzer, setImportanceAnalyzer] = useState('shapley');
+    const [enableZeroCostProxy, setEnableZeroCostProxy] = useState(true);
+    const [enableEarlyStopping, setEnableEarlyStopping] = useState(true);
+    const [enableDeepKernelGP, setEnableDeepKernelGP] = useState(true);
+    const [enableAcquisitionPortfolio, setEnableAcquisitionPortfolio] = useState(true);
+    const [enableRegretTracking, setEnableRegretTracking] = useState(true);
+    const [enableDARTS, setEnableDARTS] = useState(false);
 
     // Learning rate is now auto-tuned based on optimizer selection
     // (handled by backend in hpo_manager.py using OPTIMIZER_LR_RANGES)
@@ -564,6 +625,13 @@ export function HPO() {
                     setIsRunning(false);
                 }
             } catch (err) {
+                // Check if sweep no longer exists (404) - can happen after backend restart
+                if (err instanceof Error && err.message.includes('404')) {
+                    console.warn('[HPO] Sweep no longer exists (backend may have restarted), stopping poll');
+                    setIsRunning(false);
+                    setSweepStatus(prev => prev ? { ...prev, state: 'completed' } as HPOSweepInfo : null);
+                    return;
+                }
                 console.error('[HPO] Failed to poll sweep status:', err);
             }
         }, 5000); // Poll every 5 seconds
@@ -592,6 +660,11 @@ export function HPO() {
     };
 
     const handleStartSweep = async () => {
+        // Clear stale sweep state before starting new sweep
+        // This prevents 404 errors from polling old sweep IDs after backend restart
+        setSweepStatus(null);
+        setTrials([]);
+        setBudgetStats(null);
         setIsRunning(true);
         try {
             const response = await fetch('/api/hpo/sweep/start', {
@@ -609,6 +682,15 @@ export function HPO() {
                     use_hyperdimensional_embedding: true,  // Use HDE for memory efficiency
                     // Parameter budget constraint - HPO will auto-discover optimal architecture
                     param_budget: paramBudget,
+                    // Enterprise HPO Features
+                    multi_fidelity_scheduler: multiFidelityScheduler,
+                    importance_analyzer: importanceAnalyzer,
+                    enable_zero_cost_proxy: enableZeroCostProxy,
+                    enable_early_stopping_predictor: enableEarlyStopping,
+                    enable_deep_kernel_gp: enableDeepKernelGP,
+                    enable_acquisition_portfolio: enableAcquisitionPortfolio,
+                    enable_regret_tracking: enableRegretTracking,
+                    enable_darts: enableDARTS,
                 }),
             });
             const data = await response.json();
@@ -717,37 +799,12 @@ export function HPO() {
                                                     <p className="wizard-step-desc">
                                                         Choose the curriculum to optimize hyperparameters for
                                                     </p>
-                                                    <div className="curriculum-options">
-                                                        {loadingCurricula ? (
-                                                            <div className="curriculum-loading">Loading curricula...</div>
-                                                        ) : curricula.length === 0 ? (
-                                                            <div className="curriculum-empty">
-                                                                <Info size={24} />
-                                                                <p>No curricula found. Create one in the Curriculum tab first.</p>
-                                                            </div>
-                                                        ) : (
-                                                            curricula.map((curr) => (
-                                                                <label
-                                                                    key={curr.id}
-                                                                    className={`curriculum-option ${selectedCurriculum === curr.id ? 'curriculum-option-selected' : ''}`}
-                                                                >
-                                                                    <input
-                                                                        type="radio"
-                                                                        name="curriculum"
-                                                                        value={curr.id}
-                                                                        checked={selectedCurriculum === curr.id}
-                                                                        onChange={() => setSelectedCurriculum(curr.id)}
-                                                                    />
-                                                                    <div className="curriculum-option-content">
-                                                                        <span className="curriculum-option-name">{curr.name}</span>
-                                                                        <div className="curriculum-option-meta">
-                                                                            <span>{curr.stages.length} stages</span>
-                                                                        </div>
-                                                                    </div>
-                                                                </label>
-                                                            ))
-                                                        )}
-                                                    </div>
+                                                    <CurriculumSelector
+                                                        curricula={curricula}
+                                                        loading={loadingCurricula}
+                                                        selectedId={selectedCurriculum}
+                                                        onSelect={setSelectedCurriculum}
+                                                    />
                                                 </div>
                                             )}
 
@@ -871,8 +928,120 @@ export function HPO() {
                                                                                 onChange={(e) => setSelectedOptimizers([e.target.value])}
                                                                                 fullWidth
                                                                             />
+                                                                            <p className="optimizer-description">
+                                                                                {OPTIMIZER_DESCRIPTIONS[selectedOptimizers[0]]}
+                                                                            </p>
                                                                         </div>
                                                                     </div>
+
+                                                                    {/* Enterprise HPO Features Section */}
+                                                                    <div className="enterprise-hpo-section">
+                                                                        <div className="config-section-divider">
+                                                                            <Crown size={14} />
+                                                                            <span>Enterprise HPO Features</span>
+                                                                        </div>
+
+                                                                        <div className="config-grid">
+                                                                            {/* Multi-Fidelity Scheduler */}
+                                                                            <div className="config-field">
+                                                                                <label className="config-label">
+                                                                                    <Layers size={14} />
+                                                                                    Multi-Fidelity Scheduler
+                                                                                </label>
+                                                                                <Select
+                                                                                    options={[
+                                                                                        { value: 'hyperband', label: 'Hyperband (Default)' },
+                                                                                        { value: 'asha', label: 'ASHA (Async Successive Halving)' },
+                                                                                        { value: 'mobster', label: 'MOBSTER (Model-Based ASHA)' },
+                                                                                        { value: 'freeze_thaw', label: 'Freeze-Thaw BO (Curve Prediction)' },
+                                                                                        { value: 'pbt_backtrack', label: 'PBT with Backtracking' },
+                                                                                    ]}
+                                                                                    value={multiFidelityScheduler}
+                                                                                    onChange={(e) => setMultiFidelityScheduler(e.target.value)}
+                                                                                    fullWidth
+                                                                                />
+                                                                                <p className="feature-description">
+                                                                                    {SCHEDULER_DESCRIPTIONS[multiFidelityScheduler]}
+                                                                                </p>
+                                                                            </div>
+
+                                                                            {/* Importance Analyzer */}
+                                                                            <div className="config-field">
+                                                                                <label className="config-label">
+                                                                                    <BarChart3 size={14} />
+                                                                                    Importance Analyzer
+                                                                                </label>
+                                                                                <Select
+                                                                                    options={[
+                                                                                        { value: 'fanova', label: 'Standard fANOVA' },
+                                                                                        { value: 'shapley', label: 'Shapley Values (Recommended)' },
+                                                                                        { value: 'graph', label: 'Graph fANOVA (Conditional)' },
+                                                                                        { value: 'causal', label: 'Causal fANOVA (Interventional)' },
+                                                                                        { value: 'streaming', label: 'Streaming fANOVA (O(1) Updates)' },
+                                                                                    ]}
+                                                                                    value={importanceAnalyzer}
+                                                                                    onChange={(e) => setImportanceAnalyzer(e.target.value)}
+                                                                                    fullWidth
+                                                                                />
+                                                                                <p className="feature-description">
+                                                                                    {ANALYZER_DESCRIPTIONS[importanceAnalyzer]}
+                                                                                </p>
+                                                                            </div>
+                                                                        </div>
+
+                                                                        {/* Feature Toggles */}
+                                                                        <div className="feature-toggles">
+                                                                            <label className="config-label" style={{ marginBottom: '8px' }}>
+                                                                                <Zap size={14} />
+                                                                                Enhanced Features
+                                                                            </label>
+                                                                            <div className="toggle-grid">
+                                                                                <label className="toggle-item">
+                                                                                    <input type="checkbox" checked={enableZeroCostProxy} onChange={(e) => setEnableZeroCostProxy(e.target.checked)} />
+                                                                                    <div className="toggle-content">
+                                                                                        <span className="toggle-name">Zero-Cost Proxies</span>
+                                                                                        <span className="toggle-desc">Pre-filter architectures without training (NASWOT, SynFlow)</span>
+                                                                                    </div>
+                                                                                </label>
+                                                                                <label className="toggle-item">
+                                                                                    <input type="checkbox" checked={enableEarlyStopping} onChange={(e) => setEnableEarlyStopping(e.target.checked)} />
+                                                                                    <div className="toggle-content">
+                                                                                        <span className="toggle-name">Early Stopping Predictor</span>
+                                                                                        <span className="toggle-desc">Stop unpromising trials early based on curve prediction</span>
+                                                                                    </div>
+                                                                                </label>
+                                                                                <label className="toggle-item">
+                                                                                    <input type="checkbox" checked={enableDeepKernelGP} onChange={(e) => setEnableDeepKernelGP(e.target.checked)} />
+                                                                                    <div className="toggle-content">
+                                                                                        <span className="toggle-name">Deep Kernel GP</span>
+                                                                                        <span className="toggle-desc">Neural network feature extraction for high-dim correlations</span>
+                                                                                    </div>
+                                                                                </label>
+                                                                                <label className="toggle-item">
+                                                                                    <input type="checkbox" checked={enableAcquisitionPortfolio} onChange={(e) => setEnableAcquisitionPortfolio(e.target.checked)} />
+                                                                                    <div className="toggle-content">
+                                                                                        <span className="toggle-name">Acquisition Portfolio (EXP3)</span>
+                                                                                        <span className="toggle-desc">Ensemble of EI, UCB, PI with bandit-based selection</span>
+                                                                                    </div>
+                                                                                </label>
+                                                                                <label className="toggle-item">
+                                                                                    <input type="checkbox" checked={enableRegretTracking} onChange={(e) => setEnableRegretTracking(e.target.checked)} />
+                                                                                    <div className="toggle-content">
+                                                                                        <span className="toggle-name">Regret Tracking</span>
+                                                                                        <span className="toggle-desc">Monitor optimization quality with theoretical bounds</span>
+                                                                                    </div>
+                                                                                </label>
+                                                                                <label className="toggle-item">
+                                                                                    <input type="checkbox" checked={enableDARTS} onChange={(e) => setEnableDARTS(e.target.checked)} />
+                                                                                    <div className="toggle-content">
+                                                                                        <span className="toggle-name">DARTS NAS</span>
+                                                                                        <span className="toggle-desc">Differentiable architecture search (heavyweight)</span>
+                                                                                    </div>
+                                                                                </label>
+                                                                            </div>
+                                                                        </div>
+                                                                    </div>
+
                                                                     {/* Learning rate auto-tuning indicator */}
                                                                     <div className="config-field auto-tuned-field">
                                                                         <div className="auto-tuned-indicator">

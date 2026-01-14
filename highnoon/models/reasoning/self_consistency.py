@@ -38,9 +38,33 @@ from typing import Any
 import tensorflow as tf
 from tensorflow.keras import layers
 
+from highnoon import config
 from highnoon.config import CONSISTENCY_THRESHOLD, USE_SELF_CONSISTENCY
 
 logger = logging.getLogger(__name__)
+
+# Lazy-load C++ ops
+_self_consistency_ops = None
+
+
+def _get_self_consistency_ops():
+    """Lazy-load FusedSelfConsistency C++ ops."""
+    global _self_consistency_ops
+    if _self_consistency_ops is None:
+        try:
+            from highnoon._native import get_op
+
+            _self_consistency_ops = get_op("highnoon_core")
+            if _self_consistency_ops is not None and hasattr(
+                _self_consistency_ops, "FusedSelfConsistency"
+            ):
+                logger.info("[SelfConsistencyVerifier] C++ FusedSelfConsistency op loaded.")
+            else:
+                _self_consistency_ops = None
+        except Exception as e:
+            logger.debug(f"[SelfConsistencyVerifier] C++ ops unavailable: {e}")
+            _self_consistency_ops = None
+    return _self_consistency_ops
 
 
 class SelfConsistencyVerifier(layers.Layer):
@@ -138,6 +162,44 @@ class SelfConsistencyVerifier(layers.Layer):
             name=f"{self.name}_norm",
         )
 
+        # Packed weights for C++ FusedSelfConsistency op
+        if getattr(config, "USE_NATIVE_SELF_CONSISTENCY", True):
+            head_dim = self.embedding_dim // self.num_verification_heads
+            # Verification weights: [num_heads, dim, head_dim]
+            self.packed_verification_weights = self.add_weight(
+                name="packed_verification_weights",
+                shape=(self.num_verification_heads, self.embedding_dim, head_dim),
+                initializer="glorot_uniform",
+                trainable=True,
+            )
+            # Aggregation weight: [total_head_dim, dim]
+            self.packed_aggregation_weight = self.add_weight(
+                name="packed_aggregation_weight",
+                shape=(head_dim * self.num_verification_heads, self.embedding_dim),
+                initializer="glorot_uniform",
+                trainable=True,
+            )
+            # Aggregation bias
+            self.packed_aggregation_bias = self.add_weight(
+                name="packed_aggregation_bias",
+                shape=(self.embedding_dim,),
+                initializer="zeros",
+                trainable=True,
+            )
+            # Norm gamma/beta (separate from layer_norm for C++ op)
+            self.packed_norm_gamma = self.add_weight(
+                name="packed_norm_gamma",
+                shape=(self.embedding_dim,),
+                initializer="ones",
+                trainable=True,
+            )
+            self.packed_norm_beta = self.add_weight(
+                name="packed_norm_beta",
+                shape=(self.embedding_dim,),
+                initializer="zeros",
+                trainable=True,
+            )
+
         super().build(input_shape)
 
     def compute_pairwise_agreement(
@@ -159,8 +221,8 @@ class SelfConsistencyVerifier(layers.Layer):
         # Stack paths: [batch, seq_len, num_paths, dim]
         stacked = tf.stack(paths, axis=2)
 
-        # Normalize for cosine similarity
-        normalized = tf.math.l2_normalize(stacked, axis=-1)
+        # Normalize for cosine similarity (add epsilon to prevent NaN gradients)
+        normalized = tf.math.l2_normalize(stacked, axis=-1, epsilon=1e-8)
 
         # Compute pairwise cosine similarity
         # [B, L, P, D] @ [B, L, D, P] -> [B, L, P, P]
@@ -220,6 +282,14 @@ class SelfConsistencyVerifier(layers.Layer):
             verified_output: [batch, seq_len, embedding_dim]
             confidence_scores: [batch, seq_len]
         """
+        # Route to C++ FusedSelfConsistency when available (has gradient support)
+        if (
+            getattr(config, "USE_NATIVE_SELF_CONSISTENCY", True)
+            and hasattr(self, "packed_verification_weights")
+            and _get_self_consistency_ops() is not None
+        ):
+            return self._call_native(reasoning_paths, return_confidence, training)
+
         # Handle both list and stacked tensor input
         if isinstance(reasoning_paths, tf.Tensor):
             if len(reasoning_paths.shape) == 4:
@@ -297,6 +367,108 @@ class SelfConsistencyVerifier(layers.Layer):
 
         if return_confidence:
             return output, gated_confidence
+        return output
+
+    def _call_native(
+        self,
+        reasoning_paths: list[tf.Tensor] | tf.Tensor,
+        return_confidence: bool = True,
+        training: bool = False,
+    ) -> tf.Tensor | tuple[tf.Tensor, tf.Tensor]:
+        """Forward pass using C++ FusedSelfConsistency op.
+
+        The C++ op fuses pairwise agreement, consistency scoring, verification
+        head projections, weighted combination, aggregation, and layer norm
+        into a single optimized kernel.
+
+        Args:
+            reasoning_paths: List or stacked tensor of reasoning paths.
+            return_confidence: Whether to return confidence scores.
+            training: Whether in training mode.
+
+        Returns:
+            Output and optional confidence scores.
+        """
+        ops = _get_self_consistency_ops()
+
+        # Convert paths to stacked tensor [B, L, P, D] for C++ op
+        if isinstance(reasoning_paths, tf.Tensor):
+            if len(reasoning_paths.shape) == 4:
+                paths_stacked = reasoning_paths
+            elif len(reasoning_paths.shape) == 3:
+                paths_stacked = reasoning_paths[:, :, tf.newaxis, :]
+            else:
+                raise ValueError(f"Invalid reasoning_paths shape: {reasoning_paths.shape}")
+        else:
+            paths_stacked = tf.stack(reasoning_paths, axis=2)
+
+        # Cast to float32
+        paths_stacked = tf.cast(paths_stacked, tf.float32)
+
+        streaming_chunk_size = (
+            config.STREAMING_CHUNK_SIZE if getattr(config, "STREAMING_ENABLED", True) else 0
+        )
+
+        @tf.custom_gradient
+        def _fused_self_consistency(
+            paths,
+            verification_weights,
+            aggregation_weight,
+            aggregation_bias,
+            norm_gamma,
+            norm_beta,
+        ):
+            output, confidence = ops.FusedSelfConsistency(
+                paths=paths,
+                verification_weights=verification_weights,
+                aggregation_weight=aggregation_weight,
+                aggregation_bias=aggregation_bias,
+                norm_gamma=norm_gamma,
+                norm_beta=norm_beta,
+                num_verification_heads=self.num_verification_heads,
+                threshold=self.threshold,
+                streaming_chunk_size=streaming_chunk_size,
+            )
+
+            def grad(dy_output, dy_confidence, variables=None):
+                grads = ops.FusedSelfConsistencyGrad(
+                    grad_output=dy_output,
+                    grad_confidence=dy_confidence,
+                    paths=paths,
+                    verification_weights=verification_weights,
+                    aggregation_weight=aggregation_weight,
+                    aggregation_bias=aggregation_bias,
+                    norm_gamma=norm_gamma,
+                    norm_beta=norm_beta,
+                    num_verification_heads=self.num_verification_heads,
+                    threshold=self.threshold,
+                    streaming_chunk_size=streaming_chunk_size,
+                )
+                input_grads = (
+                    grads[0],  # grad_paths
+                    grads[1],  # grad_verification_weights
+                    grads[2],  # grad_aggregation_weight
+                    grads[3],  # grad_aggregation_bias
+                    grads[4],  # grad_norm_gamma
+                    grads[5],  # grad_norm_beta
+                )
+                if variables is None:
+                    return input_grads
+                return input_grads, [tf.zeros_like(v) for v in variables]
+
+            return (output, confidence), grad
+
+        output, confidence = _fused_self_consistency(
+            paths_stacked,
+            self.packed_verification_weights,
+            self.packed_aggregation_weight,
+            self.packed_aggregation_bias,
+            self.packed_norm_gamma,
+            self.packed_norm_beta,
+        )
+
+        if return_confidence:
+            return output, confidence
         return output
 
     def get_config(self) -> dict[str, Any]:

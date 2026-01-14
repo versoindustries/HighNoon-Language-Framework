@@ -1,6 +1,6 @@
 /* HighNoon Dashboard - Global Styles */
 @import './variables.css';
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Outfit:wght@500;600;700&display=swap');
 
 /* Reset & Base */
 *,
@@ -39,6 +39,7 @@ h3,
 h4,
 h5,
 h6 {
+    font-family: 'Outfit', var(--font-sans);
     font-weight: var(--font-semibold);
     line-height: var(--leading-tight);
     color: var(--text-primary);
@@ -302,4 +303,234 @@ pre {
 
 .gap-lg {
     gap: var(--spacing-lg);
+}
+
+/* =============================================================================
+   ACCESSIBILITY (WCAG 2.1 AA Compliant)
+   ============================================================================= */
+
+/* Reduced Motion Support - respects user preferences */
+@media (prefers-reduced-motion: reduce) {
+
+    *,
+    *::before,
+    *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+        scroll-behavior: auto !important;
+    }
+
+    /* Disable specific animations */
+    .animate-spin,
+    .animate-pulse,
+    .animate-fadeIn,
+    .animate-slideIn,
+    .animate-scaleIn {
+        animation: none !important;
+    }
+}
+
+/* Enhanced Focus Indicators */
+:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+    border-radius: var(--radius-sm);
+}
+
+/* Focus within for complex components like cards */
+.card:focus-within,
+.btn:focus-within {
+    box-shadow: 0 0 0 3px var(--color-primary-muted);
+}
+
+/* High contrast focus for buttons */
+.btn:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+    box-shadow: 0 0 0 4px var(--color-primary-muted);
+}
+
+/* Skip Navigation Link (for keyboard users) */
+.skip-nav {
+    position: absolute;
+    top: -100%;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 10000;
+    padding: var(--spacing-sm) var(--spacing-lg);
+    background: var(--color-primary);
+    color: white;
+    border-radius: var(--radius-md);
+    font-weight: var(--font-semibold);
+    text-decoration: none;
+    transition: top var(--duration-fast) var(--ease-out-expo);
+}
+
+.skip-nav:focus {
+    top: var(--spacing-md);
+}
+
+/* Ensure minimum touch target size (44x44px) */
+button,
+[role="button"],
+a,
+input[type="checkbox"],
+input[type="radio"] {
+    min-height: 44px;
+    min-width: 44px;
+}
+
+/* Exception for inline links and small UI elements */
+a:not(.btn):not(.nav-link) {
+    min-height: auto;
+    min-width: auto;
+}
+
+/* =============================================================================
+   MICRO-INTERACTIONS (Enterprise Feedback Patterns)
+   ============================================================================= */
+
+/* Form validation shake animation */
+@keyframes shake {
+
+    0%,
+    100% {
+        transform: translateX(0);
+    }
+
+    10%,
+    30%,
+    50%,
+    70%,
+    90% {
+        transform: translateX(-4px);
+    }
+
+    20%,
+    40%,
+    60%,
+    80% {
+        transform: translateX(4px);
+    }
+}
+
+.input--error {
+    animation: shake 0.5s var(--ease-out-expo);
+    border-color: var(--color-danger) !important;
+    box-shadow: 0 0 0 3px var(--color-danger-muted);
+}
+
+/* Success checkmark animation */
+@keyframes checkmark {
+    0% {
+        transform: scale(0);
+        opacity: 0;
+    }
+
+    50% {
+        transform: scale(1.2);
+    }
+
+    100% {
+        transform: scale(1);
+        opacity: 1;
+    }
+}
+
+.input--success {
+    border-color: var(--color-success) !important;
+    box-shadow: 0 0 0 3px var(--color-success-muted);
+}
+
+/* Button shimmer effect */
+.btn-primary {
+    position: relative;
+    overflow: hidden;
+}
+
+.btn-primary::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.2), transparent);
+    transform: translateX(-100%);
+    transition: transform 0.6s;
+}
+
+.btn-primary:hover::before {
+    transform: translateX(100%);
+}
+
+.btn-primary:active {
+    transform: scale(0.98);
+}
+
+/* Loading state for buttons */
+.btn--loading {
+    pointer-events: none;
+    opacity: 0.7;
+}
+
+.btn--loading::after {
+    content: '';
+    display: inline-block;
+    width: 16px;
+    height: 16px;
+    margin-left: var(--spacing-sm);
+    border: 2px solid currentColor;
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+}
+
+/* Skeleton loading animation */
+@keyframes skeleton-pulse {
+    0% {
+        background-position: 200% 0;
+    }
+
+    100% {
+        background-position: -200% 0;
+    }
+}
+
+.skeleton {
+    background: linear-gradient(90deg,
+            var(--bg-muted) 0%,
+            var(--bg-elevated) 50%,
+            var(--bg-muted) 100%);
+    background-size: 200% 100%;
+    animation: skeleton-pulse 1.5s ease-in-out infinite;
+    border-radius: var(--radius-md);
+}
+
+/* Empty state styling */
+.empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: var(--spacing-md);
+    padding: var(--spacing-2xl);
+    text-align: center;
+    color: var(--text-muted);
+}
+
+.empty-state__icon {
+    width: 64px;
+    height: 64px;
+    color: var(--text-muted);
+    opacity: 0.5;
+}
+
+.empty-state__title {
+    font-size: var(--text-lg);
+    font-weight: var(--font-semibold);
+    color: var(--text-secondary);
+}
+
+.empty-state__description {
+    font-size: var(--text-sm);
+    max-width: 300px;
 }

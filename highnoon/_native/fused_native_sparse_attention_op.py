@@ -23,7 +23,6 @@ Implements DeepSeek's NSA mechanism (ACL 2025 Best Paper) achieving:
 Complexity: O(n log n) instead of O(n²)
 """
 
-
 import tensorflow as tf
 
 from highnoon._native import _ops

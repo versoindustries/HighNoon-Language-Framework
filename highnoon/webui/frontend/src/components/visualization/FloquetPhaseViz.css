@@ -1,0 +1,208 @@
+/* FloquetPhaseViz.css - Time Crystal Visualization Styles */
+/* Premium enterprise styling with quantum/crystal aesthetics */
+
+/* =============================================================================
+   MAIN CONTAINER
+   ============================================================================= */
+
+.floquet-phase {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    background: linear-gradient(180deg,
+            rgba(8, 8, 14, 0.98) 0%,
+            rgba(12, 12, 22, 0.95) 100%);
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--border-default);
+    overflow: hidden;
+    box-shadow:
+        0 0 50px rgba(245, 158, 11, 0.06),
+        inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+
+/* =============================================================================
+   HEADER
+   ============================================================================= */
+
+.floquet-phase__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--spacing-sm) var(--spacing-md);
+    background: rgba(0, 0, 0, 0.5);
+    border-bottom: 1px solid var(--border-subtle);
+}
+
+.floquet-phase__title {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-sm);
+    font-size: var(--text-sm);
+    font-weight: var(--font-semibold);
+    color: var(--text-primary);
+}
+
+.floquet-badge {
+    padding: 2px 8px;
+    background: linear-gradient(135deg, rgba(245, 158, 11, 0.2), rgba(236, 72, 153, 0.15));
+    border: 1px solid rgba(245, 158, 11, 0.3);
+    border-radius: var(--radius-full);
+    font-size: 0.6rem;
+    font-weight: var(--font-bold);
+    color: var(--color-warning);
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+}
+
+.floquet-phase__controls {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-md);
+}
+
+.period-indicator,
+.subharmonic-indicator {
+    padding: 3px 8px;
+    background: rgba(99, 102, 241, 0.1);
+    border: 1px solid rgba(99, 102, 241, 0.2);
+    border-radius: var(--radius-sm);
+    font-family: var(--font-mono);
+    font-size: 0.65rem;
+    color: var(--text-secondary);
+}
+
+.floquet-export-btn {
+    padding: var(--spacing-xs) var(--spacing-sm);
+    background: rgba(245, 158, 11, 0.1);
+    border: 1px solid rgba(245, 158, 11, 0.3);
+    border-radius: var(--radius-sm);
+    font-size: var(--text-xs);
+    color: var(--color-warning);
+    cursor: pointer;
+    transition: all var(--transition-fast);
+}
+
+.floquet-export-btn:hover {
+    background: rgba(245, 158, 11, 0.2);
+    border-color: var(--color-warning);
+    box-shadow: 0 0 12px rgba(245, 158, 11, 0.3);
+}
+
+.floquet-export-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* =============================================================================
+   CANVAS
+   ============================================================================= */
+
+.floquet-phase__canvas {
+    position: relative;
+    background: radial-gradient(ellipse at center, #0c0c16 0%, #08080e 100%);
+}
+
+/* Ambient glow effect */
+.floquet-phase__glow {
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(circle at 50% 50%,
+            rgba(245, 158, 11, 0.03) 0%,
+            transparent 60%);
+    pointer-events: none;
+    z-index: 1;
+    animation: crystalPulse 4s ease-in-out infinite;
+}
+
+@keyframes crystalPulse {
+
+    0%,
+    100% {
+        opacity: 0.5;
+    }
+
+    50% {
+        opacity: 1;
+    }
+}
+
+/* Phase value display in 3D */
+.phase-value {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: var(--font-semibold);
+    color: var(--color-warning);
+    text-shadow: 0 0 8px rgba(245, 158, 11, 0.6);
+    white-space: nowrap;
+}
+
+/* =============================================================================
+   FOOTER - LEGEND
+   ============================================================================= */
+
+.floquet-phase__footer {
+    padding: var(--spacing-sm) var(--spacing-md);
+    background: rgba(0, 0, 0, 0.4);
+    border-top: 1px solid var(--border-subtle);
+}
+
+.floquet-legend {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--spacing-lg);
+    flex-wrap: wrap;
+}
+
+.legend-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.65rem;
+    color: var(--text-muted);
+}
+
+.legend-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+}
+
+.legend-dot.driving {
+    background: var(--color-warning);
+    box-shadow: 0 0 6px var(--color-warning);
+}
+
+.legend-dot.response {
+    background: var(--color-primary);
+    box-shadow: 0 0 6px var(--color-primary);
+}
+
+.legend-dot.phase {
+    background: var(--color-secondary);
+    box-shadow: 0 0 6px var(--color-secondary);
+}
+
+/* =============================================================================
+   RESPONSIVE
+   ============================================================================= */
+
+@media (max-width: 600px) {
+    .floquet-phase__header {
+        flex-direction: column;
+        gap: var(--spacing-sm);
+    }
+
+    .floquet-phase__controls {
+        flex-wrap: wrap;
+        justify-content: center;
+    }
+
+    .floquet-legend {
+        gap: var(--spacing-sm);
+    }
+
+    .legend-item span:last-child {
+        display: none;
+    }
+}

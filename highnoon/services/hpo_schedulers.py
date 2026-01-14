@@ -678,7 +678,7 @@ def create_scheduler(
         )
     else:
         raise ValueError(
-            f"Unknown scheduler: {name}. " f"Available: hyperband, successive_halving, pbt, random"
+            f"Unknown scheduler: {name}. Available: hyperband, successive_halving, pbt, random"
         )
 
 

@@ -23,7 +23,13 @@ import {
     Crown,
     ExternalLink,
     Save,
+    Zap,
+    Activity,
     RotateCcw,
+    KeyRound,
+    Eye,
+    EyeOff,
+    AlertTriangle,
 } from 'lucide-react';
 import { Card, CardHeader, CardContent, Button, Input } from '../components/ui';
 import './Settings.css';
@@ -115,6 +121,17 @@ export function Settings() {
     const [attributionError, setAttributionError] = useState<string | null>(null);
     const [attributionSuccess, setAttributionSuccess] = useState(false);
 
+    // HuggingFace token state
+    const [hfTokenConfigured, setHfTokenConfigured] = useState(false);
+    const [hfTokenPrefix, setHfTokenPrefix] = useState<string | null>(null);
+    const [hfToken, setHfToken] = useState('');
+    const [hfTokenLoading, setHfTokenLoading] = useState(false);
+    const [hfTokenError, setHfTokenError] = useState<string | null>(null);
+    const [hfTokenSuccess, setHfTokenSuccess] = useState(false);
+    const [hfTokenValidating, setHfTokenValidating] = useState(false);
+    const [hfUsername, setHfUsername] = useState<string | null>(null);
+    const [showHfToken, setShowHfToken] = useState(false);
+
     // Fetch cluster status
     const fetchStatus = useCallback(async () => {
         try {
@@ -157,14 +174,29 @@ export function Settings() {
         }
     }, []);
 
+    // Fetch HuggingFace token status
+    const fetchHfTokenStatus = useCallback(async () => {
+        try {
+            const response = await fetch(`${API_BASE}/api/settings/hf-token/status`);
+            if (response.ok) {
+                const data = await response.json();
+                setHfTokenConfigured(data.configured);
+                setHfTokenPrefix(data.token_prefix || null);
+            }
+        } catch {
+            // Silent fail
+        }
+    }, []);
+
     // Initial load and polling
     useEffect(() => {
         fetchStatus();
         fetchSystemInfo();
         fetchAttribution();
+        fetchHfTokenStatus();
         const interval = setInterval(fetchStatus, 2000);
         return () => clearInterval(interval);
-    }, [fetchStatus, fetchSystemInfo, fetchAttribution]);
+    }, [fetchStatus, fetchSystemInfo, fetchAttribution, fetchHfTokenStatus]);
 
     // Start hosting
     const handleStartHost = async () => {
@@ -312,6 +344,94 @@ export function Settings() {
             setAttributionError(e instanceof Error ? e.message : 'Failed to reset attribution');
         } finally {
             setAttributionLoading(false);
+        }
+    };
+
+    // Save HuggingFace token
+    const handleSaveHfToken = async () => {
+        if (!hfToken.trim()) {
+            setHfTokenError('Please enter a token');
+            return;
+        }
+        if (!hfToken.startsWith('hf_')) {
+            setHfTokenError("Token must start with 'hf_'");
+            return;
+        }
+
+        setHfTokenLoading(true);
+        setHfTokenError(null);
+        setHfTokenSuccess(false);
+        try {
+            const response = await fetch(`${API_BASE}/api/settings/hf-token`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ token: hfToken }),
+            });
+            if (!response.ok) {
+                const data = await response.json();
+                throw new Error(data.detail || 'Failed to save token');
+            }
+            const data = await response.json();
+            setHfTokenConfigured(true);
+            setHfTokenPrefix(data.token_prefix);
+            setHfToken(''); // Clear the input
+            setShowHfToken(false);
+            setHfTokenSuccess(true);
+            setTimeout(() => setHfTokenSuccess(false), 3000);
+        } catch (e) {
+            setHfTokenError(e instanceof Error ? e.message : 'Failed to save token');
+        } finally {
+            setHfTokenLoading(false);
+        }
+    };
+
+    // Validate HuggingFace token
+    const handleValidateHfToken = async () => {
+        const tokenToValidate = hfToken.trim() || undefined;
+        if (!tokenToValidate && !hfTokenConfigured) {
+            setHfTokenError('Please enter a token to validate');
+            return;
+        }
+
+        setHfTokenValidating(true);
+        setHfTokenError(null);
+        setHfUsername(null);
+        try {
+            const response = await fetch(`${API_BASE}/api/settings/hf-token/validate`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(tokenToValidate ? { token: tokenToValidate } : {}),
+            });
+            const data = await response.json();
+            if (data.valid) {
+                setHfUsername(data.username);
+                setHfTokenSuccess(true);
+                setTimeout(() => setHfTokenSuccess(false), 3000);
+            } else {
+                setHfTokenError(data.error || 'Token validation failed');
+            }
+        } catch (e) {
+            setHfTokenError(e instanceof Error ? e.message : 'Failed to validate token');
+        } finally {
+            setHfTokenValidating(false);
+        }
+    };
+
+    // Clear HuggingFace token
+    const handleClearHfToken = async () => {
+        setHfTokenLoading(true);
+        setHfTokenError(null);
+        try {
+            await fetch(`${API_BASE}/api/settings/hf-token`, { method: 'DELETE' });
+            setHfTokenConfigured(false);
+            setHfTokenPrefix(null);
+            setHfUsername(null);
+            setHfTokenSuccess(true);
+            setTimeout(() => setHfTokenSuccess(false), 3000);
+        } catch (e) {
+            setHfTokenError(e instanceof Error ? e.message : 'Failed to clear token');
+        } finally {
+            setHfTokenLoading(false);
         }
     };
 
@@ -825,6 +945,389 @@ export function Settings() {
                                     <span>
                                         Changes apply to all models trained after saving.
                                         Existing models keep their original attribution.
+                                    </span>
+                                </div>
+                            </div>
+                        </CardContent>
+                    </Card>
+                </div>
+
+                {/* HuggingFace Integration Section */}
+                <div className="settings-section">
+                    <h2 className="section-title">
+                        <KeyRound size={22} />
+                        HuggingFace Integration
+                        {hfTokenConfigured && (
+                            <span className="status-badge status-configured">
+                                <Check size={14} />
+                                Configured
+                            </span>
+                        )}
+                    </h2>
+
+                    {hfTokenError && (
+                        <div className="error-banner">
+                            <AlertTriangle size={18} />
+                            {hfTokenError}
+                            <button onClick={() => setHfTokenError(null)}>&times;</button>
+                        </div>
+                    )}
+
+                    {hfTokenSuccess && (
+                        <div className="success-banner">
+                            <Check size={18} />
+                            {hfUsername ? `Token validated! Logged in as ${hfUsername}` : 'Token saved successfully!'}
+                        </div>
+                    )}
+
+                    <Card padding="lg" className="config-card">
+                        <CardHeader
+                            title="Access Token"
+                            subtitle="Configure your HuggingFace token to access gated datasets like Llama, Mistral, and more"
+                        />
+                        <CardContent>
+                            <div className="config-form">
+                                {hfTokenConfigured ? (
+                                    <div className="token-configured-display">
+                                        <div className="token-status">
+                                            <KeyRound size={20} className="token-icon" />
+                                            <div className="token-info">
+                                                <span className="token-label">Token configured</span>
+                                                <code className="token-prefix">{hfTokenPrefix}</code>
+                                                {hfUsername && (
+                                                    <span className="token-user">Logged in as: {hfUsername}</span>
+                                                )}
+                                            </div>
+                                        </div>
+                                        <div className="button-row">
+                                            <Button
+                                                variant="ghost"
+                                                leftIcon={<RefreshCw size={16} />}
+                                                onClick={handleValidateHfToken}
+                                                loading={hfTokenValidating}
+                                            >
+                                                Validate
+                                            </Button>
+                                            <Button
+                                                variant="danger"
+                                                leftIcon={<Trash2 size={16} />}
+                                                onClick={handleClearHfToken}
+                                                loading={hfTokenLoading}
+                                            >
+                                                Clear Token
+                                            </Button>
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <>
+                                        <div className="form-row">
+                                            <label htmlFor="hf-token">HuggingFace Token</label>
+                                            <div className="input-with-button">
+                                                <Input
+                                                    id="hf-token"
+                                                    type={showHfToken ? 'text' : 'password'}
+                                                    value={hfToken}
+                                                    onChange={(e) => setHfToken(e.target.value)}
+                                                    placeholder="hf_xxxxxxxxxxxxxxxxxxxx"
+                                                />
+                                                <Button
+                                                    variant="ghost"
+                                                    size="sm"
+                                                    onClick={() => setShowHfToken(!showHfToken)}
+                                                    title={showHfToken ? 'Hide token' : 'Show token'}
+                                                >
+                                                    {showHfToken ? <EyeOff size={16} /> : <Eye size={16} />}
+                                                </Button>
+                                            </div>
+                                        </div>
+
+                                        <div className="button-row">
+                                            <Button
+                                                variant="primary"
+                                                leftIcon={<Save size={18} />}
+                                                onClick={handleSaveHfToken}
+                                                loading={hfTokenLoading}
+                                                disabled={!hfToken.trim()}
+                                            >
+                                                Save Token
+                                            </Button>
+                                            <Button
+                                                variant="ghost"
+                                                leftIcon={<RefreshCw size={18} />}
+                                                onClick={handleValidateHfToken}
+                                                loading={hfTokenValidating}
+                                                disabled={!hfToken.trim()}
+                                            >
+                                                Validate
+                                            </Button>
+                                        </div>
+                                    </>
+                                )}
+
+                                <div className="attribution-info">
+                                    <Info size={16} />
+                                    <span>
+                                        Get your token from{' '}
+                                        <a
+                                            href="https://huggingface.co/settings/tokens"
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                        >
+                                            huggingface.co/settings/tokens
+                                        </a>
+                                        . Required for accessing gated datasets.
+                                    </span>
+                                </div>
+                            </div>
+                        </CardContent>
+                    </Card>
+                </div>
+
+                {/* Distributed HPO Section (Enterprise Phase 6) */}
+                <div className="settings-section">
+                    <h2 className="section-title">
+                        <Cpu size={22} />
+                        Distributed HPO (Ray Tune)
+                        <span className="edition-badge edition-enterprise">
+                            <Crown size={14} />
+                            Enterprise
+                        </span>
+                    </h2>
+
+                    <Card padding="lg" className="config-card">
+                        <CardHeader
+                            title="Ray Tune Cluster"
+                            subtitle="Scale hyperparameter optimization across multiple workers"
+                        />
+                        <CardContent>
+                            <div className="config-form">
+                                <div className="distributed-hpo-status">
+                                    <div className="status-indicator">
+                                        <span className="status-dot offline"></span>
+                                        <span>Cluster Status: Offline</span>
+                                    </div>
+                                    <div className="cluster-resources">
+                                        <span><Cpu size={14} /> 0 CPUs</span>
+                                        <span><HardDrive size={14} /> 0 GPUs</span>
+                                    </div>
+                                </div>
+
+                                <div className="form-row">
+                                    <label htmlFor="num-workers">Number of Workers</label>
+                                    <Input
+                                        id="num-workers"
+                                        type="number"
+                                        defaultValue={4}
+                                        min={1}
+                                        max={64}
+                                    />
+                                </div>
+
+                                <div className="form-row">
+                                    <label htmlFor="cpus-per-worker">CPUs per Worker</label>
+                                    <Input
+                                        id="cpus-per-worker"
+                                        type="number"
+                                        defaultValue={2}
+                                        min={1}
+                                        max={32}
+                                    />
+                                </div>
+
+                                <div className="form-row">
+                                    <label htmlFor="hpo-scheduler">HPO Scheduler</label>
+                                    <select
+                                        id="hpo-scheduler"
+                                        className="select-input"
+                                        defaultValue="asha"
+                                    >
+                                        <option value="asha">ASHA (Successive Halving)</option>
+                                        <option value="pbt">Population-Based Training</option>
+                                        <option value="qahpo">QAHPO (Quantum Adaptive)</option>
+                                    </select>
+                                </div>
+
+                                <div className="form-row">
+                                    <label htmlFor="max-concurrent">Max Concurrent Trials</label>
+                                    <Input
+                                        id="max-concurrent"
+                                        type="number"
+                                        defaultValue={8}
+                                        min={1}
+                                        max={100}
+                                    />
+                                </div>
+
+                                <div className="form-row">
+                                    <label htmlFor="ray-address">Ray Cluster Address</label>
+                                    <Input
+                                        id="ray-address"
+                                        placeholder="auto (local) or ray://host:10001"
+                                    />
+                                </div>
+
+                                <div className="button-row">
+                                    <Button
+                                        variant="primary"
+                                        leftIcon={<Play size={18} />}
+                                    >
+                                        Start Cluster
+                                    </Button>
+                                    <Button
+                                        variant="danger"
+                                        leftIcon={<Square size={18} />}
+                                        disabled
+                                    >
+                                        Stop Cluster
+                                    </Button>
+                                </div>
+
+                                <div className="attribution-info">
+                                    <Info size={16} />
+                                    <span>
+                                        Distributed HPO requires Ray Tune. Install with:{' '}
+                                        <code>pip install ray[tune]</code>
+                                    </span>
+                                </div>
+                            </div>
+                        </CardContent>
+                    </Card>
+                </div>
+
+                {/* AutoML Pipeline Section (Enterprise Phase 6.3) */}
+                <div className="settings-section">
+                    <h2 className="section-title">
+                        <Zap size={22} />
+                        AutoML Pipeline
+                        <span className="edition-badge edition-enterprise">
+                            <Crown size={14} />
+                            Enterprise
+                        </span>
+                    </h2>
+
+                    <Card padding="lg" className="config-card">
+                        <CardHeader
+                            title="End-to-End AutoML"
+                            subtitle="Automated data profiling, model selection, HPO, and ensembling"
+                        />
+                        <CardContent>
+                            <div className="config-form">
+                                <div className="form-row">
+                                    <label htmlFor="time-budget">Time Budget (seconds)</label>
+                                    <Input
+                                        id="time-budget"
+                                        type="number"
+                                        defaultValue={3600}
+                                        min={60}
+                                        max={86400}
+                                    />
+                                </div>
+
+                                <div className="form-row">
+                                    <label htmlFor="automl-max-trials">Max Trials</label>
+                                    <Input
+                                        id="automl-max-trials"
+                                        type="number"
+                                        defaultValue={100}
+                                        min={10}
+                                        max={1000}
+                                    />
+                                </div>
+
+                                <div className="form-row">
+                                    <label htmlFor="ensemble-size">Ensemble Size</label>
+                                    <Input
+                                        id="ensemble-size"
+                                        type="number"
+                                        defaultValue={5}
+                                        min={1}
+                                        max={20}
+                                    />
+                                </div>
+
+                                <div className="button-row">
+                                    <Button variant="primary" leftIcon={<Play size={18} />}>
+                                        Start AutoML
+                                    </Button>
+                                </div>
+                            </div>
+                        </CardContent>
+                    </Card>
+                </div>
+
+                {/* Advanced Scheduler Section (Enterprise Phase 3) */}
+                <div className="settings-section">
+                    <h2 className="section-title">
+                        <Activity size={22} />
+                        Advanced HPO Scheduler
+                        <span className="edition-badge edition-enterprise">
+                            <Crown size={14} />
+                            Enterprise
+                        </span>
+                    </h2>
+
+                    <Card padding="lg" className="config-card">
+                        <CardHeader
+                            title="Multi-Fidelity & NAS"
+                            subtitle="ASHA, MOBSTER, Freeze-Thaw, DARTS, and Zero-Cost Proxies"
+                        />
+                        <CardContent>
+                            <div className="config-form">
+                                <div className="form-row">
+                                    <label htmlFor="scheduler-type">Scheduler Type</label>
+                                    <select
+                                        id="scheduler-type"
+                                        className="select-input"
+                                        defaultValue="asha"
+                                    >
+                                        <option value="asha">ASHA (Async Successive Halving)</option>
+                                        <option value="mobster">MOBSTER (Model-Based ASHA)</option>
+                                        <option value="freeze_thaw">Freeze-Thaw (Curve Prediction)</option>
+                                        <option value="hyperband">Hyperband (Classic)</option>
+                                        <option value="pbt_backtrack">PBT with Backtracking</option>
+                                    </select>
+                                </div>
+
+                                <div className="form-row">
+                                    <label htmlFor="fanova-type">Importance Analyzer</label>
+                                    <select
+                                        id="fanova-type"
+                                        className="select-input"
+                                        defaultValue="shapley"
+                                    >
+                                        <option value="shapley">Shapley Values</option>
+                                        <option value="graph">Graph fANOVA</option>
+                                        <option value="causal">Causal fANOVA</option>
+                                        <option value="streaming">Streaming fANOVA</option>
+                                    </select>
+                                </div>
+
+                                <div className="form-row">
+                                    <label htmlFor="grace-period">Grace Period (epochs)</label>
+                                    <Input
+                                        id="grace-period"
+                                        type="number"
+                                        defaultValue={5}
+                                        min={1}
+                                        max={50}
+                                    />
+                                </div>
+
+                                <div className="form-row">
+                                    <label htmlFor="reduction-factor">Reduction Factor</label>
+                                    <Input
+                                        id="reduction-factor"
+                                        type="number"
+                                        defaultValue={3}
+                                        min={2}
+                                        max={5}
+                                    />
+                                </div>
+
+                                <div className="attribution-info">
+                                    <Info size={16} />
+                                    <span>
+                                        These settings apply to HPO sweeps started from the Training page.
                                     </span>
                                 </div>
                             </div>

@@ -192,17 +192,54 @@ class HolographicActivationEncoder:
             # activation: [B, L, D] @ base_matrix: [D, hd_dim] -> [B, L, hd_dim]
             encoded = tf.einsum("bld,dh->blh", activation, base_matrix)
 
-            # Apply position-dependent phases via pre-computed phase matrix
-            # Build phase matrix for max expected sequence length
-            max_seq = 2048  # Max sequence length for pre-computation
-            phase_vectors = []
-            for pos in range(max_seq):
-                phase_vectors.append(self._get_position_phase(pos))
-            phase_matrix = tf.constant(np.stack(phase_vectors))  # [max_seq, hd_dim]
-
-            # Get actual sequence length and slice phase matrix
+            # Apply position-dependent phases via dynamically computed phase matrix
+            # CRITICAL FIX: Use actual sequence length, not hardcoded 2048
+            # This supports unbounded context windows (128K+ tokens)
             seq_len = tf.shape(activation)[1]
-            phases = phase_matrix[:seq_len]  # [L, hd_dim]
+
+            # Get static seq_len if available, otherwise use a reasonable upper bound
+            static_seq_len = activation.shape[1]
+
+            # MEMORY OPTIMIZATION: For very long sequences (>16K), skip phase matrix
+            # construction which would use O(L * hd_dim) memory. Instead, use a more
+            # memory-efficient rolling hash approach for position encoding.
+            max_efficient_seq = 16384  # 16K threshold
+
+            if static_seq_len is not None and static_seq_len > max_efficient_seq:
+                # Memory-efficient mode: use modular position encoding with small cache
+                # Phase = position mod cache_size, reducing O(L) to O(cache_size)
+                cache_size = min(max_efficient_seq, static_seq_len)
+                phase_vectors = []
+                for pos in range(cache_size):
+                    phase_vectors.append(self._get_position_phase(pos))
+                phase_matrix = tf.constant(np.stack(phase_vectors))  # [cache_size, hd_dim]
+
+                # Use modular indexing: position % cache_size
+                positions = tf.range(static_seq_len) % cache_size
+                phases = tf.gather(phase_matrix, positions)  # [L, hd_dim]
+
+                logger.debug(
+                    f"[HD Checkpoint] Using modular position encoding: "
+                    f"seq_len={static_seq_len}, cache={cache_size}"
+                )
+            elif static_seq_len is not None:
+                max_seq = static_seq_len
+                phase_vectors = []
+                for pos in range(max_seq):
+                    phase_vectors.append(self._get_position_phase(pos))
+                phase_matrix = tf.constant(np.stack(phase_vectors))  # [actual_seq, hd_dim]
+                phases = phase_matrix[:seq_len]  # [L, hd_dim]
+            else:
+                # For dynamic shapes, compute phases eagerly using actual length
+                # This is slightly less efficient but correct for any context size
+                max_seq = int(seq_len.numpy()) if tf.executing_eagerly() else max_efficient_seq
+                phase_vectors = []
+                for pos in range(max_seq):
+                    phase_vectors.append(self._get_position_phase(pos))
+                phase_matrix = tf.constant(np.stack(phase_vectors))  # [max_seq, hd_dim]
+
+                # Slice to actual sequence length (handles both static and dynamic)
+                phases = phase_matrix[:seq_len]  # [L, hd_dim]
 
             # Broadcast multiply: [B, L, hd_dim] * [L, hd_dim] -> [B, L, hd_dim]
             encoded = encoded * phases
@@ -275,18 +312,52 @@ class HolographicActivationEncoder:
 
         if self.config.preserve_sequence_dim:
             # Per-position decoding with inverse phases
-            max_seq = 2048
-            phase_vectors = []
-            for pos in range(max_seq):
-                phase_vectors.append(self._get_position_phase(pos))
-            phase_matrix = tf.constant(np.stack(phase_vectors))  # [max_seq, hd_dim]
-
-            # Get actual sequence length - handle both static and dynamic
+            # CRITICAL FIX: Use actual sequence length, not hardcoded 2048
+            # This supports unbounded context windows (128K+ tokens)
             if isinstance(seq_len, int):
-                phases = phase_matrix[:seq_len]  # [L, hd_dim]
+                max_seq = seq_len
             else:
-                # Dynamic slicing for tensor seq_len
-                phases = phase_matrix[: tf.minimum(seq_len, max_seq)]
+                # For dynamic tensor seq_len, compute eagerly or use large default
+                max_seq = int(seq_len.numpy()) if tf.executing_eagerly() else 131072
+
+            # MEMORY OPTIMIZATION (Phase 900.2): For very long sequences (>16K), use
+            # modular position encoding to reduce O(L × hd_dim) to O(16K × hd_dim).
+            # This matches the optimization in encode() for consistency.
+            max_efficient_seq = 16384  # 16K threshold (same as encode)
+
+            if max_seq > max_efficient_seq:
+                # Memory-efficient mode: use modular position encoding with small cache
+                # Phase = position mod cache_size, reducing O(L) to O(cache_size)
+                cache_size = max_efficient_seq
+                phase_vectors = []
+                for pos in range(cache_size):
+                    phase_vectors.append(self._get_position_phase(pos))
+                phase_matrix = tf.constant(np.stack(phase_vectors))  # [cache_size, hd_dim]
+
+                # Use modular indexing: position % cache_size
+                if isinstance(seq_len, int):
+                    positions = tf.range(seq_len) % cache_size
+                else:
+                    positions = tf.range(seq_len) % cache_size
+                phases = tf.gather(phase_matrix, positions)  # [L, hd_dim]
+
+                logger.debug(
+                    f"[HD Checkpoint Decode] Using modular position encoding: "
+                    f"seq_len={max_seq}, cache={cache_size}"
+                )
+            else:
+                # Standard mode for shorter sequences
+                phase_vectors = []
+                for pos in range(max_seq):
+                    phase_vectors.append(self._get_position_phase(pos))
+                phase_matrix = tf.constant(np.stack(phase_vectors))  # [actual_seq, hd_dim]
+
+                # Get actual sequence length - handle both static and dynamic
+                if isinstance(seq_len, int):
+                    phases = phase_matrix[:seq_len]  # [L, hd_dim]
+                else:
+                    # Dynamic slicing for tensor seq_len
+                    phases = phase_matrix[:seq_len]
 
             # Undo phase: multiply by phase again (since phase is ±1)
             unphased = bundle * phases  # [B, L, hd_dim]
@@ -344,6 +415,11 @@ def hd_checkpoint(
     def checkpointed_fn(x: tf.Tensor) -> tuple[tf.Tensor, Callable]:
         # Forward pass
         output = fn(x)
+        primary_output = output
+        extra_outputs = None
+        if isinstance(output, tuple):
+            primary_output = output[0]
+            extra_outputs = output[1:]
 
         # Encode activation for backward pass
         bundle = encoder.encode(x)
@@ -356,11 +432,15 @@ def hd_checkpoint(
             with tf.GradientTape() as tape:
                 tape.watch(reconstructed_x)
                 recomputed_output = fn(reconstructed_x)
+                if isinstance(recomputed_output, tuple):
+                    recomputed_output = recomputed_output[0]
 
             # Compute gradient
             return tape.gradient(recomputed_output, reconstructed_x, upstream)
 
-        return output, grad_fn
+        if extra_outputs is not None:
+            return (primary_output,) + extra_outputs, grad_fn
+        return primary_output, grad_fn
 
     return checkpointed_fn
 
@@ -522,6 +602,30 @@ class HDCheckpointLayer(tf.keras.layers.Layer):
         Returns:
             Output from sublayers with HD-checkpointed gradient.
         """
+        # MEMORY OPTIMIZATION: For very long sequences (>16K), HD checkpointing
+        # would create encoded tensors of size [B, L, hd_dim] = ~4GB for 128K.
+        # Fall back to standard recompute_grad which is more memory efficient
+        # for extreme context lengths at the cost of recomputation.
+        MAX_HD_CHECKPOINT_SEQ = 16384  # 16K threshold
+
+        seq_len = inputs.shape[1]
+        if seq_len is not None and seq_len > MAX_HD_CHECKPOINT_SEQ:
+            logger.debug(
+                f"[HDCheckpoint] seq_len={seq_len} > {MAX_HD_CHECKPOINT_SEQ}, "
+                f"falling back to recompute_grad for memory efficiency"
+            )
+            # Use standard recompute_grad instead of HD checkpointing
+            sublayers_ref = self.sublayers
+
+            @tf.recompute_grad
+            def _recompute_forward(x):
+                h = x
+                for layer in sublayers_ref:
+                    h = layer(h, training=training) if hasattr(layer, "call") else layer(h)
+                return h
+
+            return _recompute_forward(inputs)
+
         state_bus_slot = self.state_bus_slot
         sublayers_ref = self.sublayers  # Capture reference for closure
         encoder_ref = self.encoder  # Capture reference
@@ -540,6 +644,11 @@ class HDCheckpointLayer(tf.keras.layers.Layer):
             for layer in sublayers_ref:
                 h = layer(h, training=training) if hasattr(layer, "call") else layer(h)
             output = h
+            primary_output = output
+            extra_outputs = None
+            if isinstance(output, tuple):
+                primary_output = output[0]
+                extra_outputs = output[1:]
 
             # Encode input activation and store
             bundle = encoder_ref.encode(x)
@@ -620,6 +729,9 @@ class HDCheckpointLayer(tf.keras.layers.Layer):
                         for layer in sublayers_ref:
                             h = layer(h, training=training) if hasattr(layer, "call") else layer(h)
 
+                        if isinstance(h, tuple):
+                            h = h[0]
+
                         # Ensure output is real-valued for gradient computation
                         if h.dtype in (tf.complex64, tf.complex128):
                             h = tf.math.real(h)
@@ -671,7 +783,9 @@ class HDCheckpointLayer(tf.keras.layers.Layer):
 
                 return input_grad
 
-            return output, grad_fn
+            if extra_outputs is not None:
+                return (primary_output,) + extra_outputs, grad_fn
+            return primary_output, grad_fn
 
         return forward_with_hd_checkpoint(inputs)
 

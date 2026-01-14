@@ -11,8 +11,9 @@ from collections.abc import Sequence
 import numpy as np
 import tensorflow as tf
 
-from highnoon._native.ops.vqc_expectation import run_vqc_expectation
-from highnoon.config import DEBUG_MODE, USE_AUTO_NEURAL_QEM
+# V2 MIGRATION: Use quantum_foundation_ops unified VQC API
+from highnoon._native.ops.quantum_foundation_ops import run_vqc as run_vqc_expectation
+from highnoon.config import DEBUG_MODE, QUANTUM_ENABLE_SAMPLING, USE_AUTO_NEURAL_QEM
 from highnoon.models.utils.control_vars import ControlVarMixin
 
 from .device_manager import QuantumDeviceManager
@@ -23,8 +24,12 @@ from .device_manager import QuantumDeviceManager
 
 
 def _rotation_y(angle: tf.Tensor) -> tf.Tensor:
-    """Returns the complex rotation matrix for RY(angle)."""
-    angle = tf.convert_to_tensor(angle, dtype=tf.float32)
+    """Returns the complex rotation matrix for RY(angle).
+
+    Phase 1.5: Uses float64/complex128 precision for quantum methods
+    per CLAUDE.md directive for numerical stability.
+    """
+    angle = tf.convert_to_tensor(angle, dtype=tf.float64)
     c = tf.cos(angle / 2.0)
     s = tf.sin(angle / 2.0)
     real = tf.stack(
@@ -35,34 +40,41 @@ def _rotation_y(angle: tf.Tensor) -> tf.Tensor:
         axis=0,
     )
     imag = tf.zeros_like(real)
-    return tf.complex(real, imag)
+    return tf.complex(real, imag)  # Returns complex128
 
 
 def _rotation_z(angle: tf.Tensor) -> tf.Tensor:
-    """Returns the complex rotation matrix for RZ(angle)."""
-    angle = tf.convert_to_tensor(angle, dtype=tf.float32)
+    """Returns the complex rotation matrix for RZ(angle).
+
+    Phase 1.5: Uses float64/complex128 precision for quantum methods
+    per CLAUDE.md directive for numerical stability.
+    """
+    angle = tf.convert_to_tensor(angle, dtype=tf.float64)
     half = angle / 2.0
     real = tf.stack(
         [
-            tf.stack([tf.cos(half), 0.0], axis=-1),
-            tf.stack([0.0, tf.cos(half)], axis=-1),
+            tf.stack([tf.cos(half), tf.constant(0.0, dtype=tf.float64)], axis=-1),
+            tf.stack([tf.constant(0.0, dtype=tf.float64), tf.cos(half)], axis=-1),
         ],
         axis=0,
     )
     imag = tf.stack(
         [
-            tf.stack([-tf.sin(half), 0.0], axis=-1),
-            tf.stack([0.0, tf.sin(half)], axis=-1),
+            tf.stack([-tf.sin(half), tf.constant(0.0, dtype=tf.float64)], axis=-1),
+            tf.stack([tf.constant(0.0, dtype=tf.float64), tf.sin(half)], axis=-1),
         ],
         axis=0,
     )
-    return tf.complex(real, imag)
+    return tf.complex(real, imag)  # Returns complex128
 
 
 def _ket_zero(num_qubits: int) -> tf.Tensor:
-    """Returns |0...0> for num_qubits."""
+    """Returns |0...0> for num_qubits.
+
+    Phase 1.6: Uses complex128 for quantum precision.
+    """
     dim = 1 << num_qubits
-    return tf.cast(tf.one_hot(0, dim), dtype=tf.complex64)
+    return tf.cast(tf.one_hot(0, dim), dtype=tf.complex128)
 
 
 # ---------------------------------------------------------------------------
@@ -91,12 +103,13 @@ class HybridVQCLayer(ControlVarMixin, tf.keras.layers.Layer):
         entanglement: str | Sequence[tuple[int, int]] = "linear",
         shots: int | None = None,
         backend_preference: str | None = None,
-        enable_sampling_during_training: bool = False,
+        enable_sampling_during_training: bool | None = None,
         measurement_terms: Sequence[tuple[float, str]] | None = None,
         name: str | None = None,
         **kwargs,
     ):
-        super().__init__(name=name, dtype="float32", **kwargs)
+        # Phase 1.5: Use float64 for quantum methods per CLAUDE.md directive
+        super().__init__(name=name, dtype="float64", **kwargs)
 
         if num_layers <= 0:
             raise ValueError("num_layers must be positive.")
@@ -116,7 +129,11 @@ class HybridVQCLayer(ControlVarMixin, tf.keras.layers.Layer):
         self.entanglement = entanglement
         self.shots = shots
         self.backend_preference = backend_preference
-        self.enable_sampling_during_training = bool(enable_sampling_during_training)
+        # Wire to QUANTUM_ENABLE_SAMPLING config if not explicitly set
+        if enable_sampling_during_training is None:
+            self.enable_sampling_during_training = QUANTUM_ENABLE_SAMPLING
+        else:
+            self.enable_sampling_during_training = bool(enable_sampling_during_training)
         self.measurement_terms = (
             tuple((float(coeff), str(paulis)) for coeff, paulis in measurement_terms)
             if measurement_terms
@@ -358,13 +375,22 @@ class HybridVQCLayer(ControlVarMixin, tf.keras.layers.Layer):
         )
 
         try:
+            # Determine effective shots: use sampling only if flag is enabled
+            # and we're in training mode (or shots were explicitly set)
+            if self.enable_sampling_during_training and training_flag is True:
+                effective_shots = self.shots  # Use configured shots during training
+            elif training_flag is False:
+                effective_shots = self.shots  # Allow sampling during inference too
+            else:
+                effective_shots = None  # Analytic mode when sampling disabled
+
             return executor.run_expectation(
                 data_angles=angles,
                 circuit_parameters=params,
                 entangler_pairs=entanglers,
                 measurement_paulis=measurement_paulis,
                 measurement_coeffs=measurement_coeffs,
-                shots=self.shots,
+                shots=effective_shots,
             )
         except (NotImplementedError, TypeError, ValueError):
             return None
@@ -382,7 +408,8 @@ class HybridVQCLayer(ControlVarMixin, tf.keras.layers.Layer):
             raise RuntimeError("HybridVQCLayer must be built before calling _compute_expectation.")
 
         data_angles = self.data_encoder(flattened_inputs)
-        circuit_params = tf.cast(self.theta, tf.float32)
+        # Phase 1.5: Use float64 for quantum methods per CLAUDE.md
+        circuit_params = tf.cast(self.theta, tf.float64)
 
         executor_result = self._run_executor(data_angles, circuit_params, training)
         if executor_result is not None:
@@ -661,7 +688,7 @@ class EnhancedVQCLayer(HybridVQCLayer):
         """
         if encoding_type not in ("amplitude", "angle", "hybrid"):
             raise ValueError(
-                f"encoding_type must be 'amplitude', 'angle', or 'hybrid', " f"got {encoding_type}"
+                f"encoding_type must be 'amplitude', 'angle', or 'hybrid', got {encoding_type}"
             )
         if reuploading_depth < 1:
             raise ValueError(f"reuploading_depth must be positive, got {reuploading_depth}")
@@ -721,7 +748,8 @@ class EnhancedVQCLayer(HybridVQCLayer):
         # Apply hybrid encoding if enabled
         if self.encoding_type == "hybrid" and hasattr(self, "amplitude_encoder"):
             amplitudes = self.amplitude_encoder(flattened_inputs)
-            amplitudes = tf.math.l2_normalize(amplitudes, axis=-1)
+            # GRADIENT FIX: Add epsilon to prevent NaN/Inf gradients when norm → 0
+            amplitudes = tf.math.l2_normalize(amplitudes, axis=-1, epsilon=1e-8)
             # Modulate angles by amplitude magnitudes
             amp_factor = tf.reduce_mean(tf.abs(amplitudes), axis=-1, keepdims=True)
             data_angles = data_angles * (1.0 + amp_factor)
@@ -738,8 +766,8 @@ class EnhancedVQCLayer(HybridVQCLayer):
         if executor_result is not None:
             return executor_result
 
-        # Fallback computation
-        from highnoon._native.ops.vqc_expectation import run_vqc_expectation
+        # Fallback computation - V2 MIGRATION: Uses quantum_foundation_ops
+        from highnoon._native.ops.quantum_foundation_ops import run_vqc as run_vqc_expectation
 
         entanglers = (
             tf.convert_to_tensor(self._entangler_pairs_tensor, dtype=tf.int32)

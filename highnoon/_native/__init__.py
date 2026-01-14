@@ -86,9 +86,16 @@ def _find_core_binary() -> Path | None:
     Returns:
         Path to _highnoon_core.so if found, None otherwise.
     """
+    # 1. Check standard bin directory
     core_path = _BIN_DIR / _CORE_BINARY_NAME
     if core_path.exists():
         return core_path
+
+    # 2. Check build directory (developer fallback)
+    build_path = _NATIVE_DIR / "build" / _CORE_BINARY_NAME
+    if build_path.exists():
+        return build_path
+
     return None
 
 
@@ -148,6 +155,32 @@ def resolve_op_library(caller_file: str, library_name: str) -> str:
     return str(_BIN_DIR / library_name)
 
 
+def _export_native_config_flags() -> None:
+    """Export config flags as environment variables for C++ layer.
+
+    These flags control C++ runtime behavior such as NUMA allocation,
+    kernel timing, and work-stealing MoE dispatch. Must be called
+    before loading the native library.
+    """
+    from highnoon import config
+
+    # Memory allocation flags
+    if hasattr(config, "USE_NUMA_ALLOCATION"):
+        os.environ["HIGHNOON_USE_NUMA"] = "1" if config.USE_NUMA_ALLOCATION else "0"
+
+    # Kernel timing/profiling flags
+    if hasattr(config, "ENABLE_KERNEL_TIMING"):
+        os.environ["HIGHNOON_KERNEL_TIMING"] = "1" if config.ENABLE_KERNEL_TIMING else "0"
+
+    # MoE work-stealing dispatch flag
+    if hasattr(config, "USE_WORK_STEALING_MOE"):
+        os.environ["HIGHNOON_WORK_STEALING_MOE"] = "1" if config.USE_WORK_STEALING_MOE else "0"
+
+    # TensorStreamPool debug flag
+    if hasattr(config, "TENSOR_STREAM_DEBUG"):
+        os.environ["HIGHNOON_STREAM_DEBUG"] = "1" if config.TENSOR_STREAM_DEBUG else "0"
+
+
 def _load_consolidated_binary() -> Any | None:
     """Load the consolidated core binary (singleton).
 
@@ -167,6 +200,9 @@ def _load_consolidated_binary() -> Any | None:
         # Check again under lock
         if _consolidated_binary_loaded:
             return _consolidated_binary
+
+        # Export config flags as env vars before loading C++ library
+        _export_native_config_flags()
 
         try:
             import tensorflow as tf
@@ -296,6 +332,9 @@ def list_available_ops() -> list[str]:
         "fused_mamba",  # Phase 3 C++ Migration - Mamba SSM
         "fused_continuous_thought",  # Phase 5 C++ Migration - Continuous Thought
         "fused_flash_attention",  # Phase 16 Flash Linear Attention Enhancements (GLA, RALA, Hybrid)
+        "hd_spatial_block",  # Phase 200+: HD Spatial Block (FFT-domain Mamba SSM)
+        "qhd_spatial_block",  # Phase 600+: QHD Spatial Block (FFT + quantum superposition)
+        "hd_hierarchical_block",  # Phase 800+: Fused HD Hierarchical Block (single-kernel)
     ]
 
     # Check if consolidated binary is available
@@ -472,6 +511,23 @@ def load_continuous_thought():
     return get_op("fused_continuous_thought")
 
 
+def load_text_tokenizer():
+    """Load the fused text tokenizer operation (SIMD + SuperwordTrie)."""
+    return get_op("fused_text_tokenizer")
+
+
+def load_highnoon_core():
+    """Load the consolidated HighNoon core binary.
+
+    This is the preferred way to access native ops. Returns the loaded
+    TensorFlow module containing all operations.
+
+    Returns:
+        Loaded TensorFlow operation module, or None if unavailable.
+    """
+    return _load_consolidated_binary()
+
+
 # Log edition and native availability on import
 _edition = get_edition().upper()
 _native_avail = "available" if is_native_available() else "not found"
@@ -504,4 +560,6 @@ __all__ = [
     "load_rg_lru",
     "load_ssd",
     "load_continuous_thought",
+    "load_text_tokenizer",
+    "load_highnoon_core",
 ]

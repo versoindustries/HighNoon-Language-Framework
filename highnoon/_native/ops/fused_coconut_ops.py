@@ -29,6 +29,8 @@ import logging
 
 import tensorflow as tf
 
+from highnoon.config import COLLAPSE_HARD_SAMPLES
+
 logger = logging.getLogger(__name__)
 
 # Global state for op loading
@@ -89,6 +91,8 @@ def fused_coconut_bfs(
     num_paths: int = 2,
     num_thought_steps: int = 4,
     prune_threshold: float = 0.1,
+    use_fft: bool = False,
+    persistent_freq_state: bool = False,
 ) -> tuple[tf.Tensor, tf.Tensor]:
     """Multi-path BFS thought exploration with Grover-inspired amplitude scoring.
 
@@ -116,6 +120,10 @@ def fused_coconut_bfs(
         num_paths: Number of parallel thought paths (default 2, Lite max 8).
         num_thought_steps: Number of thought iterations per path.
         prune_threshold: Minimum amplitude to keep path (not used in current impl).
+        use_fft: Whether to use FFT-based thought evolution (O(D log D)).
+        persistent_freq_state: UQHA Phase 2.2 - Keep state in frequency domain
+            between thought steps. Eliminates k-2 FFT/IFFT pairs for ~3x speedup.
+            Only effective when use_fft=True.
 
     Returns:
         Tuple of:
@@ -151,6 +159,8 @@ def fused_coconut_bfs(
         num_paths=num_paths,
         num_thought_steps=num_thought_steps,
         prune_threshold=prune_threshold,
+        use_fft=use_fft,
+        persistent_freq_state=persistent_freq_state,
     )
 
 
@@ -159,6 +169,7 @@ def fused_coconut_dfs_collapse(
     path_amplitudes: tf.Tensor,
     collapse_threshold: float = 0.8,
     crystallize_threshold: float = 0.9,
+    use_hard_samples: bool | None = None,
 ) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]:
     """Adaptive BFS→DFS collapse based on path confidence.
 
@@ -170,6 +181,8 @@ def fused_coconut_dfs_collapse(
         path_amplitudes: Path quality scores [batch, num_paths].
         collapse_threshold: Threshold to collapse to single path.
         crystallize_threshold: Threshold to flag for crystallization.
+        use_hard_samples: Use straight-through hard samples (COLLAPSE_HARD_SAMPLES).
+            If None, reads from config.COLLAPSE_HARD_SAMPLES.
 
     Returns:
         Tuple of:
@@ -181,11 +194,15 @@ def fused_coconut_dfs_collapse(
     if not _load_coconut_ops():
         raise RuntimeError("FusedCoconutDFSCollapse C++ op not available.")
 
+    # Wire to COLLAPSE_HARD_SAMPLES config flag if not explicitly set
+    hard = use_hard_samples if use_hard_samples is not None else COLLAPSE_HARD_SAMPLES
+
     return _coconut_ops_lib.fused_coconut_dfs_collapse(
         path_states,
         path_amplitudes,
         collapse_threshold=collapse_threshold,
         crystallize_threshold=crystallize_threshold,
+        use_hard_samples=hard,
     )
 
 
@@ -280,6 +297,8 @@ def fused_coconut_bfs_with_grad(
     num_paths: int = 2,
     num_thought_steps: int = 4,
     prune_threshold: float = 0.1,
+    use_fft: bool = False,
+    persistent_freq_state: bool = False,
 ) -> tuple[tf.Tensor, tf.Tensor]:
     """CoCoNut BFS with custom gradient for training.
 
@@ -306,6 +325,9 @@ def fused_coconut_bfs_with_grad(
         num_paths: Number of parallel thought paths.
         num_thought_steps: Number of thought iterations per path.
         prune_threshold: Minimum amplitude to keep path.
+        use_fft: Whether to use FFT-based thought evolution (O(D log D)).
+        persistent_freq_state: UQHA Phase 2.2 - Keep state in frequency domain
+            between thought steps. Only effective when use_fft=True.
 
     Returns:
         Tuple of (output, amplitudes).
@@ -368,38 +390,63 @@ def fused_coconut_bfs_with_grad(
             num_paths=num_paths,
             num_thought_steps=num_thought_steps,
             prune_threshold=prune_threshold,
+            use_fft=use_fft,
+            persistent_freq_state=persistent_freq_state,
         )
 
-        def grad(grad_output, grad_amplitudes):
-            """Backward pass through CoCoNut BFS.
+        def grad(grad_output, grad_amplitudes, variables=None):
+            """Backward pass through CoCoNut BFS using C++ FusedCoconutBFSGrad op.
 
             Args:
                 grad_output: Gradient w.r.t. output tensor.
                 grad_amplitudes: Gradient w.r.t. amplitudes tensor.
+                variables: Optional captured variables (unused).
 
             Returns:
                 Tuple of gradients for all 16 tensor inputs.
             """
-            # Return gradients for each of the 16 tensor inputs
-            # hidden_states gets grad_output, all weight/bias tensors get None
-            return (
-                grad_output,  # grad for hs (hidden_states)
-                None,  # grad for ctx (context)
-                None,  # grad for ing (input_norm_gamma)
-                None,  # grad for inb (input_norm_beta)
-                None,  # grad for agg_w (aggregator_weight)
-                None,  # grad for agg_b (aggregator_bias)
-                None,  # grad for png (projector_norm_gamma)
-                None,  # grad for pnb (projector_norm_beta)
-                None,  # grad for pd1_w (projector_dense1_weight)
-                None,  # grad for pd1_b (projector_dense1_bias)
-                None,  # grad for pd2_w (projector_dense2_weight)
-                None,  # grad for pd2_b (projector_dense2_bias)
-                None,  # grad for bc_w (broadcast_weight)
-                None,  # grad for bc_b (broadcast_bias)
-                None,  # grad for ong (output_norm_gamma)
-                None,  # grad for onb (output_norm_beta)
+            # Call C++ backward op for analytic gradients
+            grads = _coconut_ops_lib.fused_coconut_bfs_grad(
+                grad_output,
+                grad_amplitudes,
+                hs,  # hidden_states
+                ctx,  # context
+                ing,  # input_norm_gamma
+                png,  # projector_norm_gamma
+                pd1_w,  # projector_dense1_weight
+                pd2_w,  # projector_dense2_weight
+                bc_w,  # broadcast_weight
+                ong,  # output_norm_gamma
+                num_paths=num_paths,
+                num_thought_steps=num_thought_steps,
             )
+
+            # C++ backward returns 16 gradient tensors:
+            # (grad_hidden_states, grad_context, grad_input_norm_gamma, grad_input_norm_beta,
+            #  grad_aggregator_weight, grad_aggregator_bias, grad_projector_norm_gamma,
+            #  grad_projector_norm_beta, grad_projector_dense1_weight, grad_projector_dense1_bias,
+            #  grad_projector_dense2_weight, grad_projector_dense2_bias, grad_broadcast_weight,
+            #  grad_broadcast_bias, grad_output_norm_gamma, grad_output_norm_beta)
+
+            # Map to input tensor order
+            return (
+                grads[0],  # hs (hidden_states)
+                grads[1],  # ctx (context)
+                grads[2],  # ing (input_norm_gamma)
+                grads[3],  # inb (input_norm_beta)
+                grads[4],  # agg_w (aggregator_weight)
+                grads[5],  # agg_b (aggregator_bias)
+                grads[6],  # png (projector_norm_gamma)
+                grads[7],  # pnb (projector_norm_beta)
+                grads[8],  # pd1_w (projector_dense1_weight)
+                grads[9],  # pd1_b (projector_dense1_bias)
+                grads[10],  # pd2_w (projector_dense2_weight)
+                grads[11],  # pd2_b (projector_dense2_bias)
+                grads[12],  # bc_w (broadcast_weight)
+                grads[13],  # bc_b (broadcast_bias)
+                grads[14],  # ong (output_norm_gamma)
+                grads[15],  # onb (output_norm_beta)
+            ), ([] if variables is None else [tf.zeros_like(v) for v in variables])
 
         return (output, amplitudes), grad
 
@@ -423,6 +470,50 @@ def fused_coconut_bfs_with_grad(
     )
 
 
+def fused_fft_projector_forward(
+    state: tf.Tensor,
+    freq_weights_1: tf.Tensor,
+    bias_1: tf.Tensor,
+    freq_weights_2: tf.Tensor,
+    bias_2: tf.Tensor,
+    norm_gamma: tf.Tensor,
+    norm_beta: tf.Tensor,
+    dim: int,
+    persistent_freq: bool = False,
+) -> tf.Tensor:
+    """UQHA v3.1 FFT-based thought projector.
+
+    Args:
+        state: Input states [total_paths, dim].
+        freq_weights_1: Complex weights for layer 1 [2, dim].
+        bias_1: Bias for layer 1 [dim].
+        freq_weights_2: Complex weights for layer 2 [2, dim].
+        bias_2: Bias for layer 2 [dim].
+        norm_gamma: LayerNorm gamma [dim].
+        norm_beta: LayerNorm beta [dim].
+        dim: Hidden dimension (must be power of 2).
+        persistent_freq: Whether to keep state in frequency domain between calls.
+
+    Returns:
+        Projected states [total_paths, dim].
+    """
+    if not _load_coconut_ops():
+        raise RuntimeError("FFTProjectorForward C++ op not available.")
+
+    return _coconut_ops_lib.fft_projector_forward(
+        state,
+        freq_weights_1,
+        bias_1,
+        freq_weights_2,
+        bias_2,
+        norm_gamma,
+        norm_beta,
+        dim=dim,
+        input_is_freq=persistent_freq,
+        output_is_freq=persistent_freq,
+    )
+
+
 __all__ = [
     "fused_coconut_bfs_available",
     "fused_coconut_bfs",
@@ -430,4 +521,5 @@ __all__ = [
     "fused_coconut_dfs_collapse",
     "fused_coconut_crystallize",
     "fused_coconut_retrieve",
+    "fused_fft_projector_forward",
 ]

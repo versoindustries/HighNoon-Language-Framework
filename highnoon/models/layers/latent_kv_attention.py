@@ -1,5 +1,5 @@
 # highnoon/models/layers/latent_kv_attention.py
-# Copyright 2025 Verso Industries (Author: Michael B. Zimmerman)
+# Copyright 2025-2026 Verso Industries (Author: Michael B. Zimmerman)
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,6 +14,8 @@
 # limitations under the License.
 
 """Phase 18.1: Latent KV Compression Attention with O(n) complexity.
+
+MIGRATED TO UNIFIED ATTENTION API (V2 Performance Optimization Phase 2)
 
 This module implements attention with compressed Key-Value representations,
 achieving 10-28x reduction in KV cache memory while maintaining quality.
@@ -40,20 +42,21 @@ from typing import Any
 import tensorflow as tf
 from tensorflow.keras import layers
 
+# V2 MIGRATION: Use unified attention API
+from highnoon._native.ops.unified_attention import (
+    AttentionMode,
+    UnifiedAttentionConfig,
+    unified_attention,
+)
 from highnoon.config import GQA_NUM_KV_HEADS, LATENT_KV_DIM, LATENT_KV_USE_QUANTUM
 
 logger = logging.getLogger(__name__)
 
-# Strict C++ compliance: require fused op
-from highnoon._native.ops.fused_latent_kv_attention_op import (  # noqa: E402
-    fused_latent_kv_attention_available,
-)
-
-_cpp_op_available = fused_latent_kv_attention_available()
-
 
 class LatentKVAttention(layers.Layer):
     """Latent Key-Value Compression Attention with O(n) complexity.
+
+    MIGRATED TO UNIFIED ATTENTION API (V2 Performance Optimization)
 
     Compresses Keys and Values to a low-dimensional latent space before
     caching, achieving significant memory reduction (10-28x) while
@@ -115,7 +118,7 @@ class LatentKVAttention(layers.Layer):
 
         if embedding_dim % num_heads != 0:
             raise ValueError(
-                f"embedding_dim ({embedding_dim}) must be divisible by " f"num_heads ({num_heads})"
+                f"embedding_dim ({embedding_dim}) must be divisible by num_heads ({num_heads})"
             )
 
         self.embedding_dim = embedding_dim
@@ -133,8 +136,7 @@ class LatentKVAttention(layers.Layer):
 
         if num_heads % self.num_kv_heads != 0:
             raise ValueError(
-                f"num_heads ({num_heads}) must be divisible by "
-                f"num_kv_heads ({self.num_kv_heads})"
+                f"num_heads ({num_heads}) must be divisible by num_kv_heads ({self.num_kv_heads})"
             )
 
         self.num_queries_per_kv = num_heads // self.num_kv_heads
@@ -198,88 +200,13 @@ class LatentKVAttention(layers.Layer):
         # Mark as built
         super().build(input_shape)
 
-    def _apply_feature_map(self, x: tf.Tensor) -> tf.Tensor:
-        """Apply feature map for linear attention.
-
-        Args:
-            x: Input tensor [batch, heads, seq, head_dim].
-
-        Returns:
-            Transformed tensor with non-negative features.
-        """
-        if self.feature_map == "elu":
-            return tf.nn.elu(x) + 1.0
-        elif self.feature_map == "relu":
-            return tf.nn.relu(x) + self.eps
-        elif self.feature_map == "exp":
-            # Softmax-like but with numerical stability
-            x_max = tf.reduce_max(x, axis=-1, keepdims=True)
-            return tf.exp(x - x_max)
-        else:
-            return tf.nn.elu(x) + 1.0
-
-    def _expand_kv_heads(self, x: tf.Tensor) -> tf.Tensor:
-        """Expand KV heads by repeating for each query group."""
-        return tf.repeat(x, repeats=self.num_queries_per_kv, axis=1)
-
-    def _linear_attention(
-        self,
-        q: tf.Tensor,
-        k: tf.Tensor,
-        v: tf.Tensor,
-    ) -> tf.Tensor:
-        """Compute O(n) linear attention.
-
-        Linear attention formula:
-            O = φ(Q) @ (φ(K)^T @ V) / (φ(Q) @ Σφ(K))
-
-        For causal, uses cumulative sums for O(n) complexity.
-
-        Args:
-            q: Queries [batch, heads, seq, head_dim].
-            k: Keys [batch, heads, seq, head_dim].
-            v: Values [batch, heads, seq, head_dim].
-
-        Returns:
-            Attention output [batch, heads, seq, head_dim].
-        """
-        # Apply feature map
-        q_features = self._apply_feature_map(q)
-        k_features = self._apply_feature_map(k)
-
-        if self.causal:
-            # Causal linear attention using cumulative sums
-            # KV = cumsum(k ⊗ v)
-            kv = tf.einsum("bhsf,bhsd->bhsfd", k_features, v)
-            kv_cumsum = tf.cumsum(kv, axis=2)
-
-            # K_sum = cumsum(k)
-            k_cumsum = tf.cumsum(k_features, axis=2)
-
-            # Output = q @ KV / (q @ K_sum)
-            numerator = tf.einsum("bhsf,bhsfd->bhsd", q_features, kv_cumsum)
-            denominator = tf.einsum("bhsf,bhsf->bhs", q_features, k_cumsum)
-            denominator = denominator[..., tf.newaxis] + self.eps
-
-            return numerator / denominator
-        else:
-            # Non-causal: global attention
-            kv = tf.einsum("bhsf,bhsd->bhfd", k_features, v)
-            k_sum = tf.reduce_sum(k_features, axis=2)
-
-            numerator = tf.einsum("bhsf,bhfd->bhsd", q_features, kv)
-            denominator = tf.einsum("bhsf,bhf->bhs", q_features, k_sum)
-            denominator = denominator[..., tf.newaxis] + self.eps
-
-            return numerator / denominator
-
     def call(
         self,
         x: tf.Tensor,
         attention_mask: tf.Tensor | None = None,
         training: bool = False,
     ) -> tf.Tensor:
-        """Forward pass with latent KV compression attention.
+        """Forward pass with latent KV compression attention using unified API.
 
         Args:
             x: Input tensor [batch, seq_len, embedding_dim].
@@ -320,12 +247,19 @@ class LatentKVAttention(layers.Layer):
         v = tf.reshape(v, [batch_size, seq_len, self.num_kv_heads, self.head_dim])
         v = tf.transpose(v, [0, 2, 1, 3])  # [B, KV_H, L, D]
 
-        # Expand KV heads to match query heads
-        k = self._expand_kv_heads(k)  # [B, H, L, D]
-        v = self._expand_kv_heads(v)  # [B, H, L, D]
+        # V2 MIGRATION: Use unified attention with LATENT_KV mode
+        # Note: GQA expansion is handled inside unified_attention
+        attn_config = UnifiedAttentionConfig(
+            mode=AttentionMode.LINEAR,  # Latent KV uses linear attention
+            num_heads=self.num_heads,
+            num_kv_heads=self.num_kv_heads,
+            head_dim=self.head_dim,
+            causal=self.causal,
+            epsilon=self.eps,
+            dropout_rate=self.dropout_rate if training else 0.0,
+        )
 
-        # Compute linear attention
-        output = self._linear_attention(q, k, v)
+        output = unified_attention(q, k, v, attn_config, training=training)
 
         # Reshape back
         output = tf.transpose(output, [0, 2, 1, 3])  # [B, L, H, D]

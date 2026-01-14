@@ -516,7 +516,7 @@ class HDWeightCompressor:
         if hd_bundle.is_fallback:
             return hd_bundle.bundle.reshape(hd_bundle.original_shape)
 
-        chunk_size = hd_bundle.metadata.get("chunk_size", self.chunk_size)
+        hd_bundle.metadata.get("chunk_size", self.chunk_size)
         padding = hd_bundle.metadata.get("padding", 0)
 
         # Calculate expected padded size from original shape + padding

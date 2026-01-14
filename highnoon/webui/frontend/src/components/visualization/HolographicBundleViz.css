@@ -1,0 +1,230 @@
+/* HolographicBundleViz.css - Premium HD Encoding Visualization Styles */
+/* Matches CockpitHUD F1/jet cockpit aesthetics with glassmorphism */
+
+/* =============================================================================
+   MAIN CONTAINER
+   ============================================================================= */
+
+.holographic-bundle {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    background: linear-gradient(180deg,
+            rgba(10, 10, 18, 0.98) 0%,
+            rgba(15, 15, 26, 0.95) 100%);
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--border-default);
+    overflow: hidden;
+    box-shadow:
+        0 0 40px rgba(99, 102, 241, 0.08),
+        inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+/* =============================================================================
+   HEADER
+   ============================================================================= */
+
+.holographic-bundle__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--spacing-sm) var(--spacing-md);
+    background: rgba(0, 0, 0, 0.4);
+    border-bottom: 1px solid var(--border-subtle);
+}
+
+.holographic-bundle__title {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-sm);
+    font-size: var(--text-sm);
+    font-weight: var(--font-semibold);
+    color: var(--text-primary);
+    letter-spacing: 0.02em;
+}
+
+.holographic-badge {
+    padding: 2px 8px;
+    background: linear-gradient(135deg, rgba(99, 102, 241, 0.2), rgba(139, 92, 246, 0.2));
+    border: 1px solid rgba(99, 102, 241, 0.3);
+    border-radius: var(--radius-full);
+    font-size: 0.65rem;
+    font-weight: var(--font-bold);
+    color: var(--color-primary);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+}
+
+.holographic-bundle__actions {
+    display: flex;
+    gap: var(--spacing-sm);
+}
+
+.holographic-export-btn {
+    padding: var(--spacing-xs) var(--spacing-sm);
+    background: rgba(99, 102, 241, 0.1);
+    border: 1px solid rgba(99, 102, 241, 0.3);
+    border-radius: var(--radius-sm);
+    font-size: var(--text-xs);
+    color: var(--color-primary);
+    cursor: pointer;
+    transition: all var(--transition-fast);
+}
+
+.holographic-export-btn:hover {
+    background: rgba(99, 102, 241, 0.2);
+    border-color: var(--color-primary);
+    box-shadow: 0 0 12px rgba(99, 102, 241, 0.3);
+}
+
+.holographic-export-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* =============================================================================
+   CANVAS CONTAINER
+   ============================================================================= */
+
+.holographic-bundle__canvas {
+    position: relative;
+    background: radial-gradient(ellipse at center, #12121a 0%, #0a0a0f 100%);
+}
+
+/* Scanline overlay for retro-futuristic effect */
+.holographic-bundle__scanlines {
+    position: absolute;
+    inset: 0;
+    background: repeating-linear-gradient(0deg,
+            transparent,
+            transparent 2px,
+            rgba(99, 102, 241, 0.02) 2px,
+            rgba(99, 102, 241, 0.02) 4px);
+    pointer-events: none;
+    z-index: 1;
+}
+
+/* =============================================================================
+   3D STATS OVERLAY
+   ============================================================================= */
+
+.holographic-stats-3d {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 10px 14px;
+    background: rgba(10, 10, 18, 0.85);
+    backdrop-filter: blur(8px);
+    border: 1px solid rgba(99, 102, 241, 0.2);
+    border-radius: var(--radius-md);
+    font-family: var(--font-mono);
+    pointer-events: none;
+}
+
+.stat-row {
+    display: flex;
+    justify-content: space-between;
+    gap: var(--spacing-md);
+    font-size: 10px;
+}
+
+.stat-label {
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+.stat-value {
+    color: var(--color-primary);
+    font-weight: var(--font-semibold);
+}
+
+/* =============================================================================
+   FOOTER - ENCODING FLOW
+   ============================================================================= */
+
+.holographic-bundle__footer {
+    padding: var(--spacing-sm) var(--spacing-md);
+    background: rgba(0, 0, 0, 0.3);
+    border-top: 1px solid var(--border-subtle);
+}
+
+.encoding-flow {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--spacing-xs);
+    flex-wrap: wrap;
+}
+
+.flow-step {
+    padding: 3px 10px;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    font-size: 0.65rem;
+    font-weight: var(--font-medium);
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    transition: all var(--transition-fast);
+}
+
+.flow-step.active {
+    background: rgba(99, 102, 241, 0.15);
+    border-color: rgba(99, 102, 241, 0.4);
+    color: var(--color-primary);
+    box-shadow: 0 0 12px rgba(99, 102, 241, 0.15);
+}
+
+.flow-arrow {
+    color: var(--text-muted);
+    font-size: var(--text-xs);
+    opacity: 0.5;
+}
+
+/* =============================================================================
+   ANIMATIONS
+   ============================================================================= */
+
+@keyframes holographicPulse {
+    0%, 100% {
+        box-shadow:
+            0 0 40px rgba(99, 102, 241, 0.08),
+            inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    }
+    50% {
+        box-shadow:
+            0 0 60px rgba(99, 102, 241, 0.12),
+            inset 0 1px 0 rgba(255, 255, 255, 0.06);
+    }
+}
+
+.holographic-bundle:hover {
+    animation: holographicPulse 3s ease-in-out infinite;
+}
+
+/* =============================================================================
+   RESPONSIVE
+   ============================================================================= */
+
+@media (max-width: 600px) {
+    .holographic-bundle__header {
+        flex-direction: column;
+        gap: var(--spacing-sm);
+        text-align: center;
+    }
+
+    .encoding-flow {
+        gap: 4px;
+    }
+
+    .flow-step {
+        padding: 2px 6px;
+        font-size: 0.6rem;
+    }
+
+    .flow-arrow {
+        display: none;
+    }
+}

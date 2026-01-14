@@ -36,6 +36,7 @@ import tensorflow as tf
 # Phase 48+: Memory optimization flags
 from highnoon.config import (  # Phase 26-36 Quantum Architecture
     COMPRESSED_DIM,
+    GRADIENT_PASSTHROUGH_EPSILON,
     HD_ACTIVATION_CTQW,
     HD_ACTIVATION_DIM,
     MAMBA2_CONV_DIM,
@@ -86,25 +87,29 @@ def _load_hd_checkpoint_lazy():
 
 
 # Quantum ops (lazy import to avoid load at module level)
+# V2 MIGRATION: Uses quantum_foundation_ops unified API
 _quantum_ops_loaded = False
 _unitary_residual_forward = None
 _unitary_norm_forward = None
 
 
 def _load_quantum_ops_lazy():
-    """Lazy load quantum ops to avoid slowing down module import."""
+    """Lazy load quantum ops to avoid slowing down module import.
+
+    V2 MIGRATION: Uses quantum_foundation_ops instead of legacy quantum_ops.
+    """
     global _quantum_ops_loaded, _unitary_residual_forward, _unitary_norm_forward
     if _quantum_ops_loaded:
         return
     try:
-        from highnoon._native.ops.quantum_ops import unitary_norm_forward, unitary_residual_forward
+        from highnoon._native.ops.quantum_foundation_ops import quantum_norm, quantum_residual
 
-        _unitary_residual_forward = unitary_residual_forward
-        _unitary_norm_forward = unitary_norm_forward
+        _unitary_residual_forward = quantum_residual
+        _unitary_norm_forward = quantum_norm
         _quantum_ops_loaded = True
-        logger.info("Quantum ops loaded for reasoning module")
+        logger.info("Quantum foundation ops loaded for reasoning module")
     except Exception as e:
-        logger.warning(f"Quantum ops not available: {e}")
+        logger.warning(f"Quantum foundation ops not available: {e}")
         _quantum_ops_loaded = False
 
 
@@ -259,6 +264,8 @@ class ReasoningModule(tf.keras.layers.Layer):
         use_quantum_holographic_memory: bool = False,
         # Phase 201.1: HD Activation Checkpointing - override global HD_ACTIVATION_DIM
         hd_activation_dim: int | None = None,
+        # Phase 800+: HD dimension for QHD blocks - must match DualPathEmbedding's hd_dim
+        hd_dim: int | None = None,
         **kwargs,
     ):
         keras_kwargs = {k: v for k, v in kwargs.items() if k in ["name", "dtype", "trainable"]}
@@ -296,10 +303,16 @@ class ReasoningModule(tf.keras.layers.Layer):
             superposition_dim=superposition_dim,
             wlam_num_heads=wlam_num_heads,
             wlam_wavelet_kernel_size=wlam_kernel_size,
+            # Phase 800+: Pass hd_dim to ensure QHD blocks use trial-specific dimension
+            hd_dim=hd_dim,
             # Quantum Flags
             use_quantum_memory_replay=use_quantum_memory_replay,
             use_entanglement_loss=use_entanglement_loss,
             use_quantum_holographic_memory=use_quantum_holographic_memory,
+        )
+        # Log hd_dim propagation for debugging
+        logger.info(
+            f"[ReasoningModule] hd_dim={'from trial: ' + str(hd_dim) if hd_dim else 'using config default'}"
         )
 
         # Phase 30: Quantum Normalization flag (set early since it's used for layer_norm setup)
@@ -501,6 +514,44 @@ class ReasoningModule(tf.keras.layers.Layer):
         Returns:
             Output tensor [batch, seq_len, embedding_dim].
         """
+        output, _ = self._forward_impl(
+            hidden_states,
+            training=training,
+            mask=mask,
+            reset_state_bus=reset_state_bus,
+            collect_stats=False,
+        )
+        return output
+
+    def trace_block_stats(
+        self,
+        hidden_states: tf.Tensor,
+        training: bool = False,
+        mask: tf.Tensor | None = None,
+        reset_state_bus: bool = True,
+    ) -> tuple[tf.Tensor, list[dict[str, Any]]]:
+        """Run a debug forward pass and capture per-block activation stats.
+
+        Note: Requires eager execution for numeric summaries.
+        """
+        if not tf.executing_eagerly():
+            raise RuntimeError("trace_block_stats requires eager execution.")
+        return self._forward_impl(
+            hidden_states,
+            training=training,
+            mask=mask,
+            reset_state_bus=reset_state_bus,
+            collect_stats=True,
+        )
+
+    def _forward_impl(
+        self,
+        hidden_states: tf.Tensor,
+        training: bool,
+        mask: tf.Tensor | None,
+        reset_state_bus: bool,
+        collect_stats: bool = False,
+    ) -> tuple[tf.Tensor, list[dict[str, Any]] | None]:
         x = hidden_states
 
         # State Bus: Use graph-compatible stateless operations during training
@@ -518,16 +569,22 @@ class ReasoningModule(tf.keras.layers.Layer):
             block_scores = self.adaptive_router(x, training=training)
             block_masks = self.adaptive_router.get_skip_mask(block_scores, training)
 
+        stats: list[dict[str, Any]] = [] if collect_stats else None
+
         for i, (block, norm, dropout) in enumerate(
             zip(self.reasoning_blocks, self.layer_norms, self.dropout_layers)
         ):
             residual = x
+            input_stats = self._summarize_tensor(residual) if collect_stats else None
+
             # Phase 30: Use quantum norm or standard LayerNorm
             if self.use_quantum_norm and _quantum_ops_loaded:
                 x_norm, _ = _unitary_norm_forward(x, self.qnorm_scales[i], self.qnorm_biases[i])
                 x = x_norm
             else:
                 x = norm(x)
+
+            norm_stats = self._summarize_tensor(x) if collect_stats else None
 
             # Phase 48+/201.1: Gradient Checkpointing - wrap block call to save memory
             # HD variant uses holographic encoding, standard uses tf.recompute_grad
@@ -546,10 +603,13 @@ class ReasoningModule(tf.keras.layers.Layer):
 
             # Handle blocks that return tuples (stateful blocks)
             if isinstance(block_output, tuple):
-                x = block_output[0]
+                block_value = block_output[0]
             else:
-                x = block_output
+                block_value = block_output
 
+            block_stats = self._summarize_tensor(block_value) if collect_stats else None
+
+            x = block_value
             x = dropout(x, training=training)
 
             # Phase 5.1: Apply block mask (soft during training, hard during inference)
@@ -560,14 +620,29 @@ class ReasoningModule(tf.keras.layers.Layer):
                 x = residual + mask_i * (x - residual)
             else:
                 # Phase 34: Use unitary residual if enabled
-                if self.use_unitary_residual and _quantum_ops_loaded:
+                use_unitary_residual = self.use_unitary_residual and _quantum_ops_loaded
+                if use_unitary_residual:
+                    inner_block = getattr(block, "inner_block", None)
+                    if inner_block is not None and inner_block.__class__.__name__ == "KalmanBlock":
+                        use_unitary_residual = False
+                if use_unitary_residual:
                     angle = self.blend_angles[i]
                     x = _unitary_residual_forward(residual, x, angle)
                 else:
                     x = residual + x
+                    # GRADIENT FIX: Ensure blend_angle receives gradient even when
+                    # unitary residual is skipped (e.g., for KalmanBlock)
+                    # NOTE: Using GRADIENT_PASSTHROUGH_EPSILON instead of 0.0 because TF may optimize away 0.0 * value
+                    if self.use_unitary_residual and hasattr(self, "blend_angles"):
+                        x = x + self.blend_angles[i] * GRADIENT_PASSTHROUGH_EPSILON
+
+                # Guard against nonfinite residual outputs by falling back to residual.
+                if not collect_stats:
+                    x = tf.where(tf.math.is_finite(x), x, residual)
 
             # Enhancement 6: State Bus read/write after each block (graph-compatible)
             if self.use_state_bus and bus_slots is not None:
+                x_pre_bus = x
                 # Pool sequence to get block summary
                 x_pooled = tf.reduce_mean(x, axis=1)  # [batch, dim]
 
@@ -593,8 +668,72 @@ class ReasoningModule(tf.keras.layers.Layer):
                     + content[:, tf.newaxis, :] * gate[:, :, tf.newaxis]
                 )
 
+                # Guard against nonfinite state-bus injection.
+                if not collect_stats:
+                    x = tf.where(tf.math.is_finite(x), x, x_pre_bus)
+
+            output_stats = self._summarize_tensor(x) if collect_stats else None
+
+            if collect_stats:
+                stats.append(
+                    {
+                        "block_index": i,
+                        "block_name": block.name,
+                        "block_class": block.__class__.__name__,
+                        "input": input_stats,
+                        "normalized": norm_stats,
+                        "block_output": block_stats,
+                        "output": output_stats,
+                    }
+                )
+
         # Return tensor directly (not dict) for Keras Functional API compatibility
-        return x
+        return x, stats
+
+    @staticmethod
+    def _summarize_tensor(tensor: tf.Tensor) -> dict[str, Any]:
+        """Compute lightweight numeric stats for a tensor (eager-only)."""
+        shape = tensor.shape.as_list() if hasattr(tensor.shape, "as_list") else list(tensor.shape)
+        dtype = tensor.dtype.name if hasattr(tensor.dtype, "name") else str(tensor.dtype)
+
+        if tensor.dtype == tf.complex64 or tensor.dtype == tf.complex128:
+            tensor_float = tf.abs(tensor)
+        else:
+            tensor_float = tf.cast(tensor, tf.float32)
+
+        nan_mask = tf.math.is_nan(tensor_float)
+        inf_mask = tf.math.is_inf(tensor_float)
+        has_nan = bool(tf.reduce_any(nan_mask).numpy())
+        has_inf = bool(tf.reduce_any(inf_mask).numpy())
+        nan_count = int(tf.reduce_sum(tf.cast(nan_mask, tf.int32)).numpy())
+        inf_count = int(tf.reduce_sum(tf.cast(inf_mask, tf.int32)).numpy())
+
+        clean_tensor = tf.where(
+            nan_mask | inf_mask,
+            tf.zeros_like(tensor_float),
+            tensor_float,
+        )
+
+        min_val = float(tf.reduce_min(clean_tensor).numpy())
+        max_val = float(tf.reduce_max(clean_tensor).numpy())
+        mean_val = float(tf.reduce_mean(clean_tensor).numpy())
+        variance = tf.reduce_mean(tf.square(clean_tensor - mean_val))
+        std_val = float(tf.sqrt(variance).numpy())
+        norm = float(tf.linalg.global_norm([clean_tensor]).numpy())
+
+        return {
+            "shape": shape,
+            "dtype": dtype,
+            "min": min_val,
+            "max": max_val,
+            "mean": mean_val,
+            "std": std_val,
+            "norm": norm,
+            "has_nan": has_nan,
+            "has_inf": has_inf,
+            "nan_count": nan_count,
+            "inf_count": inf_count,
+        }
 
     def compute_output_shape(self, input_shape: tf.TensorShape) -> tf.TensorShape:
         """Compute output shape for Keras graph tracing.

@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import tensorflow as tf
 
+from highnoon import config as hn_config
 from highnoon._native import get_op
 
 # Load the C++ op library
@@ -108,7 +109,7 @@ def fused_wlam(
     """
     if _fused_wlam_op is None:
         raise RuntimeError(
-            "FusedWLAM C++ op not available. Build with: " "cd highnoon/_native && ./build_ops.sh"
+            "FusedWLAM C++ op not available. Build with: cd highnoon/_native && ./build_ops.sh"
         )
 
     embed_dim = x.shape[-1] if x.shape[-1] is not None else 64
@@ -143,6 +144,9 @@ def fused_wlam(
         x_in, h_f, g_f, h_s, g_s, gamma, beta, p_w, u_w, scat_f, caq, cak, cav, cao
     ):
         """Inner function with tensor-only signature for gradient handling."""
+        streaming_chunk_size = (
+            hn_config.STREAMING_CHUNK_SIZE if getattr(hn_config, "STREAMING_ENABLED", True) else 0
+        )
         output = _fused_wlam_op(
             x=x_in,
             h_filter=h_f,
@@ -166,6 +170,7 @@ def fused_wlam(
             scattering_layers=scattering_layers,
             scattering_pool=scattering_pool,
             use_cross_attn=use_cross_attn,
+            streaming_chunk_size=streaming_chunk_size,
         )
 
         def grad(grad_output, variables=None):
@@ -199,10 +204,18 @@ def fused_wlam(
             embed_d = tf.shape(x_in)[2]
 
             # Cache low/high freq and residual
-            # For simplified backward, we use zeros as placeholders
-            low_freq_cache = tf.zeros([batch_size, half_seq, embed_d], dtype=tf.float32)
-            high_freq_cache = tf.zeros([batch_size, half_seq, embed_d], dtype=tf.float32)
-            residual_cache = x_in + output  # Approximate residual
+            # For simplified backward, use small placeholders when streaming is enabled
+            if streaming_chunk_size and streaming_chunk_size > 0:
+                cache_seq = max(1, streaming_chunk_size // 2)
+                low_freq_cache = tf.zeros([batch_size, cache_seq, embed_d], dtype=tf.float32)
+                high_freq_cache = tf.zeros([batch_size, cache_seq, embed_d], dtype=tf.float32)
+                residual_cache = tf.zeros(
+                    [batch_size, max(1, streaming_chunk_size), embed_d], dtype=tf.float32
+                )
+            else:
+                low_freq_cache = tf.zeros([batch_size, half_seq, embed_d], dtype=tf.float32)
+                high_freq_cache = tf.zeros([batch_size, half_seq, embed_d], dtype=tf.float32)
+                residual_cache = x_in + output  # Approximate residual
 
             grads = _fused_wlam_grad_op(
                 grad_output=grad_output,
@@ -220,6 +233,7 @@ def fused_wlam(
                 kernel_size=kernel_size,
                 num_levels=num_levels,
                 use_lifting=use_lifting,
+                streaming_chunk_size=streaming_chunk_size,
             )
             # grads: grad_x, grad_h, grad_g, grad_hs, grad_gs,
             #        grad_gamma, grad_beta, grad_predict, grad_update

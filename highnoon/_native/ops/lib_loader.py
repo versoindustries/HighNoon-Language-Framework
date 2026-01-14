@@ -56,6 +56,12 @@ def get_consolidated_library(target_arch: str | None = None) -> str | None:
     consolidated_path = arch_bin_dir / "_highnoon_core.so"
     if consolidated_path.exists():
         return str(consolidated_path)
+
+    # Fallback: Check local build directory (developer convenience)
+    build_path = _NATIVE_DIR / "build" / "_highnoon_core.so"
+    if build_path.exists():
+        return str(build_path)
+
     return None
 
 

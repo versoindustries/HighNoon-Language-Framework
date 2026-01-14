@@ -320,18 +320,24 @@ class MPSTemporalBlock(layers.Layer):
 
         initial_state = tf.zeros([batch_size, 1, self.bond_dim])
 
-        # Call the C++ kernel
+        # Call the C++ kernel with wired config flags
         mps_temporal_scan = _get_mps_temporal()
-        outputs, log_probs = mps_temporal_scan(
+        outputs, log_probs, entropy = mps_temporal_scan(
             inputs,
             site_weights,
             initial_state,
             tf.constant(self.bond_dim, dtype=tf.int32),
             use_tdvp=self.use_tdvp,
+            compute_entropy=self.compute_entropy,  # Wire MPS_COMPUTE_ENTROPY
+            uniform_mode=self.uniform_mode,  # Wire MPS_UNIFORM_MODE
         )
 
         # Store log_probs for probability modeling if needed
         self._last_log_probs = log_probs
+
+        # Store entanglement entropy if computed (wire MPS_COMPUTE_ENTROPY)
+        if self.compute_entropy and entropy is not None:
+            self._last_entanglement_entropy = entropy
 
         # Bridge physical output to bond dimension to match GRU path
         outputs = self.mps_bridge(outputs)

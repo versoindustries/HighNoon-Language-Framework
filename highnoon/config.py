@@ -44,7 +44,7 @@ LITE_MAX_EMBEDDING_DIM = 4096  # Maximum embedding dimension
 # SUPERPOSITION PARAMETERS (Used by C++ ops)
 # =============================================================================
 SUPERPOSITION_DIM = 4  # Default superposition dimension
-LITE_MAX_SUPERPOSITION_DIM = 2  # Maximum superposition dimension for Lite edition
+LITE_MAX_SUPERPOSITION_DIM = 4  # Maximum superposition dimension for Lite edition
 SUPERPOSITION_MICRO_BATCH_SIZE = 32  # Micro-batch size for superposition ops
 
 # =============================================================================
@@ -195,6 +195,61 @@ QSG_DEFAULT_TOP_K: int = 50  # Default top-k filtering
 QSG_DEFAULT_TOP_P: float = 0.9  # Default nucleus sampling threshold
 
 # =============================================================================
+# QSG ENTERPRISE OPTIMIZATION PARAMETERS (Phases 1-5)
+# =============================================================================
+# These parameters implement the QSG Enterprise Optimization Roadmap v1.0.
+# See QSG_ENTERPRISE_OPTIMIZATION_ROADMAP.md for full specification.
+#
+# Expected cumulative improvement: 100-300x faster generation throughput.
+# Memory reduction: 4x for factored embeddings, 60x for candidate pruning.
+
+# Phase 1.1: Top-K Candidate Pruning (60x speedup)
+QSG_CANDIDATE_K: int = 1024  # Top-K candidates per position (QAHPO: 512-2048)
+QSG_CANDIDATE_RERANK_FACTOR: int = 4  # PQ oversampling for re-ranking
+
+# Phase 1.1: Product Quantization Index
+QSG_USE_PQ_INDEX: bool = True  # Enable PQ approximate nearest neighbor
+QSG_PQ_NUM_SUBVECTORS: int = 8  # PQ subvector count M (QAHPO: 4-16)
+QSG_PQ_NUM_CENTROIDS: int = 256  # Centroids per subvector (256 for uint8)
+
+# Phase 1.2: Vocabulary Factorization (4x speedup)
+QSG_USE_FACTORED_VOCAB: bool = True  # Enable factored vocabulary embeddings
+QSG_FACTORIZATION_RANK: int = 32  # Factorization rank r (QAHPO: 16-64)
+
+# Phase 1.3: LSH Index (2x speedup for vocab > 256K)
+QSG_USE_LSH_INDEX: bool = False  # Enable LSH for very large vocabularies
+QSG_LSH_NUM_TABLES: int = 8  # LSH hash tables
+QSG_LSH_BITS_PER_TABLE: int = 16  # Bits per hash table
+
+# Phase 2: Quantum-Enhanced Candidate Selection
+QSG_USE_QUANTUM_ORACLE: bool = True  # Enable VQC-based semantic oracle
+QSG_QUANTUM_ORACLE_QUBITS: int = 4  # Qubits per context/candidate pair
+
+# Phase 3: Ensemble Parallel Refinement (15-30% quality gain)
+QSG_USE_ENSEMBLE_REFINEMENT: bool = True  # Enable ensemble parallel paths
+QSG_ENSEMBLE_NUM_PATHS: int = 4  # Parallel ensemble paths P (QAHPO: 2-8)
+QSG_ENSEMBLE_TEMP_RANGE: tuple[float, float] = (0.7, 1.3)  # Path temperature range
+QSG_ENSEMBLE_COHERENCE_WEIGHT: float = 1.0  # Cross-path consistency weighting
+QSG_ENSEMBLE_USE_BORN_COLLAPSE: bool = True  # Born rule vs argmax selection
+
+# Phase 3.2: Self-Consistency Filtering
+QSG_CONSISTENCY_WINDOW: int = 3  # Cross-position consistency window
+QSG_CONSISTENCY_SOFTENING: float = 0.5  # Softening strength for low consistency
+
+# Phase 3.2: Grover Quality Boost
+QSG_GROVER_BOOST_ITERATIONS: int = 2  # Grover diffusion iterations on ensemble
+
+# Phase 5: Quantum Coherence Bus Integration
+QSG_PUBLISH_TO_COHERENCE_BUS: bool = True  # Broadcast candidate scores to QCB
+QSG_COHERENCE_BUS_BLEND: float = 0.1  # Blend factor for bus state updates
+
+# Phase A1: MPS Context Entanglement Training
+# Set to False since MPS entanglement is primarily for inference speedup.
+# The training loop already has efficient attention mechanisms.
+USE_MPS_ENTANGLEMENT_TRAINING: bool = False  # Enable MPS entanglement in training loop
+
+
+# =============================================================================
 # LORENTZIAN/HYPERBOLIC GEOMETRY PARAMETERS
 # =============================================================================
 # Enables hyperbolic feature transforms on TimeCrystal blocks for hierarchical
@@ -218,6 +273,12 @@ USE_SPARSE_ATTENTION = True  # Enable band-diagonal sparse attention
 SPARSE_ATTENTION_LOWER_BANDS = 64  # Lower bandwidth (tokens to look back)
 SPARSE_ATTENTION_UPPER_BANDS = 64  # Upper bandwidth (tokens to look forward)
 
+
+# =============================================================================
+# MODEL ARCHITECTURE PARAMETERS
+# =============================================================================
+# NOTE: Streaming hierarchical memory parameters are defined in Phase 900 section
+# (Lines 807-846) to avoid duplication. See PHASE 900: STREAMING HIERARCHICAL MEMORY.
 
 # =============================================================================
 # MODEL ARCHITECTURE PARAMETERS
@@ -304,7 +365,9 @@ FLOQUET_BASE_FREQUENCY: float = 10000.0  # Base frequency for angle initializati
 QUANTUM_FEATURE_ROTATION_DEPTH: int = 2  # VQC rotation depth for feature maps
 
 # Phase 29: Unitary Expert Networks
-USE_UNITARY_EXPERT: bool = True  # Cayley-parameterized expert FFN
+USE_UNITARY_EXPERT: bool = (
+    False  # Disabled: HDSharedExpertBasis provides quantum-enhanced experts with better gradient flow
+)
 NEUMANN_CAYLEY_TERMS: int = 6  # Neumann series truncation terms
 
 # Phase 30: Quantum Normalization (QNorm)
@@ -516,6 +579,30 @@ NEUMANN_SERIES_TERMS: int = 4  # Neumann series truncation (4-8 typical)
 USE_SPRK_TIMECRYSTAL: bool = True  # Use 6th-order Yoshida (vs 4th)
 SPRK_ORDER: int = 6  # Integrator order (4 or 6)
 
+# =============================================================================
+# HNN TIMECRYSTAL ENHANCEMENT ROADMAP PHASE 1: STABILITY-FIRST IMPROVEMENTS
+# =============================================================================
+# These parameters implement the stability-first enhancements from the
+# HNN_TIMECRYSTAL_ENHANCEMENT_ROADMAP.md document.
+
+# Phase 1.1: Enhanced Energy Drift Alerting
+# Automatic recovery trigger when consecutive violations exceed threshold
+ENERGY_EMERGENCY_THRESHOLD: int = 5  # Consecutive violations before emergency reduction
+ENERGY_EMERGENCY_REDUCTION: float = 0.5  # Factor to reduce evolution_time by (50%)
+
+# Phase 1.3: Energy Drift Loss Component
+# Penalizes energy drift in the QULS loss for symplectic stability
+QULS_SYMPLECTIC_WEIGHT: float = 0.01  # Energy drift loss weight (0 = disabled)
+
+# Phase 3.1: Coherence-Gated Evolution Time
+# Gate evolution_time by QCB coherence for stability
+COHERENCE_GATED_EVOLUTION: bool = True  # Enable coherence gating
+
+# Phase 3.3: Floquet Period Drift Bound
+# Force shorter Floquet period when energy drift is high
+FLOQUET_DRIFT_PERIOD_BOUND: bool = True  # Enable drift-based period bounding
+FLOQUET_HIGH_DRIFT_THRESHOLD: float = 1e-3  # Drift threshold for period reduction
+
 # Phase 3: CA-TDVP Isometric MPS (HIGH)
 # Clifford-augmented TDVP with isometry constraints
 USE_CATDVP_MPS: bool = True  # Enable CA-TDVP for MPS gradients
@@ -588,7 +675,7 @@ FLOQUET_USE_MBL: bool = True  # Enable Many-Body Localization for error mitigati
 USE_COCONUT_REASONING: bool = True  # Enable Coconut thought refinement
 COCONUT_MAX_THOUGHT_STEPS: int = 8  # Maximum reasoning iterations
 COCONUT_BFS_BRANCHES: int = 4  # Parallel thought branches (K)
-COCONUT_HALT_THRESHOLD: float = 0.9  # Confidence for early stopping
+COCONUT_HALT_THRESHOLD: float = 0.85  # Confidence for early stopping (F1 optimization: 0.9 → 0.85)
 COCONUT_BRANCH_ALPHA: float = 0.1  # Residual update weight
 COCONUT_RESERVOIR_DIM: int = 64  # Quantum reservoir hidden dimension
 COCONUT_DISSIPATION_RATE: float = 0.3  # γ ∈ [0,1] for tunable info loss
@@ -625,6 +712,21 @@ NEURAL_KALMAN_PROPAGATE_COV: bool = False  # Track full covariance (expensive)
 NEURAL_KALMAN_INITIAL_P: float = 1.0  # Initial covariance diagonal
 NEURAL_KALMAN_PROCESS_NOISE: float = 0.01  # Initial Q estimate
 NEURAL_KALMAN_MEASUREMENT_NOISE: float = 0.1  # Initial R estimate
+USE_NATIVE_NEURAL_KALMAN: bool = True  # Use C++ NeuralKalmanStep op (Phase 43 wiring)
+
+# Phase 43.1: Neural Kalman Numerical Stabilization
+# Addresses GRU saturation and NaN propagation from large upstream innovations.
+NEURAL_KALMAN_MAX_INNOVATION: float = 10.0  # Clamp innovation magnitude (5σ for normal data)
+NEURAL_KALMAN_EPSILON: float = 1e-6  # Numerical epsilon for stability
+NEURAL_KALMAN_GRAD_CLIP: float = 1.0  # Gradient norm clipping threshold
+NEURAL_KALMAN_PRENORM: bool = True  # Apply LayerNorm on z_state before Kalman
+NEURAL_KALMAN_ADAPTIVE_SCALE: bool = True  # Adaptive scaling based on input statistics
+NEURAL_KALMAN_DEBUG: bool = False  # Enable diagnostics output from C++ op
+
+# QAHPO-tunable ranges (frontier-competitive):
+#   - NEURAL_KALMAN_HIDDEN_DIM: [32, 2048] (scales with model size)
+#   - NEURAL_KALMAN_PROCESS_NOISE: [1e-5, 0.5] (wide range for adaptation)
+#   - NEURAL_KALMAN_MEASUREMENT_NOISE: [1e-4, 2.0] (uncertainty calibration)
 
 # Phase 44: Quantum-Teleported State Bus Communication
 # Entanglement-mediated cross-block state transfer
@@ -682,11 +784,6 @@ USE_QUANTUM_MEASUREMENT_DROPOUT: bool = True  # Enable QMD for ensemble circuits
 QMD_DROP_RATE: float = 0.1  # QMD measurement probability
 QMD_SOFTENING_TEMP: float = 1.0  # Soft collapse temperature
 
-# Phase 69: Q-SSM Quantum State Space Gating
-USE_Q_SSM_GATING: bool = True  # Enable VQC gating for Mamba
-Q_SSM_VQC_LAYERS: int = 2  # VQC circuit layers
-Q_SSM_NUM_QUBITS: int = 4  # Virtual qubits for Q-SSM
-
 # Phase 71: Intrinsic Plasticity Preservation
 USE_INTRINSIC_PLASTICITY: bool = True  # Enable Stiefel manifold plasticity
 PLASTICITY_LEARNING_RATE: float = 0.01  # Plasticity update rate
@@ -710,14 +807,33 @@ UNIFIED_BUS_COHERENCE_THRESHOLD: float = 0.85  # Minimum coherence for propagati
 UNIFIED_BUS_ENTANGLEMENT_INIT: float = 0.5  # Initial entanglement strength
 UNIFIED_BUS_PROPAGATION_RATE: float = 0.1  # Entanglement update rate during forward pass
 
+# UQHA Phase 1001: Adaptive MPS Bus parameters
+USE_ADAPTIVE_MPS_BUS: bool = True  # Use AdaptiveMPSBus (dynamic bond dimension) by default
+UNIFIED_BUS_NUM_SITES: int = 8  # Number of MPS sites (communication channels)
+UNIFIED_BUS_PHYSICAL_DIM: int = 64  # Physical dimension at each site
+UNIFIED_BUS_BOND_DIM: int = 32  # Base bond dimension (adapted dynamically if adaptive)
+
 # Pillar 2: Input/Output Enhancement
 # Phase 48: Hyperdimensional Quantum Embeddings
 USE_HYPERDIMENSIONAL_EMBEDDING: bool = True  # Enable HQE holographic bundling
 HQE_CTQW_STEPS: int = 3  # CTQW spreading walk steps
 HD_EMBEDDING_DIM: int = 4096  # Hyperdimensional embedding dimension
+HD_EMBEDDING_DIM_MAX: int = 12288  # Maximum HD dimension (Phase 1010: layer-independent tuning)
 HD_ACTIVE_VOCAB_SIZE: int = 10000  # Active vocabulary for DualPathEmbedding
 
 # =============================================================================
+# PHASE 1010: PER-LAYER HYPERDIMENSIONAL DIMENSIONS
+# =============================================================================
+# Per-layer HD dimensions for independent QAHPO optimization.
+# Enables layer-type-specific dimension tuning for memory/quality trade-offs.
+# See HYPERDIMENSIONAL_EMBEDDING_ANALYSIS.md for architectural rationale.
+
+HD_DIM_EMBEDDING: int = 4096  # DualPathEmbedding - higher for vocabulary diversity
+HD_DIM_SPATIAL: int = 2048  # QHDSpatialBlock - FFT O(D log D) efficiency
+HD_DIM_TIMECRYSTAL: int = 1024  # HDTimeCrystalBlock - modes × D cost
+HD_DIM_MOE: int = 512  # SuperposedExpert - HD routing dimension (QAHPO tunable)
+HD_DIM_MIN: int = 64  # Global minimum for all HD dimensions (Phase 1010)
+
 # PHASE 200+: BLOCK-INTEGRATED HD STREAMING (HIGHNOON_UPGRADE_ROADMAP.md)
 # =============================================================================
 # When enabled, reasoning blocks operate natively on HD bundles instead of
@@ -725,10 +841,404 @@ HD_ACTIVE_VOCAB_SIZE: int = 10000  # Active vocabulary for DualPathEmbedding
 
 USE_HD_SPATIAL_BLOCK: bool = True  # Replace SpatialBlock with HDSpatialBlock
 USE_HD_TIMECRYSTAL_BLOCK: bool = True  # Replace TimeCrystalBlock with HDTimeCrystal
-USE_HD_MOE_BLOCK: bool = True  # Replace FusedMoEDispatch with HDMoEDispatch
+
+# SuperposedExpert now uses HD projection when HD_DIM_MOE != embedding_dim
+# See HD_SUPERPOSED_EXPERT_UNIFICATION.md for architecture details.
+
 USE_HOLOGRAPHIC_LOSS: bool = True  # Use HD-space cross-entropy (no logits tensor)
 HD_PROJECTION_FREEZE_EPOCHS: int = 2  # Freeze HD projections for N epochs
 HD_REQUIRE_NATIVE_OPS: bool = True  # Raise error if C++ ops unavailable
+
+# =============================================================================
+# PHASE 600+: QHD SPATIAL BLOCK (Quantum Superposition + Fourier-Domain SSM)
+# =============================================================================
+# When enabled, HDSpatialBlock is replaced by QHDSpatialBlock which combines:
+# - FFT-domain Mamba SSM (O(D log D) efficiency)
+# - K parallel superposition paths (quantum expressiveness)
+# - VQC entanglement layers (learned correlations)
+# - Born rule collapse (probabilistic selection)
+#
+# Note: QHDSpatialBlock supersedes both HDSpatialBlock and QMambaBlock.
+# Memory: K × state required (trade-off for expressiveness)
+
+USE_QHD_SPATIAL_BLOCK: bool = True  # Replace HDSpatialBlock with QHDSpatialBlock
+QHD_NUM_PATHS: int = 2  # K superposition paths (QAHPO tunable: 2-16)
+QHD_ENTANGLEMENT_DEPTH: int = 2  # VQC entanglement layers (QAHPO tunable: 1-4)
+QHD_ENTANGLEMENT_STRENGTH: float = 0.3  # CNOT-like mixing strength
+QHD_GUMBEL_TEMPERATURE: float = 1.0  # Born rule temperature
+
+# =============================================================================
+# PHASE V2.0-P1: PATH SYSTEM INDEPENDENCE (v2.0 Roadmap)
+# =============================================================================
+# All three path systems remain INDEPENDENT to explore fundamentally different
+# "parallel universes" with distinct mathematical foundations:
+#
+# 1. QHD_NUM_PATHS: Quantum superposition paths in FFT-domain SSM
+#    - VQC entanglement + Born collapse exploration
+#
+# 2. SUPERPOSITION_DIM: TT-FFN parallel paths for expert diversity (MoE)
+#    - Holographic routing in HD space
+#
+# 3. COCONUT_NUM_PATHS: BFS thought exploration paths
+#    - Gradient-connected Grover amplitudes (MUST stay separate!)
+#
+# v2.0 optimizes MEMORY and HPO without semantic unification:
+# - P-1.1: Path scratch buffer pooling (C++ thread_local pools)
+# - P-1.2: Coherence bus enhancement (read-only warm-start hints)
+# - P-1.3: HPO cross-parameter correlation (faNOVA correlation hints)
+#
+# See HIGHNOON_V2_PERFORMANCE_ANALYSIS.md Section 11.5-11.6.
+
+# Path scratch buffer pooling (enables C++ memory optimization)
+USE_PATH_SCRATCH_POOLING: bool = True  # Enable thread-local scratch pools
+PATH_SCRATCH_INITIAL_SIZE: int = 65536  # Initial pool size in floats (256KB)
+
+# =============================================================================
+# TENSOR STREAM POOL: ZERO-COPY INTER-KERNEL STREAMING
+# =============================================================================
+# Zero-copy buffer pool for eliminating memory copy overhead between C++ kernels.
+# When enabled, kernels hand off output buffers directly to the next kernel
+# instead of copying memory. See TENSOR_STREAM_POOL_PROPOSAL.md.
+#
+# Expected Impact:
+#   - Up to 100% reduction in inter-kernel memory copy traffic
+#   - 80%+ reduction in forward pass allocations
+#   - 15%+ wall-clock improvement for sequences ≥32K
+#
+# Integrated Kernels (Phase 1-7):
+#   - QHDSpatialBlock (acquire/handoff on output)
+#   - FusedReasoningStack (inter-block streaming)
+#   - COCONUT BFS (path expansion → evolution → scoring)
+#   - Unified Attention (KV buffer pool)
+#   - Mamba SSM (chunk buffer streaming)
+#   - WLAM (wavelet level streaming)
+#   - HD Hierarchical (level memory streaming)
+
+USE_TENSOR_STREAM_POOL: bool = True  # Master switch for zero-copy streaming
+TENSOR_STREAM_ALIGNMENT: int = 64  # Memory alignment (64 for AVX-512, 32 for AVX2)
+TENSOR_STREAM_BUCKET_SIZES: tuple[int, ...] = (
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,  # 256KB, 1MB, 4MB, 16MB, 64MB
+)  # Power-of-2 bucket sizes for efficient reuse
+TENSOR_STREAM_DEBUG: bool = False  # Enable debug logging for stream handoffs
+TENSOR_STREAM_TELEMETRY: bool = True  # Export pool stats to training telemetry
+
+# =============================================================================
+# PHASE 1: STREAMING ARCHITECTURE (Memory Independence from Sequence Length)
+# =============================================================================
+# Core streaming architecture constants. All intermediate buffers use
+# STREAMING_CHUNK_SIZE instead of seq_len to achieve O(1) memory scaling.
+# This enables processing arbitrarily long sequences with fixed memory.
+#
+# Memory Formula (After Phase 1):
+#   peak_memory = batch_size × STREAMING_CHUNK_SIZE × max(hd_dim, embedding_dim) × 4
+#               + model_parameters + optimizer_states
+#
+# Independent of seq_len: 1K or 1M tokens use same intermediate buffer memory.
+
+STREAMING_CHUNK_SIZE: int = 128  # Fixed chunk size for streaming buffers (QAHPO: 64-256)
+STREAMING_ENABLED: bool = True  # Master switch for streaming architecture
+
+# =============================================================================
+# PHASE 2: HD TOKEN BUNDLING (8× → 0.0625× Memory Transformation)
+# =============================================================================
+# HD bundling compresses tokens via FFT-domain circular correlation.
+# Instead of [B, L, 4096], we get [B, L/bundle_size, 4096] → 128× reduction.
+#
+# Memory Impact (per block, 32K seq, batch=4):
+#   Current (per-token HD): 537 MB
+#   Bundled (128 tokens):   4.2 MB
+#   Savings: 128×
+
+HD_BUNDLE_SIZE: int = 128  # Tokens per HD bundle (QAHPO tunable: 32-256)
+HD_BUNDLE_OVERLAP: int = 0  # Overlapping tokens between bundles (QAHPO: 0-32)
+USE_HD_TOKEN_BUNDLING: bool = True  # Enable HD bundling in embedding layer
+
+# =============================================================================
+# PHASE 4: POOL CAPACITY LIMITS (Safety Cap)
+# =============================================================================
+# Maximum memory the TensorStreamPool can allocate before returning errors.
+# Prevents unbounded memory growth from unreleased buffers.
+# Set based on available system RAM: 64GB system → 4GB pool recommended.
+
+TENSOR_STREAM_MAX_SIZE_GB: float = 4.0  # Maximum pool size in GB (QAHPO: 2-8)
+TENSOR_STREAM_WARNING_THRESHOLD: float = 0.8  # Log warning when pool exceeds this %
+
+# HPO Cross-Parameter Correlation Groups (for faNOVA importance tracking)
+# Related parameters are sampled together for faster HPO convergence,
+# but each parameter remains independently tunable.
+PATH_CORRELATION_GROUPS: dict = {
+    "spatial_paths": ["qhd_num_paths", "mamba_state_dim"],  # QHD block
+    "thought_paths": ["coconut_num_paths", "num_thought_steps"],  # COCONUT
+    "expert_paths": ["superposition_dim", "num_moe_experts"],  # MoE block
+}
+
+# =============================================================================
+# F1 OPTIMIZATION ROADMAP: CPU PERFORMANCE ENHANCEMENTS
+# =============================================================================
+# These settings implement the F1 optimization roadmap for maximum CPU
+# performance while maintaining linear/sublinear complexity guarantees.
+# Expected cumulative improvement: 30-50% faster training throughput.
+# See HIGHNOON_F1_OPTIMIZATION_ROADMAP.md for full specification.
+
+# Phase 3: Parallelization Tuning
+OMP_NESTED_PARALLELISM: bool = True  # Enable nested OpenMP for batch × chunk
+OMP_CHUNK_GRANULARITY: int = 16  # Dynamic scheduling granularity
+USE_NUMA_ALLOCATION: bool = False  # Enable NUMA-aware alloc (multi-socket only)
+
+# Phase 4: Algorithmic Enhancements
+QHD_SPARSE_ENTANGLEMENT_THRESHOLD: float = 0.1  # Threshold for sparse updates (QAHPO: 0.05-0.2)
+COCONUT_EARLY_EXIT_WARMUP: int = 2  # Minimum steps before early exit check
+
+# Phase 5: Kernel Fusion (C++ op flags)
+USE_FUSED_QHD_TIMECRYSTAL: bool = True  # Enable QHD+TimeCrystal fused kernel
+USE_FUSED_WLAM_MOE: bool = True  # Enable WLAM+MoE fused kernel
+
+# Phase 7: Telemetry & Profiling
+ENABLE_KERNEL_TIMING: bool = False  # Log per-kernel execution time
+KERNEL_TIMING_WARMUP: int = 10  # Skip first N batches in timing stats
+TELEMETRY_EXPORT_FORMAT: str = "prometheus"  # Export format: "prometheus", "json", "csv"
+TELEMETRY_EXPORT_INTERVAL: int = 100  # Batches between telemetry exports
+
+# Phase 2.2: Interleaved Complex FFT Layout
+# Use [re0, im0, re1, im1, ...] format for better cache locality
+USE_INTERLEAVED_COMPLEX_FFT: bool = True  # Enables native FFTW/MKL interleaved format
+
+# Phase 6.1: QAHPO Recommended Search Ranges
+# Optimized search space for fast HPO convergence
+QAHPO_SEARCH_SPACE: dict = {
+    # Core dimensions (tune first, highest impact)
+    "embedding_dim": [256, 384, 512, 768],
+    "hd_dim_spatial": [512, 1024, 2048],
+    "qhd_num_paths": [1, 2],
+    # Depth (tune second)
+    "num_layers": [6, 12, 18, 24],
+    # Fine-tuning (optional, low variance)
+    "coconut_max_thought_steps": [2, 4, 6, 8, 12, 16],
+    "coconut_bfs_branches": [1, 2, 3, 4],
+    "moe_num_experts": [2, 4, 6, 8, 10, 12],
+    "streaming_chunk_size": [64, 128, 256],
+    # Sparse entanglement threshold (F1 Phase 4.2)
+    "qhd_sparse_entanglement_threshold": [0.05, 0.1, 0.15, 0.2],
+    # QSG Enterprise Optimization (Phase 1-3)
+    # These affect training via factored embeddings and ensemble refinement
+    "qsg_factorization_rank": [16, 24, 32, 48, 64],  # Phase 1.2: Higher = more capacity, slower
+    "qsg_candidate_k": [512, 768, 1024, 1536, 2048],  # Phase 1.1: Top-K candidates per position
+    "qsg_pq_num_subvectors": [
+        4,
+        6,
+        8,
+        12,
+        16,
+    ],  # Phase 1.1: PQ subvector count (tradeoff: speed vs accuracy)
+    "qsg_ensemble_num_paths": [
+        2,
+        3,
+        4,
+        6,
+        8,
+    ],  # Phase 3.1: Parallel ensemble paths (more = better quality)
+    "qsg_ensemble_coherence_weight": [
+        0.5,
+        0.75,
+        1.0,
+        1.5,
+        2.0,
+    ],  # Phase 3.1: Cross-path consistency weighting
+    "qsg_consistency_window": [2, 3, 4, 5],  # Phase 3.2: Self-consistency window size
+    "qsg_consistency_softening": [
+        0.25,
+        0.5,
+        0.75,
+        1.0,
+    ],  # Phase 3.2: Softening for low-consistency positions
+    "qsg_grover_boost_iterations": [1, 2, 3],  # Phase 3.2: Grover quality boost iterations
+    # QWT (Quantum Wavelet Tokenizer) Parameters
+    # These affect tokenization quality and model input representation
+    "qwt_embedding_dim": [128, 256, 384, 512, 768, 1024],  # QWT embedding dimension
+    "qwt_dwt_filter_size": [2, 3, 4, 5, 6],  # DWT filter size
+    "qwt_vqc_qubits": [2, 3, 4, 5, 6, 8],  # VQC qubits for tokenizer
+    "qwt_vqc_layers": [1, 2, 3, 4, 5, 6],  # VQC layers for tokenizer
+    "qwt_ctqw_steps": [0, 1, 2, 3, 4, 5],  # CTQW steps (0 = disabled)
+    "qwt_pade_order": [1, 2, 3, 4],  # Padé matrix exponential order
+    "qwt_skip_stride": [0, 1, 2, 3, 4],  # Skip connection stride (0 = disabled)
+    "qwt_max_superposition": [
+        1,
+        2,
+    ],  # Max alt tokenizations - low since MoE provides path diversity
+    "num_wavelet_levels": [1, 2, 3, 4, 5],  # Cascaded DWT levels
+}
+
+
+# Phase 3.2: Work-Stealing for Uneven MoE Loads
+# When True, uses TBB-style work-stealing for MoE expert computation
+USE_WORK_STEALING_MOE: bool = False  # Enable when TBB is available
+
+# Environment variable overrides for runtime configuration
+
+# =============================================================================
+# PHASE 800: HD HIERARCHICAL MEMORY (Multi-Scale Reasoning)
+# =============================================================================
+# Enables QHDHierarchicalBlock which extends QHDSpatialBlock with inline
+# hierarchical pooling using C++ CTQW aggregation, adaptive chunking, and
+# cross-level attention.
+#
+# SUPERSEDES: MemoryHierarchyBuilder (Python tf.while_loop, now deleted).
+#
+# Data Flow:
+#   Input → QHD core → adaptive_chunk → chunk_pool → ctqw_aggregate →
+#   cross_level_attention → multi_rate_ema → Output
+#
+# Complexity: O(K × L × D log D) - same as QHDSpatialBlock
+# Memory: +15-20% for pooled levels (L/ratio + L/ratio² ≈ 0.3L overhead)
+
+USE_QHD_HIERARCHICAL_BLOCK: bool = True  # Replace QHDSpatialBlock with QHDHierarchicalBlock
+HD_HIERARCHICAL_LEVELS: int = 2  # Number of hierarchy levels (2-3 recommended, QAHPO: 1-4)
+HD_HIERARCHICAL_POOLING_RATIO: int = 4  # Compression ratio per level (4-8, QAHPO: 2-8)
+HD_HIERARCHICAL_USE_CTQW: bool = True  # Use CTQW quantum walk for aggregation
+HD_HIERARCHICAL_USE_CROSS_ATTENTION: bool = True  # Enable cross-level attention injection
+HD_HIERARCHICAL_CTQW_TIME: float = 1.0  # Quantum walk time parameter (QAHPO: 0.5-2.0)
+HD_HIERARCHICAL_EMA_BASE_RATE: float = 0.1  # Base EMA rate for level 0 (QAHPO: 0.05-0.2)
+
+# =============================================================================
+# PHASE 850: FREQUENCY-STRATIFIED SUPERPOSITION PATHS (UQHA v3.0)
+# =============================================================================
+# Encodes hierarchical structure directly into VQC frequency paths.
+# Eliminates need for cross-level attention, saving ~320 MB per block.
+# Low frequencies encode global/document context, high frequencies encode local.
+
+USE_FREQUENCY_STRATIFICATION: bool = True  # Enable hierarchical frequency paths
+FREQ_STRATIFICATION_MODE: str = "exponential"  # {exponential, linear, learned}
+FREQ_STRATIFICATION_OVERLAP: float = 0.25  # Band overlap (0.0-0.5, QAHPO: 0.1-0.5)
+FREQ_LEARNED_TEMPERATURE: float = 1.0  # Temperature for learned frequency routing
+
+# =============================================================================
+# PHASE 860: QUANTUM WALK ENTANGLEMENT (UQHA v3.0)
+# =============================================================================
+# Replaces O(D²) cross-level attention with O(K²) Quantum Walk evolution.
+# Memory savings: 256 MB → 256 bytes at D=4096, K=8.
+# Uses Cayley approximation for stable unitary evolution from learned Hamiltonian.
+
+QHD_ENTANGLEMENT_TOPOLOGY: str = "walk"  # {adjacent, hierarchical, walk}
+QHD_WALK_EVOLUTION_TIME: float = 1.0  # Quantum walk time parameter (QAHPO: 0.5-2.0)
+QHD_WALK_LEARN_TIME: bool = False  # Trainable evolution time
+
+# =============================================================================
+# PHASE 870: UNIFIED QUANTUM-HIERARCHICAL ARCHITECTURE (UQHA v3.0)
+# =============================================================================
+# Master switch for UQHA v3.0. When enabled, bypasses all legacy hierarchical
+# machinery (CTQW, cross-attention, level embeddings, pooling) and uses
+# QHDSpatialBlock with frequency stratification + quantum walk entanglement.
+#
+# Memory savings: ~576 MB → ~128 KB per hierarchical block
+# Parameter savings: ~75% reduction in cross-level attention weights
+# Performance: ~3x faster step time
+#
+# SUPERSEDES: USE_QHD_HIERARCHICAL_BLOCK (deprecated when USE_UQHA_MODE=True)
+
+USE_UQHA_MODE: bool = True  # UQHA master switch - enables all Phase 850-880 enhancements
+
+# UQHA v3.1 Phase 2: FFT Thought Projector
+# Reduces ThoughtProjector and COCONUT complexity from O(D²) to O(D log D).
+USE_FFT_THOUGHT: bool = True
+
+# UQHA v3.1 Phase 2.2: Frequency-Domain Persistent State
+# Keeps thought state in frequency domain between steps, eliminating k-2 FFT/IFFT pairs.
+# Only applies the initial FFT and final IFFT, all intermediate steps operate in freq domain.
+# Savings: For k=8 steps, eliminates 12 FFT+IFFT operations (~3x faster thought iteration).
+USE_FREQ_PERSISTENT_STATE: bool = True
+
+# =============================================================================
+# UQHA v3.1 P7: DEPTH REINVESTMENT CONFIGURATION
+# =============================================================================
+# With diagonal skip_proj (P0) reducing block params from 21M to ~4.3M,
+# we can reinvest savings into increased reasoning depth.
+#
+# Memory trade-offs (at 64GB RAM, batch_size=4):
+#   - v3.1 Thin (6 blocks, 25.8M params): ~2GB peak, fastest training
+#   - v3.1 Balanced (12 blocks, 51.6M params): ~4GB peak, recommended
+#   - v3.1 Deep (24 blocks, 103.2M params): ~8GB peak, maximum reasoning
+#
+# Comparison with v3.0 (6 blocks, 126.6M params → 16GB peak):
+#   - v3.1 Deep achieves 4x reasoning depth with 18% fewer params
+#   - v3.1 Balanced achieves 2x reasoning depth with 59% fewer params
+
+# Depth preset: "thin" (6), "balanced" (12), "deep" (24), or "custom"
+UQHA_DEPTH_PRESET: str = "balanced"
+
+# Custom depth configuration (used when UQHA_DEPTH_PRESET="custom")
+UQHA_CUSTOM_NUM_BLOCKS: int = 12  # QAHPO tunable: 4-32
+
+# Auto-compute num_blocks from preset (used by block_factory.py)
+
+# =============================================================================
+# PHASE 880: QUANTUM BUS HIERARCHICAL INJECTION (UQHA v3.0)
+# =============================================================================
+# Leverages UnifiedQuantumBus MPS infrastructure for cross-block hierarchical
+# context propagation without expensive cross-level attention.
+
+USE_BUS_HIERARCHICAL_INJECTION: bool = True  # Enable bus-mediated context injection
+BUS_INJECTION_STRENGTH: float = 0.1  # Injection strength (QAHPO: 0.05-0.3)
+BUS_INJECTION_DECAY: float = 0.5  # Hierarchical decay factor per level
+BUS_INJECTION_CHANNELS: int = 4  # Number of MPS channels for hierarchical paths
+
+
+# =============================================================================
+# PHASE 900: STREAMING HIERARCHICAL MEMORY (O(1) Sequence-Length Memory)
+# =============================================================================
+# Enables O(1) sequence-length memory via fixed-slot memory banks instead of
+# full-sequence buffers. From MEMORY_ARCHITECTURE.md roadmap.
+#
+# Memory reduction: 2,500× for 128K context, 10,000× for 512K context
+# - Current: O(B × L × D) per level → ~3GB for 128K
+# - Streaming: O(L × M × D) fixed slots → ~1.2MB for any context
+#
+# These parameters are wired to C++ HDHierarchicalConfig in fused_hd_hierarchical_block_op.h
+
+USE_STREAMING_HIERARCHICAL: bool = True  # Enable O(1) streaming mode (QAHPO: flag)
+USE_STREAMING_HD_POSITIONS: bool = True  # Replace position_keys table with HD permutation
+HD_POSITION_DECAY_RATE: float = 0.9999  # Exponential decay for long-range (1.0 = no decay)
+
+# Fixed-slot memory bank configuration
+HIERARCHICAL_MEMORY_SLOTS: int = 128  # M slots per level (QAHPO: 32-256)
+HIERARCHICAL_NUM_LEVELS: int = 3  # Number of hierarchy levels (use HD_HIERARCHICAL_LEVELS)
+
+# Uncertainty-gated pooling (Kalman trace triggers semantic boundary)
+UNCERTAINTY_POOL_THRESHOLD: float = 0.5  # Kalman trace threshold for pooling (QAHPO: 0.2-0.9)
+MAX_CHUNK_SIZE: int = 64  # Hard limit on tokens per chunk (QAHPO: 16-128)
+
+# Online CTQW configuration (O(k²) instead of O(chunks²) via spectral approximation)
+ONLINE_CTQW_RANK: int = 16  # Top-k eigenvectors to maintain (QAHPO: 4-32)
+ONLINE_CTQW_EMA_DECAY: float = 0.99  # Exponential moving average decay (QAHPO: 0.9-0.999)
+
+# Phase 900.1: CTQW Random Fourier Features approximation for O(M × D) instead of O(M²)
+# Memory reduction: 1.3 GB → 2 MB for 128K context with chunk_size=16
+CTQW_USE_RFF: bool = True  # Use RFF approximation (QAHPO: flag)
+CTQW_RFF_DIM: int = 64  # RFF dimension (QAHPO: 32-128, higher = more accurate)
+HD_HIERARCHICAL_MIN_CHUNK_SIZE: int = (
+    64  # Minimum adaptive chunk size (was 2, increased for O(M²) mitigation)
+)
+HD_HIERARCHICAL_MAX_CHUNK_SIZE: int = 256  # Maximum adaptive chunk size (QAHPO: 64-512)
+
+# Phase 900.3: Batch Cross-Attention Memory Guard
+# Maximum sequence length for batch-mode cross-level attention.
+# Longer sequences auto-fall back to streaming mode to prevent OOM.
+# Set based on available RAM: 64GB → 8192, 128GB → 16384, 256GB → 32768
+AUTO_STREAMING_BATCH_THRESHOLD: int = 8192  # QAHPO tunable: 2048-32768
+
+# =============================================================================
+# PHASE 700: FLOQUET POSITION ENCODING FOR CONTEXT EXTRAPOLATION
+# =============================================================================
+# Enables position-dependent phase rotation in HDSpatialBlock's FFT domain.
+# Provides infinite extrapolation capability: train on 32K -> infer on 5M+.
+# Memory: 16KB (hd_dim × 4 bytes) vs 536MB for 32K learned position table.
+# See FLOQUET_HOLOGRAPHIC_EXTRAPOLATION.md for algorithm details.
+
+HD_USE_FLOQUET_POSITION: bool = True  # Enable Floquet position encoding in HDSpatialBlock
+HD_FLOQUET_BASE_FREQUENCY: float = 10000.0  # Base frequency for phase init (QAHPO tunable: 1K-100K)
 
 # =============================================================================
 # PHASE 300+: HD UPGRADE INTEGRATION (hd_upgrade.md)
@@ -748,6 +1258,7 @@ HD_OPTIMIZER_USE_SPARSE: bool = True  # Use sparse random projection (faster)
 USE_HD_SPECTRAL_ENTROPY: bool = True  # FFT-based spectral entropy for QULS
 # HD gradient projection replaces Tucker decomposition (no periodic SVD)
 USE_HD_GRADIENT_PROJECTION: bool = True  # Phase 300+: HD projection for GaLore
+USE_HD_FFT_GRADIENT_COMPRESSION: bool = True  # Phase 300+: FFT compression (native, experimental)
 HD_GRADIENT_RANK: int = 128  # Target rank for HD gradient projection (legacy)
 # Phase 300+ HD-native: Frequency bandwidth for gradient compression
 HD_GRADIENT_BANDWIDTH: int = 256  # Top-K frequencies to retain in FFT compression
@@ -1001,6 +1512,15 @@ QWT_VQC_QUBITS = 2  # QWT VQC qubits
 QWT_VQC_LAYERS = 2  # QWT VQC layers
 QWT_CTQW_STEPS = 0  # CTQW steps (0 = disabled)
 
+# QWT Text Tokenizer Parameters (QWTTextTokenizer)
+QWT_BYTE_OFFSET: int = 32  # Offset for byte values in vocabulary (QAHPO: 16-64)
+QWT_ENABLE_THINKING_TOKENS: bool = True  # Enable thinking token injection
+QWT_MAX_SUPERPOSITION: int = 4  # Max alternative tokenizations (Phase 31, QAHPO: 1-8)
+QWT_SUPERPOSITION_AMPLITUDE_THRESHOLD: float = (
+    0.1  # Min amplitude to keep segmentation (QAHPO: 0.05-0.3)
+)
+
+
 # =============================================================================
 # PHASE 17 HAMILTONIAN LAYER ENHANCEMENTS
 # =============================================================================
@@ -1154,6 +1674,20 @@ SUPERPOSITION_MIN_DIM: int = 2  # Minimum superposition dimension
 SUPERPOSITION_MAX_DIM: int = 8  # Maximum superposition dimension
 SUPERPOSITION_COMPLEXITY_SCALE: float = 1.0  # Scale factor for complexity
 
+# Respect Lite edition superposition limits to avoid native op failures.
+try:
+    from highnoon._native._limits import is_lite
+
+    if is_lite():
+        if SUPERPOSITION_MAX_DIM > LITE_MAX_SUPERPOSITION_DIM:
+            SUPERPOSITION_MAX_DIM = LITE_MAX_SUPERPOSITION_DIM
+        if SUPERPOSITION_MIN_DIM > SUPERPOSITION_MAX_DIM:
+            SUPERPOSITION_MIN_DIM = SUPERPOSITION_MAX_DIM
+        if SUPERPOSITION_DIM > LITE_MAX_SUPERPOSITION_DIM:
+            SUPERPOSITION_DIM = LITE_MAX_SUPERPOSITION_DIM
+except Exception as exc:
+    log.debug("Lite superposition limit detection failed: %s", exc)
+
 # Phase 201.5: Native Sparse Attention for Long Sequences
 # Routes to DeepSeek NSA for sequences >= min length, O(n log n) vs O(n²)
 USE_NATIVE_SPARSE_ATTENTION: bool = True  # Enable NSA routing for long sequences
@@ -1258,6 +1792,7 @@ MEMORY_LEARNABLE_THRESHOLD: bool = True  # Make threshold learnable
 MEMORY_USE_PRODUCT_KEYS: bool = True  # Enable product-key decomposition (O(√M) lookup)
 MEMORY_PRODUCT_K: int = 16  # Top-k per sub-codebook
 MEMORY_SUBKEY_DIM: int | None = None  # Sub-key dimension (None = slot_dim // 2)
+USE_NATIVE_PRODUCT_KEY_MEMORY: bool = True  # Use C++ ProductKeyMemory ops (has gradient)
 
 # Phase 12.4 Enhancement 3: Multi-Head External Memory [HIGH]
 # Multiple parallel read/write heads for increased capacity utilization
@@ -1417,6 +1952,13 @@ USE_SPECULATIVE: bool = False  # Enable speculative decoding (requires draft mod
 SPECULATIVE_LOOKAHEAD: int = 5  # Number of tokens to speculate ahead
 DRAFT_MODEL_PATH: str = ""  # Path to draft model checkpoint
 
+# UQHA v3.1 Phase 5.2: Speculative Quantum Decoding
+# Uses QHDSpatialBlock coherence for early termination in speculative generation.
+# When coherence > threshold, speculation terminates early, saving compute.
+USE_SPECULATIVE_QUANTUM_DECODING: bool = True  # Enable coherence-based early termination
+SPECULATIVE_COHERENCE_THRESHOLD: float = 0.9  # Coherence level for early stop
+SPECULATIVE_FREQUENCY_PATHS: bool = True  # Speculative execution of frequency paths
+
 # =============================================================================
 # QUANTUM SUPERPOSITION GENERATION (QSG) PARAMETERS
 # =============================================================================
@@ -1437,19 +1979,6 @@ QSG_AMPLIFICATION_STRENGTH: float = 1.5  # Grover amplification factor (1.0-2.0)
 # Phase 13.4: Quantization-Aware Training
 QUANTIZATION_BITS: int = 16  # Quantization bits (4, 8, or 16)
 USE_QAT: bool = False  # Enable quantization-aware training
-
-# Phase 13.5: xLSTM (Extended LSTM)
-USE_XLSTM: bool = True  # Use xLSTM instead of Mamba in blocks
-XLSTM_VARIANT: str = "mlstm"  # "slstm" (scalar) or "mlstm" (matrix memory)
-
-# xLSTM Enhancement Flags (Phase 13.5+)
-XLSTM_USE_TFLA_KERNEL: bool = True  # Enhancement 1: TFLA-style C++ kernel for mLSTM
-XLSTM_QUANTUM_GATES: bool = True  # Enhancement 2: Quantum-enhanced exponential gating
-XLSTM_MPS_MEMORY: bool = True  # Enhancement 3: MPS-compressed matrix memory
-XLSTM_MPS_BOND_DIM: int = 32  # Enhancement 3: MPS bond dimension (χ)
-XLSTM_SPARSE_UPDATES: bool = True  # Enhancement 4: Dynamic sparse neuron updates
-XLSTM_SPARSE_TOPK_RATIO: float = 0.5  # Enhancement 4: Ratio of neurons to update (0.5 = 50%)
-XLSTM_LOG_SPACE_PARALLEL: bool = True  # Enhancement 5: Log-space parallel sequence evaluation
 
 # Phase 13.6: Local Attention Hybrid
 USE_LOCAL_ATTENTION: bool = True  # Enable Griffin-style local attention
@@ -1582,51 +2111,6 @@ PREFETCH_DISTANCE: int = 8  # Software prefetch lookahead distance
 # Phase 14.1: Linear SSM Enhancements
 USE_DATA_DEPENDENT_SHIFT: bool = True  # RWKV-6 data-dependent token shift
 TOKEN_SHIFT_DECAY: float = 0.5  # Shift decay factor
-USE_RG_LRU: bool = True  # Griffin RG-LRU (alternative to Mamba)
-RG_LRU_STATE_DIM: int = 256  # RG-LRU hidden state dimension
-
-# RG-LRU Enhancements (Phase 14.1.2)
-# Enhancement 1: Parallel Prefix Scan (CRITICAL) - 2-4x training speedup
-RG_LRU_USE_PARALLEL_SCAN: bool = True  # Enable parallel prefix scan for training
-RG_LRU_SCAN_CHUNK_SIZE: int = 64  # Chunk size for work-efficient Blelloch scan
-
-# Enhancement 2: Matrix-Valued State Extension (HIGH) - Improved in-context learning
-RG_LRU_MATRIX_STATE: bool = True  # Enable low-rank matrix state H = UV^T
-RG_LRU_STATE_RANK: int = 16  # Rank of factored state matrix (r << d)
-
-# Enhancement 3: Selective Content-Aware Gating (HIGH) - Mamba-style selective forgetting
-RG_LRU_SELECTIVE_GATING: bool = True  # Gate depends on input AND hidden state
-RG_LRU_GATING_MODE: str = "concat"  # "concat", "delta", or "bilinear"
-
-# Enhancement 4: Quantum-Inspired Rotation Gating (MEDIUM) - Gradient preservation
-RG_LRU_QUANTUM_GATING: bool = True  # Use Givens rotations instead of sigmoid
-RG_LRU_ROTATION_GROUPS: int = 2  # 2 for pairwise, 4+ for block rotations
-
-# Enhancement 5: Tensor Train Weight Compression (MEDIUM) - 10-100x parameter reduction
-RG_LRU_TT_COMPRESSION: bool = True  # Enable TT-factorized weight matrices
-RG_LRU_TT_RANKS: list = [4, 4]  # TT-ranks for weight factorization
-
-# Phase 14.2: Token Shift Enhancements (All five roadmap improvements)
-TOKEN_SHIFT_MODE: str = (
-    "standard"  # "standard", "simplified", "fourier", "delta", "hierarchical", "multi_position"
-)
-USE_SIMPLIFIED_TOKEN_SHIFT: bool = False  # RWKV-7 style 3x faster (no input-dependent gate)
-USE_FOURIER_TOKEN_SHIFT: bool = True  # Global frequency patterns via FFT
-FOURIER_SHIFT_MIN_SEQ_LEN: int = 256  # Only use FFT for sequences >= this length
-USE_HIERARCHICAL_DECAY: bool = True  # Layer-position aware decay rates
-HIERARCHICAL_DECAY_FACTOR: float = 2.0  # Scaling factor for hierarchy (decay^(1/(layer+factor)))
-USE_DELTA_TOKEN_SHIFT: bool = False  # Gated delta rule (erase/write gates) for precise memory
-TOKEN_SHIFT_DISTANCES: list = [1]  # Multi-position: [1,2,4] for multi-scale look-ahead
-
-# MinGRU Configuration (Enhanced in Phase 17)
-USE_MIN_GRU_BLOCKS: bool = True  # minGRU blocks (production-ready)
-MIN_GRU_PARALLEL_CHUNK_SIZE: int = 256  # Parallel scan chunk size
-MIN_GRU_USE_PARALLEL_SCAN: bool = True  # Use parallel scan for training (10-175x speedup)
-MIN_GRU_DYNAMIC_RATIO: float = 1.0  # Fraction of dimensions to update (1.0=all, 0.5=half)
-MIN_GRU_QUANTUM_INSPIRED: bool = True  # Enable gradient norm preservation
-MIN_GRU_ORTHOG_INTERVAL: int = 64  # Steps between gradient normalization (0=disabled)
-MIN_GRU_IMPORTANCE_THRESHOLD: float = 0.5  # Threshold for dynamic gating importance
-
 
 # Phase 14.2: CPU-Optimized MoE Innovations
 USE_SHARED_EXPERTS: bool = True  # Always-active shared experts (DeepSeek-style)
@@ -1662,6 +2146,9 @@ COCONUT_MAX_CRYSTALS: int = 64  # Max crystallized reasoning primitives (LRU evi
 
 USE_SELF_CONSISTENCY: bool = True  # Self-consistency verification (confidence scoring)
 CONSISTENCY_THRESHOLD: float = 0.8  # Verification agreement threshold
+USE_NATIVE_SELF_CONSISTENCY: bool = True  # Use C++ FusedSelfConsistency op (has gradient)
+# QAHPO-tunable ranges (frontier-competitive):
+#   - CONSISTENCY_THRESHOLD: [0.3, 0.99] (wide range for diverse reasoning)
 
 # Phase 14.4: Quantum-Inspired Enhancements (Already CPU-Native)
 VQC_ENCODING: str = "hybrid"  # VQC encoding: "amplitude", "angle", or "hybrid"
@@ -1762,6 +2249,16 @@ USE_ADAPTIVE_MEMORY: bool = True  # Enable test-time weight updates
 ADAPTIVE_MEMORY_LEARNING_RATE: float = 0.01  # Test-time learning rate
 ADAPTIVE_MEMORY_SURPRISE_THRESHOLD: float = 0.5  # Surprise threshold for updates
 ADAPTIVE_MEMORY_MLP_DIM: int = 256  # Hidden dimension for memory MLP
+
+
+# =============================================================================
+# PHASE 202: GRADIENT PASSTHROUGH CONFIGURATION
+# =============================================================================
+# Controls the epsilon used for zero-contribution gradient passthrough.
+# Used to maintain graph connectivity for conditionally unused parameters.
+# Value must be small enough to not affect logic, but large enough to register
+# as non-zero in audits (avoiding underflow check).
+GRADIENT_PASSTHROUGH_EPSILON: float = 1e-8  # Epsilon for gradient connectivity
 
 
 # =============================================================================
@@ -2040,6 +2537,57 @@ def get_preset_config(name: str) -> Config:
 
 
 # =============================================================================
+# MODEL INFERENCE UPDATE (MIU) PARAMETERS
+# =============================================================================
+# User-activated continual learning through hyperdimensional memory systems.
+# Enables selective training of new knowledge (chats, codebases, files) into
+# the model during inference without catastrophic forgetting.
+#
+# Key features:
+#   - User-controlled "teach mode" (never automatic)
+#   - Hyperdimensional encoding of content via holographic bundling
+#   - QHPM crystallization for anti-forgetting protection
+#   - Checkpoint/rollback capability for safety
+#
+# See docs/guides/miu.md for end-user documentation.
+
+# Master switch
+USE_MIU: bool = True  # Enable MIU capability
+
+# Hyperdimensional encoding parameters
+MIU_HD_DIM: int = 4096  # HD embedding dimension (4096-10000)
+MIU_NUM_BUNDLES: int = 4  # Parallel interpretations for polysemy
+MIU_USE_CTQW: bool = True  # Semantic spreading via quantum walk
+
+# Memory consolidation parameters
+MIU_MEMORY_SLOTS: int = 1024  # Consolidation buffer size
+MIU_MEMORY_TYPE: str = "hopfield"  # Memory type: adaptive, hopfield, hierarchical
+MIU_CONSOLIDATION_THRESHOLD: float = 0.7  # Surprise threshold for write
+
+# Learning parameters
+MIU_LEARNING_RATE: float = 1e-5  # Conservative LR for stability
+MIU_MAX_GRADIENT_NORM: float = 1.0  # Gradient clipping threshold
+MIU_BATCH_SIZE: int = 4  # Mini-batch size for update computation
+MIU_MAX_STEPS: int = 100  # Maximum update steps per MIU session
+
+# Anti-forgetting (QHPM Crystallization)
+MIU_USE_CRYSTALLIZATION: bool = True  # Enable QHPM protection
+MIU_CRYSTALLIZATION_THRESHOLD: float = 0.85  # Confidence for crystallization
+MIU_MAX_CRYSTAL_DIRECTIONS: int = 256  # Protected parameter subspaces
+MIU_CRYSTALLIZATION_DECAY: float = 0.99  # Gradual protection decay
+
+# Checkpointing and rollback
+MIU_CHECKPOINT_ENABLED: bool = True  # Save checkpoints per MIU session
+MIU_CHECKPOINT_DIR: str = "checkpoints/miu"  # Checkpoint directory
+MIU_ROLLBACK_ENABLED: bool = True  # Allow rollback to pre-MIU state
+MIU_MAX_CHECKPOINTS: int = 10  # Maximum retained checkpoints
+
+# Performance tuning
+MIU_USE_MIXED_PRECISION: bool = False  # fp16 for speed (experimental)
+MIU_ASYNC_CONSOLIDATION: bool = True  # Background memory consolidation
+
+
+# =============================================================================
 # TOKENIZER FACTORY
 # =============================================================================
 
@@ -2099,13 +2647,3 @@ def get_tokenizer(
     log.info(f"Created tokenizer: vocab_size={vocab_size}, max_length={max_length}")
 
     return _TOKENIZER_INSTANCE
-
-
-def reset_tokenizer():
-    """Reset the cached tokenizer instance.
-
-    Use this when changing tokenizer configuration (e.g., during HPO trials
-    with different vocab sizes).
-    """
-    global _TOKENIZER_INSTANCE
-    _TOKENIZER_INSTANCE = None

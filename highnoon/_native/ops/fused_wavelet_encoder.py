@@ -113,7 +113,22 @@ def fused_wavelet_encoder_chunk(
 
         # The C++ op returns 3 gradients for the differentiable inputs.
         input_grads = (grads[0], grads[1], grads[2], None)
-        variable_grads_list = [None] * len(variables) if variables is not None else []
+
+        # GRADIENT FIX: Map C++ gradient outputs to tf.Variables by name pattern
+        # Instead of returning [None] * len(variables) which zeros out all gradients
+        if variables is not None and len(variables) > 0:
+            # grads[0]=grad_input, grads[1]=grad_low_pass, grads[2]=grad_high_pass
+            variable_grads_list = []
+            for v in variables:
+                name = v.name.lower()
+                if "low_pass" in name or "lowpass" in name:
+                    variable_grads_list.append(grads[1])
+                elif "high_pass" in name or "highpass" in name:
+                    variable_grads_list.append(grads[2])
+                else:
+                    variable_grads_list.append(None)
+        else:
+            variable_grads_list = []
 
         return input_grads, variable_grads_list
 

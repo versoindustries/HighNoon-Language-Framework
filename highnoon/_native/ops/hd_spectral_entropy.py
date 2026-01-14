@@ -40,7 +40,7 @@ def _load_native_ops():
         return _native_available
 
     try:
-        from highnoon._native.ops.lib_loader import load_highnoon_core
+        from highnoon._native import load_highnoon_core
 
         _native_ops = load_highnoon_core()
         _native_available = hasattr(_native_ops, "hd_spectral_entropy") or hasattr(
@@ -107,14 +107,14 @@ def _tf_spectral_entropy(
 
 def _compute_single_entropy(x: tf.Tensor, epsilon: float) -> tf.Tensor:
     """Compute spectral entropy for 2D tensor [batch, dim]."""
-    # Cast to complex for FFT
-    x_complex = tf.cast(x, tf.complex64)
+    # Phase 1.5: Cast to complex128 for quantum precision per GRADIENT_CONNECTIVITY_ROADMAP
+    x_complex = tf.cast(x, tf.complex128)
 
     # FFT along last dimension
     x_fft = tf.signal.fft(x_complex)
 
-    # Power spectrum: |FFT(x)|²
-    power = tf.abs(x_fft) ** 2
+    # Power spectrum: |FFT(x)|², cast back to float32
+    power = tf.cast(tf.abs(x_fft) ** 2, tf.float32)
 
     # Normalize to probability
     total = tf.reduce_sum(power, axis=-1, keepdims=True) + epsilon
@@ -150,10 +150,10 @@ def hd_spectral_flatness(
     if _load_native_ops():
         return _native_ops.HDSpectralFlatness(hidden_states, epsilon=epsilon)
 
-    # TensorFlow fallback
-    x_complex = tf.cast(hidden_states, tf.complex64)
+    # Phase 1.5: TensorFlow fallback with complex128 precision
+    x_complex = tf.cast(hidden_states, tf.complex128)
     x_fft = tf.signal.fft(x_complex)
-    power = tf.abs(x_fft) ** 2 + epsilon
+    power = tf.cast(tf.abs(x_fft) ** 2, tf.float32) + epsilon
 
     # Geometric mean: exp(mean(log(power)))
     log_power = tf.math.log(power)

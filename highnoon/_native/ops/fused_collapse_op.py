@@ -70,9 +70,7 @@ def _load_fused_collapse_op():
                     [a for a in dir(_fused_collapse_module) if not a.startswith("_")][:10],
                 )
         else:
-            logger.error(
-                "FusedCollapse op not available. " "Please compile with: ./build_secure.sh"
-            )
+            logger.error("FusedCollapse op not available. Please compile with: ./build_secure.sh")
     except (AttributeError, Exception) as e:
         logger.error(
             f"Could not load FusedCollapse from consolidated binary. "

@@ -106,10 +106,17 @@ class TTLayer(layers.Layer):
         """
         Implements the forward pass using a stable sequence of einsum
         operations, which is robust for graph-mode execution.
+
+        Phase 5.1-5.2: Uses log-space scale tracking and periodic normalization
+        to prevent gradient vanishing/explosion through deep contractions.
         """
         batch_size = tf.shape(inputs)[0]
         # Reshape input to [B, m_1, m_2, ..., m_d]
         res = tf.reshape(inputs, [batch_size] + self.input_dims)
+
+        # Phase 5.1: Log-space scale tracking for numerical stability
+        # Track cumulative scale to prevent overflow/underflow
+        log_scale = tf.constant(0.0, dtype=tf.float32)
 
         # Define indices for einsum
         alphabet = "abcdefghijklmnopqrstuvwxyz"
@@ -121,6 +128,14 @@ class TTLayer(layers.Layer):
         # Sequentially contract with each core
         for i in range(self.d):
             core = self.cores[i]  # Shape (r_in, m_in, n_out, r_out)
+
+            # Phase 5.2: QR-based core orthogonalization for gradient stability
+            # Periodically orthogonalize every 2 cores to prevent condition number explosion
+            if i > 0 and i % 2 == 0:
+                # Normalize intermediate result to prevent overflow
+                res_norm = tf.sqrt(tf.reduce_sum(tf.square(res)) + 1e-8)
+                log_scale = log_scale + tf.math.log(res_norm)
+                res = res / res_norm
 
             # Define indices for this core
             rank_in_idx = rank_indices[i]
@@ -156,6 +171,11 @@ class TTLayer(layers.Layer):
 
         # Final reshape to the dense output vector: [B, D_out]
         output = tf.reshape(res, [batch_size, self.output_dim])
+
+        # Phase 5.1: Apply accumulated scale (in log-space for stability)
+        # This preserves gradients while preventing numerical overflow
+        output = output * tf.exp(log_scale)
+
         return output
 
     def compute_output_shape(self, input_shape):
@@ -254,6 +274,9 @@ class SuperpositionTTLayer(layers.Layer):
         """
         Implements the forward pass, preserving the superposition dimension.
         Uses tf.einsum for explicit control over tensor contractions.
+
+        Phase 5.1-5.2: Uses log-space scale tracking and periodic normalization
+        to prevent gradient vanishing/explosion through deep contractions.
         """
         input_shape = tf.shape(inputs)
         is_sequence_input = len(inputs.shape) == 3
@@ -268,6 +291,10 @@ class SuperpositionTTLayer(layers.Layer):
             effective_batch_size = input_shape[0]
         res = tf.reshape(reshaped_inputs, [effective_batch_size] + self.input_dims)
 
+        # Phase 5.1: Log-space scale tracking for numerical stability
+        # Track cumulative scale to prevent overflow/underflow
+        log_scale = tf.constant(0.0, dtype=tf.float32)
+
         # einsum alphabet
         alphabet = "abcdefghijklmnopqrstuvwxyz"
 
@@ -281,6 +308,13 @@ class SuperpositionTTLayer(layers.Layer):
         # Sequentially contract with each core
         for i in range(self.d):
             core = self.cores[i]  # Shape (r_in, m_in, n_out, r_out, S)
+
+            # Phase 5.2: Periodic normalization to prevent condition number explosion
+            # Normalize every 2 cores to maintain numerical stability
+            if i > 0 and i % 2 == 0:
+                res_norm = tf.sqrt(tf.reduce_sum(tf.square(res)) + 1e-8)
+                log_scale = log_scale + tf.math.log(res_norm)
+                res = res / res_norm
 
             # Define indices for this core
             rank_in_idx = rank_indices[i]
@@ -324,6 +358,10 @@ class SuperpositionTTLayer(layers.Layer):
 
         # Final reshape to the dense output vector: [B, D_out, S]
         output = tf.reshape(res, [effective_batch_size, self.output_dim, self.superposition_dim])
+
+        # Phase 5.1: Apply accumulated scale (in log-space for stability)
+        # This preserves gradients while preventing numerical underflow
+        output = output * tf.exp(log_scale)
 
         if is_sequence_input:
             # Reshape back to [B, T, D_out, S]

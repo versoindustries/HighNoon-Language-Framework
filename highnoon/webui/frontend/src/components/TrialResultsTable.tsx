@@ -25,6 +25,7 @@ interface TrialResultsTableProps {
     bestTrialId?: string | number | null;
     currentTrialId?: string | number | null;
     onExport?: () => void;
+    onTrialClick?: (trial: HPOTrialInfo) => void;
     maxHeight?: number | string;
 }
 
@@ -69,6 +70,7 @@ export function TrialResultsTable({
     bestTrialId,
     currentTrialId,
     onExport,
+    onTrialClick,
     maxHeight = 400,
 }: TrialResultsTableProps) {
     const [expandedRows, setExpandedRows] = useState<Set<string | number>>(new Set());
@@ -287,7 +289,9 @@ export function TrialResultsTable({
                                 <>
                                     <tr
                                         key={trial.trial_id}
-                                        className={`trial-table__row ${isBest ? 'trial-table__row--best' : ''} ${isCurrent ? 'trial-table__row--current' : ''}`}
+                                        className={`trial-table__row ${isBest ? 'trial-table__row--best' : ''} ${isCurrent ? 'trial-table__row--current' : ''} ${onTrialClick ? 'trial-table__row--clickable' : ''}`}
+                                        onClick={() => onTrialClick?.(trial)}
+                                        style={onTrialClick ? { cursor: 'pointer' } : undefined}
                                     >
                                         <td className="trial-table__td trial-table__td--expand">
                                             <button

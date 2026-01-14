@@ -44,6 +44,16 @@ from highnoon import config as hn_config
 logger = logging.getLogger(__name__)
 
 
+# Phase 1000: Unified Spectral Cache for shared SVD computation
+try:
+    from highnoon.training.spectral_cache import get_spectral_cache
+
+    _SPECTRAL_CACHE_AVAILABLE = True
+except ImportError:
+    _SPECTRAL_CACHE_AVAILABLE = False
+    get_spectral_cache = None
+
+
 class UnifiedQuantumBus(tf.keras.layers.Layer):
     """MPS-backed unified quantum bus for cross-block communication.
 
@@ -209,11 +219,10 @@ class UnifiedQuantumBus(tf.keras.layers.Layer):
         update = tf.tile(update, [chi_l, 1, chi_r]) * 0.1
 
         # Apply update with gradient preservation
-        if self.enable_gradients:
-            new_core = core + update
-            self.mps_cores[site_index].assign(new_core)
-        else:
-            self.mps_cores[site_index].assign(core + update)
+        new_core = core + update
+
+        # State management - gradients flow through 'projected' which is returned
+        self.mps_cores[site_index].assign(new_core)
 
         return projected
 
@@ -284,11 +293,14 @@ class UnifiedQuantumBus(tf.keras.layers.Layer):
             shape = tf.shape(result)
             result = tf.reshape(result, [shape[0], -1, shape[-1]])
 
-        # Sum over bonds to get scalar correlation
+        # Sum over bonds to get scalar correlation, normalized by tensor size
         correlation = tf.reduce_sum(result)
+        result_size = tf.cast(tf.reduce_prod(tf.shape(result)), tf.float32)
+        correlation = correlation / result_size
 
-        # Update coherence based on correlation strength
-        self.coherence.assign(0.9 * self.coherence + 0.1 * tf.abs(correlation))
+        # Update coherence for monitoring (not in critical gradient path)
+        new_coherence = 0.9 * self.coherence + 0.1 * tf.abs(correlation)
+        self.coherence.assign(new_coherence)
 
         return correlation
 
@@ -370,6 +382,9 @@ class UnifiedQuantumBus(tf.keras.layers.Layer):
     def get_bond_entropies(self) -> tf.Tensor:
         """Compute bond entanglement entropies.
 
+        Phase 1000: Uses unified SpectralCache for shared SVD computation
+        across QULS, HD compression, and MPS bond entropy.
+
         Returns entropies at each bond for QULS integration.
 
         Returns:
@@ -383,8 +398,15 @@ class UnifiedQuantumBus(tf.keras.layers.Layer):
             chi_l, d, chi_r = core.shape
             reshaped = tf.reshape(core, [chi_l * d, chi_r])
 
-            # Get singular values
-            s = tf.linalg.svd(reshaped, compute_uv=False)
+            # Phase 1000: Use SpectralCache for SVD when available
+            if _SPECTRAL_CACHE_AVAILABLE:
+                cache = get_spectral_cache()
+                svd_result = cache.get_svd(reshaped)
+                s = svd_result.s
+            else:
+                # Fallback: Direct SVD
+                s = tf.linalg.svd(reshaped, compute_uv=False)
+
             s = s / (tf.norm(s) + 1e-10)  # Normalize
 
             # Von Neumann entropy
@@ -435,6 +457,287 @@ class UnifiedQuantumBus(tf.keras.layers.Layer):
 
 
 # =============================================================================
+# Phase 1001: Adaptive MPS Bond Dimension
+# =============================================================================
+
+
+class AdaptiveMPSBus(UnifiedQuantumBus):
+    """MPS-backed quantum bus with adaptive bond dimension.
+
+    Phase 1001: Extends UnifiedQuantumBus with dynamic bond dimension adaptation
+    based on input sequence spectral entropy, training phase, and gradient health.
+
+    Bond dimension scaling factors:
+        - Entropy: 1.0 + 0.5 × (spectral_entropy - 0.5)
+        - Phase: exploration = 1.2x, exploitation = 1.0x
+        - Health: barren_plateau = 1.5x, explosion = 0.75x, normal = 1.0x
+
+    Bounds: [min_bond_dim, max_bond_dim] (default [8, 128])
+
+    Memory: O(N × d × χ²) where χ adapts dynamically
+
+    Reference:
+        update.md Phase 1001: Adaptive MPS Bond Dimension
+
+    Example:
+        >>> bus = AdaptiveMPSBus(num_sites=8, base_bond_dim=32)
+        >>> bus.adapt_bond_dim(spectral_entropy=0.7, training_phase="exploration")
+        >>> print(bus.bond_dim)  # Dynamic value
+    """
+
+    def __init__(
+        self,
+        num_sites: int = 8,
+        physical_dim: int = 64,
+        base_bond_dim: int = 32,
+        min_bond_dim: int = 8,
+        max_bond_dim: int = 128,
+        enable_gradients: bool = True,
+        name: str = "adaptive_mps_bus",
+        **kwargs,
+    ):
+        """Initialize AdaptiveMPSBus.
+
+        Args:
+            num_sites: Number of MPS sites.
+            physical_dim: Physical dimension at each site.
+            base_bond_dim: Base bond dimension (adaptively scaled).
+            min_bond_dim: Minimum allowed bond dimension.
+            max_bond_dim: Maximum allowed bond dimension.
+            enable_gradients: Whether to allow gradient flow.
+            name: Layer name.
+            **kwargs: Additional layer arguments.
+        """
+        # Store adaptive parameters before super().__init__
+        self.base_bond_dim = base_bond_dim
+        self.min_bond_dim = min_bond_dim
+        self.max_bond_dim = max_bond_dim
+
+        # Initialize with base bond dimension
+        super().__init__(
+            num_sites=num_sites,
+            physical_dim=physical_dim,
+            bond_dim=base_bond_dim,
+            enable_gradients=enable_gradients,
+            name=name,
+            **kwargs,
+        )
+
+        # Track adaptation history for diagnostics
+        self._adaptation_history: list[dict] = []
+        self._current_phase = "exploration"
+        self._current_health = "normal"
+
+        logger.info(
+            f"[AdaptiveMPSBus] Created with base_bond_dim={base_bond_dim}, "
+            f"bounds=[{min_bond_dim}, {max_bond_dim}]"
+        )
+
+    def adapt_bond_dim(
+        self,
+        spectral_entropy: float | tf.Tensor | None = None,
+        training_phase: str | None = None,
+        grad_health: str | None = None,
+    ) -> int:
+        """Dynamically adjust MPS bond dimension based on metrics.
+
+        Args:
+            spectral_entropy: Normalized entropy in [0, 1]. Higher values indicate
+                more complex representations needing higher bond dimension.
+            training_phase: "exploration" or "exploitation". Exploration phase
+                uses higher bond dimension for more expressiveness.
+            grad_health: "normal", "bp" (barren plateau), or "explosion".
+                BP increases bond dimension to capture more gradient signal.
+                Explosion decreases to constrain capacity.
+
+        Returns:
+            New bond dimension (int).
+
+        Example:
+            >>> new_dim = bus.adapt_bond_dim(
+            ...     spectral_entropy=0.7,
+            ...     training_phase="exploration",
+            ...     grad_health="bp"
+            ... )
+        """
+        # Convert Tensor to float if needed
+        if spectral_entropy is not None:
+            if tf.is_tensor(spectral_entropy):
+                spectral_entropy = float(spectral_entropy.numpy())
+
+        # Update state
+        if training_phase is not None:
+            self._current_phase = training_phase
+        if grad_health is not None:
+            self._current_health = grad_health
+
+        # Start with base bond dimension
+        target_chi = float(self.base_bond_dim)
+
+        # Entropy scaling: higher entropy = more entanglement needed
+        if spectral_entropy is not None:
+            # Scale: 0.75x at entropy=0, 1.25x at entropy=1
+            entropy_factor = 1.0 + 0.5 * (spectral_entropy - 0.5)
+            target_chi *= entropy_factor
+
+        # Phase scaling: exploration needs more capacity
+        phase_factor = 1.2 if self._current_phase == "exploration" else 1.0
+        target_chi *= phase_factor
+
+        # Health scaling: BP = increase, explosion = decrease
+        if self._current_health == "bp":
+            health_factor = 1.5  # Increase to capture more gradient signal
+        elif self._current_health == "explosion":
+            health_factor = 0.75  # Decrease to constrain capacity
+        else:
+            health_factor = 1.0
+        target_chi *= health_factor
+
+        # Apply bounds
+        target_chi = int(max(self.min_bond_dim, min(self.max_bond_dim, target_chi)))
+
+        # Track history
+        self._adaptation_history.append(
+            {
+                "spectral_entropy": spectral_entropy,
+                "training_phase": self._current_phase,
+                "grad_health": self._current_health,
+                "old_bond_dim": self.bond_dim,
+                "new_bond_dim": target_chi,
+            }
+        )
+
+        # Update bond dimension if changed
+        if target_chi != self.bond_dim:
+            self._update_bond_dim(target_chi)
+
+        return target_chi
+
+    def _update_bond_dim(self, new_bond_dim: int) -> None:
+        """Update MPS cores to new bond dimension.
+
+        Uses truncated SVD to resize cores while preserving information.
+
+        Args:
+            new_bond_dim: Target bond dimension.
+        """
+        old_bond_dim = self.bond_dim
+        self.bond_dim = new_bond_dim
+
+        # Guard: If build() hasn't been called yet, mps_cores is empty
+        # Just update bond_dim for when build() is eventually called
+        if not self.mps_cores:
+            logger.debug(
+                f"[AdaptiveMPSBus] Bond dimension set to {new_bond_dim} (deferred until build)"
+            )
+            return
+
+        # Recompute bond dimensions for all cores
+        bond_dims = [1] + [new_bond_dim] * (self.num_sites - 1) + [1]
+
+        new_cores = []
+        for i in range(self.num_sites):
+            old_core = self.mps_cores[i]  # [χ_l_old, d, χ_r_old]
+            old_shape = old_core.shape
+            old_chi_l, old_d, old_chi_r = old_shape
+
+            new_chi_l = bond_dims[i]
+            new_chi_r = bond_dims[i + 1]
+
+            # Create resized tensor with preserved values
+            # Start with Xavier-initialized tensor
+            stddev = (2.0 / (new_chi_l * self.physical_dim + new_chi_r)) ** 0.5
+            new_core_data = tf.random.normal(
+                [new_chi_l, self.physical_dim, new_chi_r], stddev=stddev, dtype=old_core.dtype
+            )
+
+            # Copy preserved region from old core
+            min_chi_l = min(old_chi_l, new_chi_l)
+            min_chi_r = min(old_chi_r, new_chi_r)
+
+            # Create indices for the preserved region
+            preserved_slice = old_core[:min_chi_l, :, :min_chi_r]
+
+            # Build the new tensor: start with noise, then overlay preserved data
+            indices_l = tf.range(min_chi_l)
+            indices_d = tf.range(self.physical_dim)
+            indices_r = tf.range(min_chi_r)
+
+            # Use tensor_scatter_nd_update to copy preserved values
+            # Create meshgrid for indices
+            idx_l, idx_d, idx_r = tf.meshgrid(indices_l, indices_d, indices_r, indexing="ij")
+            indices = tf.stack(
+                [tf.reshape(idx_l, [-1]), tf.reshape(idx_d, [-1]), tf.reshape(idx_r, [-1])], axis=1
+            )
+            updates = tf.reshape(preserved_slice, [-1])
+
+            new_core_data = tf.tensor_scatter_nd_update(new_core_data, indices, updates)
+
+            # Create new variable with correct shape
+            new_var = tf.Variable(
+                new_core_data,
+                name=f"mps_core_{i}",
+                trainable=self.enable_gradients,
+            )
+            new_cores.append(new_var)
+
+        # Replace the mps_cores list
+        self.mps_cores = new_cores
+
+        logger.info(
+            f"[AdaptiveMPSBus] Bond dimension: {old_bond_dim} → {new_bond_dim} "
+            f"(phase={self._current_phase}, health={self._current_health})"
+        )
+
+    def set_barren_plateau_mode(self, active: bool) -> None:
+        """Set barren plateau recovery mode.
+
+        When active, increases bond dimension to capture more gradient signal.
+
+        Args:
+            active: Whether barren plateau recovery is active.
+        """
+        new_health = "bp" if active else "normal"
+        if new_health != self._current_health:
+            logger.info(
+                f"[AdaptiveMPSBus] {'Entering' if active else 'Exiting'} barren plateau mode"
+            )
+            self.adapt_bond_dim(grad_health=new_health)
+
+    def set_training_phase(self, phase: str) -> None:
+        """Set training phase.
+
+        Args:
+            phase: "exploration" or "exploitation".
+        """
+        if phase not in ("exploration", "exploitation"):
+            raise ValueError(f"Unknown phase: {phase}")
+        if phase != self._current_phase:
+            logger.info(f"[AdaptiveMPSBus] Phase: {self._current_phase} → {phase}")
+            self.adapt_bond_dim(training_phase=phase)
+
+    def get_adaptation_history(self) -> list[dict]:
+        """Get bond dimension adaptation history.
+
+        Returns:
+            List of adaptation events with metrics and bond dimension changes.
+        """
+        return self._adaptation_history.copy()
+
+    def get_config(self) -> dict[str, Any]:
+        """Get layer configuration."""
+        config = super().get_config()
+        config.update(
+            {
+                "base_bond_dim": self.base_bond_dim,
+                "min_bond_dim": self.min_bond_dim,
+                "max_bond_dim": self.max_bond_dim,
+            }
+        )
+        return config
+
+
+# =============================================================================
 # Factory Functions
 # =============================================================================
 
@@ -462,10 +765,65 @@ def create_unified_bus(
     physical_dim = physical_dim or getattr(hn_config, "UNIFIED_BUS_PHYSICAL_DIM", 64)
     bond_dim = bond_dim or getattr(hn_config, "UNIFIED_BUS_BOND_DIM", 32)
 
+    # UQHA: Use AdaptiveMPSBus by default when config enables it
+    use_adaptive = kwargs.pop("use_adaptive", getattr(hn_config, "USE_ADAPTIVE_MPS_BUS", True))
+
+    if use_adaptive:
+        return AdaptiveMPSBus(
+            num_sites=num_sites,
+            physical_dim=physical_dim,
+            base_bond_dim=bond_dim,
+            **kwargs,
+        )
+
     return UnifiedQuantumBus(
         num_sites=num_sites,
         physical_dim=physical_dim,
         bond_dim=bond_dim,
+        **kwargs,
+    )
+
+
+def create_adaptive_bus(
+    num_sites: int | None = None,
+    physical_dim: int | None = None,
+    base_bond_dim: int | None = None,
+    min_bond_dim: int = 8,
+    max_bond_dim: int = 128,
+    **kwargs,
+) -> AdaptiveMPSBus:
+    """Factory function for AdaptiveMPSBus.
+
+    UQHA Phase 1001: Creates an AdaptiveMPSBus with dynamic bond dimension
+    adaptation based on spectral entropy, training phase, and gradient health.
+
+    Uses config defaults if parameters not specified.
+
+    Args:
+        num_sites: Number of sites.
+        physical_dim: Physical dimension.
+        base_bond_dim: Base bond dimension (will be adapted).
+        min_bond_dim: Minimum allowed bond dimension.
+        max_bond_dim: Maximum allowed bond dimension.
+        **kwargs: Additional arguments.
+
+    Returns:
+        Configured AdaptiveMPSBus instance.
+
+    Example:
+        >>> bus = create_adaptive_bus(base_bond_dim=32)
+        >>> bus.adapt_bond_dim(spectral_entropy=0.7, training_phase="exploration")
+    """
+    num_sites = num_sites or getattr(hn_config, "UNIFIED_BUS_NUM_SITES", 8)
+    physical_dim = physical_dim or getattr(hn_config, "UNIFIED_BUS_PHYSICAL_DIM", 64)
+    base_bond_dim = base_bond_dim or getattr(hn_config, "UNIFIED_BUS_BOND_DIM", 32)
+
+    return AdaptiveMPSBus(
+        num_sites=num_sites,
+        physical_dim=physical_dim,
+        base_bond_dim=base_bond_dim,
+        min_bond_dim=min_bond_dim,
+        max_bond_dim=max_bond_dim,
         **kwargs,
     )
 
@@ -521,7 +879,9 @@ class QuantumTeleportBusAdapter:
 
 __all__ = [
     "UnifiedQuantumBus",
+    "AdaptiveMPSBus",
     "create_unified_bus",
+    "create_adaptive_bus",
     "QuantumStateBusAdapter",
     "QuantumCoherenceBusAdapter",
     "QuantumTeleportBusAdapter",

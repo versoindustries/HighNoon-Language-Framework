@@ -69,6 +69,11 @@ except Exception as e:
     logger.warning("Failed to load hd_gradient_compression C++ ops: %s", e)
 
 
+# Module-level cache for gradient compressor functions to prevent retracing
+# Each unique bandwidth value gets its own cached function
+_GRADIENT_COMPRESSOR_CACHE: dict[int, callable] = {}
+
+
 def hd_gradient_compression_available() -> bool:
     """Check if native HD gradient compression ops are available."""
     return _NATIVE_AVAILABLE
@@ -79,7 +84,7 @@ def hd_gradient_compression_available() -> bool:
 # =============================================================================
 
 
-@tf.function
+@tf.autograph.experimental.do_not_convert
 def frequency_topk_mask(
     gradient: tf.Tensor,
     bandwidth: int,
@@ -89,9 +94,13 @@ def frequency_topk_mask(
     Computes FFT of gradient and identifies top-K frequency components
     by magnitude. Returns a boolean mask for the kept frequencies.
 
+    Note: This function is NOT decorated with @tf.function to avoid retracing
+    issues. The C++ ops are already graph-compatible. The outer calling context
+    (HDGradientCompressor) handles graph mode appropriately.
+
     Args:
         gradient: Input gradient tensor [*shape] (any shape, FFT on last dim)
-        bandwidth: Number of frequency components to keep
+        bandwidth: Number of frequency components to keep (Python int)
 
     Returns:
         Tuple of (compressed_fft, mask_indices):
@@ -118,8 +127,11 @@ def frequency_topk_mask(
     else:
         flat_grad = gradient
 
+    # Ensure bandwidth is a Python int for the C++ op
+    bw = int(bandwidth) if not isinstance(bandwidth, int) else bandwidth
+
     compressed_real, compressed_imag, mask_indices = _hd_gradient_fft_compress(
-        gradient=flat_grad, bandwidth=bandwidth, preserve_dc=True
+        gradient=flat_grad, bandwidth=bw, preserve_dc=True
     )
 
     # Combine real/imag into complex
@@ -128,18 +140,21 @@ def frequency_topk_mask(
     return compressed_fft, mask_indices
 
 
-@tf.function
+@tf.autograph.experimental.do_not_convert
 def frequency_reconstruct(
     compressed_fft: tf.Tensor,
     mask_indices: tf.Tensor,
-    original_dim: int,
+    original_dim: int | tf.Tensor,
 ) -> tf.Tensor:
     """Reconstruct gradient from compressed frequency representation.
+
+    Note: This function is NOT decorated with @tf.function to avoid retracing
+    issues. The C++ ops are already graph-compatible.
 
     Args:
         compressed_fft: Compressed FFT coefficients [batch, bandwidth]
         mask_indices: Indices of kept frequencies [batch, bandwidth]
-        original_dim: Original dimension size
+        original_dim: Original dimension size (Python int or scalar tensor)
 
     Returns:
         Reconstructed gradient [batch, original_dim]
@@ -149,6 +164,20 @@ def frequency_reconstruct(
             "HD gradient compression native ops not available. "
             "Rebuild native extensions with: ./build_secure.sh --debug --lite"
         )
+
+    # Convert original_dim to Python int if it's a tensor
+    if isinstance(original_dim, tf.Tensor):
+        # In graph mode, we need to handle this carefully
+        # Use tf.py_function or ensure static shape is available
+        if original_dim.shape.rank == 0:
+            # Scalar tensor - try to get static value
+            try:
+                original_dim = int(original_dim.numpy())
+            except (AttributeError, RuntimeError):
+                # In graph mode, pass through as-is (C++ op handles it)
+                pass
+    else:
+        original_dim = int(original_dim)
 
     # Extract components
     comp_real = tf.math.real(compressed_fft)
@@ -204,8 +233,11 @@ class HDGradientCompressor:
             self._compression_cache = {}
         if not hasattr(self, "_step_counter"):
             self._step_counter = 0
-        if not hasattr(self, "_stats"):
+        if not hasattr(self, "_stats") or self._stats is None:
             self._stats = {"total_compressed": 0, "total_original": 0}
+        else:
+            self._stats.setdefault("total_compressed", 0)
+            self._stats.setdefault("total_original", 0)
 
         logger.info(
             "[HD_GRADIENT] Initialized: bandwidth=%d, enabled=%s, scale=%.2f",
@@ -235,18 +267,31 @@ class HDGradientCompressor:
         var_name = variable.name
         original_shape = gradient.shape.as_list()
         original_dim = original_shape[-1] if original_shape else 1
+        if original_dim is None:
+            logger.warning(
+                "[HD_GRADIENT] Skipping FFT compression for %s: dynamic last dimension",
+                var_name,
+            )
+            return gradient, {"passthrough": True}
+
+        effective_bandwidth = min(self.bandwidth, int(original_dim))
+        if effective_bandwidth < 1:
+            return gradient, {"passthrough": True}
 
         # Flatten to 2D for processing: [batch, features]
         flat_grad = tf.reshape(gradient, [-1, original_dim])
 
         # Compute frequency compression
-        compressed_fft, mask_indices = frequency_topk_mask(flat_grad, self.bandwidth)
+        compressed_fft, mask_indices = frequency_topk_mask(flat_grad, effective_bandwidth)
 
         # Track stats
-        original_size = tf.size(flat_grad).numpy()
-        compressed_size = tf.size(compressed_fft).numpy()
-        self._stats["total_compressed"] += compressed_size
-        self._stats["total_original"] += original_size
+        if tf.executing_eagerly():
+            original_size = int(tf.size(flat_grad).numpy())
+            compressed_size = int(tf.size(compressed_fft).numpy())
+            self._stats.setdefault("total_compressed", 0)
+            self._stats.setdefault("total_original", 0)
+            self._stats["total_compressed"] += compressed_size
+            self._stats["total_original"] += original_size
 
         # Store metadata for decompression
         metadata = {
@@ -256,6 +301,7 @@ class HDGradientCompressor:
             "original_dim": original_dim,
             "mask_indices": mask_indices,
             "flat_shape": flat_grad.shape.as_list(),
+            "bandwidth": effective_bandwidth,
         }
 
         logger.debug(
@@ -341,6 +387,59 @@ class HDGradientCompressor:
 # =============================================================================
 
 
+@tf.autograph.experimental.do_not_convert
+def _get_gradient_compressor(bandwidth: int):
+    """Get or create a cached gradient compression function for a specific bandwidth.
+
+    This function caches the created compression functions to prevent tf.function
+    retracing on every call. Each unique bandwidth value gets its own cached function.
+
+    The @tf.autograph.experimental.do_not_convert decorator prevents AutoGraph
+    from attempting to transform this function, silencing "could not get source code"
+    warnings that occur with dynamically loaded C++ ops.
+
+    Args:
+        bandwidth: Number of frequency components to keep.
+
+    Returns:
+        A cached function decorated with @tf.custom_gradient that compresses gradients.
+    """
+    # Check cache first to avoid creating new functions
+    if bandwidth in _GRADIENT_COMPRESSOR_CACHE:
+        return _GRADIENT_COMPRESSOR_CACHE[bandwidth]
+
+    # Create new function for this bandwidth value
+    # Capture bandwidth as a closure variable (constant for this function)
+    bw = bandwidth  # Capture in closure
+
+    @tf.autograph.experimental.do_not_convert
+    @tf.custom_gradient
+    def compress_gradients(x):
+        @tf.autograph.experimental.do_not_convert
+        def grad(dy):
+            # Compress the incoming gradient
+            # Get the last dimension size as a Python int when possible
+            dy_shape = dy.shape
+            if dy_shape.rank is not None and dy_shape[-1] is not None:
+                last_dim = int(dy_shape[-1])
+            else:
+                # Fallback for dynamic shapes - use tf.shape
+                last_dim = tf.shape(dy)[-1]
+
+            flat_dy = tf.reshape(dy, [-1, last_dim])
+            compressed, indices = frequency_topk_mask(flat_dy, bw)
+            reconstructed = frequency_reconstruct(compressed, indices, last_dim)
+            return tf.reshape(reconstructed, tf.shape(dy))
+
+        return x, grad
+
+    # Cache the function
+    _GRADIENT_COMPRESSOR_CACHE[bandwidth] = compress_gradients
+    logger.debug("[HD_GRADIENT] Cached compressor function for bandwidth=%d", bandwidth)
+
+    return compress_gradients
+
+
 class HDGradientCompressionLayer(tf.keras.layers.Layer):
     """Layer wrapper that applies HD gradient compression during training.
 
@@ -372,20 +471,9 @@ class HDGradientCompressionLayer(tf.keras.layers.Layer):
         output = self.wrapped_layer(inputs, training=training)
 
         if training:
-            # Apply gradient compression via custom gradient
-            @tf.custom_gradient
-            def compress_gradients(x):
-                def grad(dy):
-                    # Compress the incoming gradient
-                    # Note: This compresses the gradient w.r.t. output
-                    flat_dy = tf.reshape(dy, [-1, tf.shape(dy)[-1]])
-                    compressed, indices = frequency_topk_mask(flat_dy, self.bandwidth)
-                    reconstructed = frequency_reconstruct(compressed, indices, tf.shape(dy)[-1])
-                    return tf.reshape(reconstructed, tf.shape(dy))
-
-                return x, grad
-
-            output = compress_gradients(output)
+            # Apply gradient compression via custom gradient (cached to prevent retracing)
+            compress_fn = _get_gradient_compressor(self.bandwidth)
+            output = compress_fn(output)
 
         return output
 

@@ -34,3 +34,18 @@ pyreadr
 openpyxl
 flask
 httpx
+
+# =============================================================================
+# ENTERPRISE HPO ENHANCEMENTS (QAHPO + fANOVA Roadmap)
+# =============================================================================
+# Phase 1: Advanced Surrogate Models
+gpytorch>=1.11  # Deep Kernel GP for neural network kernels
+botorch>=0.9    # Bayesian optimization with acquisition functions (MES, UCB, EI)
+torch>=2.0      # Required by gpytorch/botorch (PyTorch backend)
+
+# Phase 4: fANOVA Enhancements
+shap>=0.43      # Shapley-value importance attribution
+
+# Phase 6: Enterprise Infrastructure
+ray[tune]>=2.9  # Distributed HPO with ASHA, PBT, BOHB schedulers
+prometheus_client>=0.19  # Metrics export for Grafana dashboards

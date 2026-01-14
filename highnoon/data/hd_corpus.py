@@ -221,8 +221,9 @@ class HolographicCorpus:
         pos_keys = self.position_keys[:seq_len]
 
         # Bind via circular convolution (FFT-based)
-        tok_complex = tf.cast(tok_embeds, tf.complex64)
-        pos_complex = tf.cast(pos_keys, tf.complex64)
+        # Phase 1.5: Cast to complex128 for quantum precision per GRADIENT_CONNECTIVITY_ROADMAP
+        tok_complex = tf.cast(tok_embeds, tf.complex128)
+        pos_complex = tf.cast(pos_keys, tf.complex128)
 
         tok_fft = tf.signal.fft(tok_complex)
         pos_fft = tf.signal.fft(pos_complex)
@@ -230,9 +231,9 @@ class HolographicCorpus:
         # Element-wise multiplication in frequency domain
         bound_fft = tok_fft * pos_fft
 
-        # Inverse FFT to get bound vectors
+        # Inverse FFT to get bound vectors, cast back to float32 for storage
         bound = tf.signal.ifft(bound_fft)
-        bound_real = tf.math.real(bound)
+        bound_real = tf.cast(tf.math.real(bound), tf.float32)
 
         # Bundle: sum all bound vectors (holographic superposition)
         bundle = tf.reduce_sum(bound_real, axis=0)
@@ -475,16 +476,18 @@ class HolographicCorpus:
                     for pos in range(seq_len - 1):  # -1 for shift
                         # Get position key for unbinding
                         pos_key = self.position_keys[pos]
-                        pos_key_complex = tf.cast(pos_key, tf.complex64)
+                        # Phase 1.5: Use complex128 for quantum precision
+                        pos_key_complex = tf.cast(pos_key, tf.complex128)
 
                         # Unbind: IFFT(FFT(bundle) / FFT(pos_key))
-                        bundle_complex = tf.cast(batch_bundles_tf, tf.complex64)
+                        bundle_complex = tf.cast(batch_bundles_tf, tf.complex128)
                         bundle_fft = tf.signal.fft(bundle_complex)
                         pos_fft = tf.signal.fft(pos_key_complex)
 
                         # Division in frequency domain (with stability)
                         unbound_fft = bundle_fft / (pos_fft + 1e-8)
-                        unbound = tf.math.real(tf.signal.ifft(unbound_fft))
+                        # Cast back to float32 for downstream compatibility
+                        unbound = tf.cast(tf.math.real(tf.signal.ifft(unbound_fft)), tf.float32)
 
                         # Project to vocab logits via base vectors
                         # logits = unbound @ base_vectors.T

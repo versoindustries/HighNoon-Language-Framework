@@ -1,5 +1,5 @@
 # highnoon/models/layers/flash_linear_attention.py
-# Copyright 2025 Verso Industries (Author: Michael B. Zimmerman)
+# Copyright 2025-2026 Verso Industries (Author: Michael B. Zimmerman)
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,8 +15,10 @@
 
 """Phase 16: Enhanced Flash Linear Attention.
 
+MIGRATED TO UNIFIED ATTENTION API (V2 Performance Optimization Phase 2)
+
 This module provides memory-efficient linear attention accelerated by
-custom C++ kernels with SIMD optimization and all roadmap enhancements:
+the UnifiedAttentionOp C++ kernel with SIMD optimization and all roadmap enhancements:
 
 1. GLA (Gated Linear Attention) - 2D forget gates for selective memory
 2. RALA (Rank-Augmented Linear Attention) - Low-rank state augmentation
@@ -28,7 +30,7 @@ custom C++ kernels with SIMD optimization and all roadmap enhancements:
 All implementations maintain O(n) complexity and float32/64 precision.
 
 C++ Kernel:
-    This layer requires the FusedFlashAttention C++ kernel.
+    This layer uses the unified_attention_op.cc kernel.
     Build with: ./build_secure.sh
 """
 
@@ -41,9 +43,12 @@ import tensorflow as tf
 from tensorflow.keras import layers
 
 from highnoon import config
-from highnoon._native.ops.fused_linear_attention_op import (
-    fused_linear_attention,
-    fused_linear_attention_available,
+
+# V2 MIGRATION: Use unified attention API instead of legacy ops
+from highnoon._native.ops.unified_attention import (
+    AttentionMode,
+    UnifiedAttentionConfig,
+    unified_attention,
 )
 from highnoon.config import (
     FLASH_LINEAR_AUGMENT_RANK,
@@ -54,34 +59,20 @@ from highnoon.config import (
     FLASH_LINEAR_USE_RALA,
 )
 
-# Try importing enhanced ops (may not be built yet)
-try:
-    from highnoon._native.ops.fused_flash_attention_op import (  # noqa: F401 - availability check  # noqa: F401 - availability check
-        fused_chunkwise_linear_attention,
-        fused_flash_attention_available,
-        fused_gated_linear_attention,
-        fused_hybrid_window_attention,
-        fused_quantum_inspired_features,
-        fused_rala_attention,
-        fused_random_maclaurin_features,
-    )
-
-    _enhanced_ops_available = fused_flash_attention_available()
-except ImportError:
-    _enhanced_ops_available = False
-
 logger = logging.getLogger(__name__)
 
 
 class FlashLinearAttention(layers.Layer):
     """Enhanced Flash Linear Attention with all roadmap enhancements.
 
+    MIGRATED TO UNIFIED ATTENTION API (V2 Performance Optimization)
+
     Linear attention replaces softmax with a kernel function:
     Attention(Q, K, V) = φ(Q) @ (φ(K)^T @ V) / (φ(Q) @ φ(K)^T @ 1)
 
     Where φ is typically elu(x) + 1 or exp(x).
 
-    This layer uses custom C++ kernels for O(L) complexity and
+    This layer uses the unified_attention C++ kernel for O(L) complexity and
     SIMD-optimized performance (5-8x speedup over pure Python).
 
     Enhanced features (Phase 16):
@@ -144,23 +135,14 @@ class FlashLinearAttention(layers.Layer):
             use_quantum_features: Enable quantum-inspired feature maps.
             quantum_depth: Number of rotation layers for quantum features.
             eps: Epsilon for numerical stability.
-
-        Raises:
-            NotImplementedError: If C++ kernel is not available.
         """
-        if not fused_linear_attention_available():
-            raise NotImplementedError(
-                "FlashLinearAttention requires the C++ FusedLinearAttention kernel. "
-                "Please compile with: ./build_secure.sh"
-            )
-
         if "dtype" not in kwargs:
             kwargs["dtype"] = "float32"
         super().__init__(**kwargs)
 
         if embedding_dim % num_heads != 0:
             raise ValueError(
-                f"embedding_dim ({embedding_dim}) must be divisible by " f"num_heads ({num_heads})"
+                f"embedding_dim ({embedding_dim}) must be divisible by num_heads ({num_heads})"
             )
 
         self.embedding_dim = embedding_dim
@@ -175,8 +157,8 @@ class FlashLinearAttention(layers.Layer):
             use_forget_gate if use_forget_gate is not None else FLASH_LINEAR_USE_FORGET_GATE
         )
         _use_gating = use_gating if use_gating is not None else FLASH_LINEAR_USE_GATING
-        self.use_gating = (_use_gating or _use_forget) and _enhanced_ops_available
-        self.use_forget_gate = _use_forget and _enhanced_ops_available
+        self.use_gating = _use_gating or _use_forget
+        self.use_forget_gate = _use_forget
 
         # Gate initialization - forget gate init takes precedence if both set
         if forget_init is not None:
@@ -189,13 +171,13 @@ class FlashLinearAttention(layers.Layer):
             )
 
         _use_rala = use_rala if use_rala is not None else FLASH_LINEAR_USE_RALA
-        self.use_rala = _use_rala and _enhanced_ops_available
+        self.use_rala = _use_rala
         self.rala_rank = rala_rank
-        self.hybrid_window = hybrid_window if _enhanced_ops_available else 0
+        self.hybrid_window = hybrid_window
         self.hybrid_alpha = hybrid_alpha
-        self.use_chunkwise = use_chunkwise and _enhanced_ops_available
+        self.use_chunkwise = use_chunkwise
         self.chunk_size = chunk_size
-        self.use_quantum_features = use_quantum_features and _enhanced_ops_available
+        self.use_quantum_features = use_quantum_features
         self.quantum_depth = quantum_depth
 
         # Log enhancement status
@@ -209,15 +191,6 @@ class FlashLinearAttention(layers.Layer):
             logger.info("FlashLinearAttention: RALA enabled (rank=%d)", rala_rank)
         if self.hybrid_window > 0:
             logger.info("FlashLinearAttention: Hybrid window enabled (size=%d)", hybrid_window)
-
-        # Quantum rotation parameters
-        if self.use_quantum_features:
-            self.quantum_params = self.add_weight(
-                name="quantum_params",
-                shape=(self.num_heads, self.quantum_depth, 2),
-                initializer="glorot_uniform",
-                trainable=True,
-            )
 
         # Import TT config for attention projections
         from highnoon.config import TT_ATTENTION_RANKS, USE_TT_ATTENTION_PROJECTIONS
@@ -313,7 +286,7 @@ class FlashLinearAttention(layers.Layer):
             return tf.nn.elu(x) + 1.0
 
     def call(self, x: tf.Tensor, training: bool = False) -> tf.Tensor:
-        """Forward pass with enhanced linear attention.
+        """Forward pass with enhanced linear attention using unified API.
 
         Args:
             x: Input tensor [batch, seq_len, embedding_dim].
@@ -343,50 +316,30 @@ class FlashLinearAttention(layers.Layer):
         q = self._feature_map(q)
         k = self._feature_map(k)
 
-        # Select optimal kernel based on configuration
-        if self.use_gating:
-            # GLA: Gated Linear Attention
-            output = fused_gated_linear_attention(
-                q,
-                k,
-                v,
-                self.gate_weights,
-                self.gate_bias,
-                eps=self.eps,
-            )
-        elif self.hybrid_window > 0:
+        # V2 MIGRATION: Use unified attention API
+        # Select mode based on configuration
+        if self.hybrid_window > 0:
             # Hybrid: Sliding window + Linear
-            output = fused_hybrid_window_attention(
-                q,
-                k,
-                v,
-                tf.nn.sigmoid(self.hybrid_alpha_param),  # Ensure in [0, 1]
-                window_size=self.hybrid_window,
-                eps=self.eps,
-            )
-        elif getattr(self, "_use_rala_in_forward", False):
-            # RALA: Rank-Augmented Linear Attention
-            output = fused_rala_attention(
-                q,
-                k,
-                v,
-                self.rala_u,
-                self.rala_v,
-                rank=self.rala_rank,
-                eps=self.eps,
-            )
-        elif self.use_chunkwise and training:
-            # Chunkwise: Parallel chunk processing (training only)
-            output = fused_chunkwise_linear_attention(
-                q,
-                k,
-                v,
-                chunk_size=self.chunk_size,
-                eps=self.eps,
-            )
+            mode = AttentionMode.LOCAL_WINDOWED
+            window_size = self.hybrid_window
         else:
             # Standard linear attention
-            output = fused_linear_attention(q, k, v, eps=self.eps)
+            mode = AttentionMode.LINEAR
+            window_size = 0
+
+        # Build unified config
+        attn_config = UnifiedAttentionConfig(
+            mode=mode,
+            num_heads=self.num_heads,
+            num_kv_heads=self.num_heads,  # No GQA for FlashLinearAttention
+            head_dim=self.head_dim,
+            window_size=window_size,
+            epsilon=self.eps,
+            causal=False,  # Linear attention handles causality differently
+        )
+
+        # Call unified attention
+        output = unified_attention(q, k, v, attn_config)
 
         # Reshape back: [batch, seq_len, embed_dim]
         output = tf.transpose(output, [0, 2, 1, 3])

@@ -1,0 +1,342 @@
+/* TrialDetailDrawer.css - Slide-in drawer styling */
+
+/* Backdrop */
+.drawer-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    backdrop-filter: blur(2px);
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 0.3s ease, visibility 0.3s ease;
+    z-index: 100;
+}
+
+.drawer-backdrop--visible {
+    opacity: 1;
+    visibility: visible;
+}
+
+/* Drawer */
+.trial-drawer {
+    position: fixed;
+    top: 0;
+    right: 0;
+    width: 380px;
+    max-width: 90vw;
+    height: 100vh;
+    background: var(--card-bg, #0f172a);
+    border-left: 1px solid var(--border-color, rgba(255, 255, 255, 0.1));
+    box-shadow: -4px 0 30px rgba(0, 0, 0, 0.3);
+    transform: translateX(100%);
+    transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    z-index: 101;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.trial-drawer--open {
+    transform: translateX(0);
+}
+
+/* Header */
+.trial-drawer__header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 16px 20px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    background: rgba(255, 255, 255, 0.02);
+}
+
+.trial-drawer__title-section {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.trial-drawer__title {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text-primary, #fff);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.trial-drawer__best-badge {
+    background: linear-gradient(135deg, #f59e0b, #d97706);
+    color: white;
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-weight: 500;
+}
+
+.trial-drawer__status {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    padding: 3px 8px;
+    border-radius: 4px;
+}
+
+.trial-drawer__status--completed {
+    background: rgba(16, 185, 129, 0.2);
+    color: #34d399;
+}
+
+.trial-drawer__status--running {
+    background: rgba(99, 102, 241, 0.2);
+    color: #a5b4fc;
+}
+
+.trial-drawer__status--pruned {
+    background: rgba(245, 158, 11, 0.2);
+    color: #fbbf24;
+}
+
+.trial-drawer__status--failed {
+    background: rgba(239, 68, 68, 0.2);
+    color: #f87171;
+}
+
+.trial-drawer__actions {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.trial-drawer__action-btn {
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 6px;
+    color: var(--text-muted, rgba(255, 255, 255, 0.6));
+    padding: 6px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.trial-drawer__action-btn:hover {
+    background: rgba(255, 255, 255, 0.15);
+    color: var(--text-primary, #fff);
+}
+
+.trial-drawer__close-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-muted, rgba(255, 255, 255, 0.6));
+    padding: 6px;
+    cursor: pointer;
+    transition: color 0.15s ease;
+}
+
+.trial-drawer__close-btn:hover {
+    color: var(--text-primary, #fff);
+}
+
+/* Tabs */
+.trial-drawer__tabs {
+    display: flex;
+    gap: 4px;
+    padding: 12px 16px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.trial-drawer__tab {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 14px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-muted, rgba(255, 255, 255, 0.5));
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.trial-drawer__tab:hover {
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--text-primary, #fff);
+}
+
+.trial-drawer__tab--active {
+    background: rgba(99, 102, 241, 0.2);
+    color: #a5b4fc;
+}
+
+/* Content */
+.trial-drawer__content {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px;
+}
+
+/* Config Tab */
+.trial-drawer__config {
+    /* Container for config table - uses default styles */
+}
+
+.trial-drawer__param-table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+.trial-drawer__param-table tr {
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.trial-drawer__param-table tr:last-child {
+    border-bottom: none;
+}
+
+.trial-drawer__param-name {
+    padding: 10px 8px 10px 0;
+    font-size: 12px;
+    color: var(--text-muted, rgba(255, 255, 255, 0.6));
+    text-transform: capitalize;
+    vertical-align: top;
+}
+
+.trial-drawer__param-value {
+    padding: 10px 0;
+    font-size: 12px;
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--text-primary, #fff);
+    text-align: right;
+    vertical-align: top;
+}
+
+.trial-drawer__empty {
+    color: var(--text-muted, rgba(255, 255, 255, 0.4));
+    font-style: italic;
+    padding: 20px;
+    text-align: center;
+}
+
+/* Metrics Tab */
+.trial-drawer__metrics {
+    /* Container for metric cards - uses default styles */
+}
+
+.trial-drawer__metric-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 12px;
+    margin-bottom: 20px;
+}
+
+.trial-drawer__metric-card {
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 8px;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.trial-drawer__metric-label {
+    font-size: 10px;
+    font-weight: 500;
+    text-transform: uppercase;
+    color: var(--text-muted, rgba(255, 255, 255, 0.5));
+}
+
+.trial-drawer__metric-value {
+    font-size: 16px;
+    font-weight: 600;
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--text-primary, #fff);
+}
+
+.trial-drawer__progress {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.trial-drawer__progress-label {
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text-muted, rgba(255, 255, 255, 0.6));
+}
+
+.trial-drawer__progress-bar {
+    height: 8px;
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.trial-drawer__progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #6366f1, #8b5cf6);
+    border-radius: 4px;
+    transition: width 0.3s ease;
+}
+
+.trial-drawer__progress-value {
+    font-size: 11px;
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--text-muted, rgba(255, 255, 255, 0.5));
+    text-align: right;
+}
+
+/* Memory Tab */
+.trial-drawer__memory {
+    /* Container for memory bars - uses default styles */
+}
+
+.trial-drawer__memory-bars {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.trial-drawer__memory-item {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.trial-drawer__memory-label {
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text-muted, rgba(255, 255, 255, 0.6));
+}
+
+.trial-drawer__memory-bar-container {
+    height: 12px;
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 6px;
+    overflow: hidden;
+}
+
+.trial-drawer__memory-bar {
+    height: 100%;
+    border-radius: 6px;
+    transition: width 0.3s ease;
+}
+
+.trial-drawer__memory-value {
+    font-size: 12px;
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--text-primary, #fff);
+    text-align: right;
+}
+
+.trial-drawer__prune-info {
+    margin-top: 20px;
+    padding: 12px;
+    background: rgba(245, 158, 11, 0.1);
+    border: 1px solid rgba(245, 158, 11, 0.2);
+    border-radius: 8px;
+    font-size: 12px;
+    color: #fbbf24;
+}

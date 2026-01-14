@@ -192,7 +192,7 @@ def create_tfrecords(
         json.dump(metadata, f, indent=2)
 
     logger.info(
-        f"Created {num_shards} TFRecord shards with {num_examples} examples " f"in {output_dir}"
+        f"Created {num_shards} TFRecord shards with {num_examples} examples in {output_dir}"
     )
 
     return metadata

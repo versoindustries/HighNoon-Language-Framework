@@ -71,6 +71,10 @@ class SophiaG(tf.keras.optimizers.Optimizer):
             self.hd_buffer = HDStateBuffer(compression_ratio=self.hd_ratio)
             logger.info(f"[SophiaG] HD State Compression enabled (ratio={self.hd_ratio}x)")
 
+    def _state_key(self, var: tf.Variable, suffix: str) -> str:
+        """Build a unique HD state key to avoid collisions across replicas/trials."""
+        return f"{var.name}::{id(var)}/{suffix}"
+
     def build(self, var_list):
         """Create slots for the first moment (m) and diagonal Hessian estimate (h)."""
         # --- START: DEFINITIVE FIX for HPO ---
@@ -86,9 +90,11 @@ class SophiaG(tf.keras.optimizers.Optimizer):
         if self.use_hd_states and self.hd_buffer:
             for var in var_list:
                 # Register momentum and hessian states
-                # Use var.name as unique key
-                self.hd_buffer.register(f"{var.name}/m", var.shape)
-                self.hd_buffer.register(f"{var.name}/h", var.shape)
+                # Use a unique key to avoid collisions across replicas/trials
+                m_key = self._state_key(var, "m")
+                h_key = self._state_key(var, "h")
+                self.hd_buffer.register(m_key, var.shape)
+                self.hd_buffer.register(h_key, var.shape)
 
                 # We still append None or placeholders to maintain index alignment (if needed)
                 # But for now, we'll rely on direct access in update_step via var.name
@@ -116,6 +122,17 @@ class SophiaG(tf.keras.optimizers.Optimizer):
         if grad is None:
             return
 
+        if not isinstance(grad, tf.IndexedSlices) and grad.shape != var.shape:
+            logger.error(
+                "[SophiaG] Gradient shape mismatch for %s: grad=%s var=%s",
+                var.name,
+                grad.shape,
+                var.shape,
+            )
+            raise ValueError(
+                f"Gradient shape mismatch for {var.name}: grad={grad.shape} var={var.shape}"
+            )
+
         lr = tf.cast(learning_rate, var.dtype.base_dtype)
         beta_1_t = tf.cast(self.beta_1, var.dtype.base_dtype)
         rho_t = tf.cast(self.rho, var.dtype.base_dtype)
@@ -133,13 +150,18 @@ class SophiaG(tf.keras.optimizers.Optimizer):
             # For iteration 0, if 'm' is effectively zero, it's fine.
             # If 'h' is effectively zero, we have division by zero issue.
 
-            # TODO: Handle H=1.0 intialization for HD.
+            # TODO: Handle H=1.0 initialization for HD.
             # For now, we add epsilon or max(h, epsilon) in updates.
-            m = self.hd_buffer.decode(f"{var.name}/m")
-            h = self.hd_buffer.decode(f"{var.name}/h")
+            # Pass var.shape as hint for unregistered variables (first iteration)
+            var_shape = tuple(var.shape.as_list())
+            m_key = self._state_key(var, "m")
+            h_key = self._state_key(var, "h")
+            m = self.hd_buffer.decode(m_key, shape=var_shape)
+            h = self.hd_buffer.decode(h_key, shape=var_shape)
 
             # IMPORTANT: For numerical stability, ensure h is non-zero
-            h = tf.maximum(h, 1e-6)
+            # For first iteration (zeros from decode), use 1.0 as default
+            h = tf.maximum(h, 1.0)
         else:
             var_index = self._get_variable_index(var)
             m = self.momentums[var_index]
@@ -161,7 +183,10 @@ class SophiaG(tf.keras.optimizers.Optimizer):
             m_updated = tf.tensor_scatter_nd_update(
                 m, tf.expand_dims(grad.indices, axis=-1), m_t_slices
             )
-            m.assign(m_updated)
+            if self.use_hd_states and self.hd_buffer:
+                self.hd_buffer.encode(self._state_key(var, "m"), m_updated)
+            else:
+                m.assign(m_updated)
             # --- END: DEFINITIVE FIX ---
             var.scatter_add(tf.IndexedSlices(-lr * clipped_update_slices, grad.indices))
         else:
@@ -169,7 +194,7 @@ class SophiaG(tf.keras.optimizers.Optimizer):
             m_new = beta_1_t * m + (1.0 - beta_1_t) * grad
 
             if self.use_hd_states and self.hd_buffer:
-                self.hd_buffer.encode(f"{var.name}/m", m_new)
+                self.hd_buffer.encode(self._state_key(var, "m"), m_new)
                 m = m_new  # Use new value for update calculation
                 update = m / tf.maximum(h, self.epsilon)
             else:
@@ -214,10 +239,10 @@ class SophiaG(tf.keras.optimizers.Optimizer):
                 try:
                     if self.use_hd_states and self.hd_buffer:
                         # HD Mode
-                        h = self.hd_buffer.decode(f"{var.name}/h")
+                        h = self.hd_buffer.decode(self._state_key(var, "h"))
                         h_hat = tf.square(h_grad)
                         h_new = beta_2_t * h + (1.0 - beta_2_t) * h_hat
-                        self.hd_buffer.encode(f"{var.name}/h", h_new)
+                        self.hd_buffer.encode(self._state_key(var, "h"), h_new)
                     else:
                         # Standard Mode
                         var_index = self._get_variable_index(var)

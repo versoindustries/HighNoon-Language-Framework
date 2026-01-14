@@ -64,6 +64,7 @@ References:
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -92,13 +93,186 @@ except ImportError:
     hd_spectral_flatness_native = None
 
 
+# Phase 1000: Unified Spectral Cache import
+try:
+    from highnoon.training.spectral_cache import clear_spectral_cache, get_spectral_cache
+
+    _SPECTRAL_CACHE_AVAILABLE = True
+except ImportError:
+    _SPECTRAL_CACHE_AVAILABLE = False
+    get_spectral_cache = None
+    clear_spectral_cache = None
+
+
+# V2.0: Fused QULS Loss Native Ops (Phase P0.2)
+try:
+    from highnoon._native.ops.fused_quls_loss_op import fused_quls_loss as fused_quls_loss_native
+    from highnoon._native.ops.fused_quls_loss_op import (
+        is_native_available as fused_quls_loss_available,
+    )
+
+    _FUSED_QULS_AVAILABLE = fused_quls_loss_available()
+except ImportError:
+    _FUSED_QULS_AVAILABLE = False
+    fused_quls_loss_native = None
+
+
 # =============================================================================
-# Cached Eigenvalue Computation (Merged from quantum_loss_v2.py)
+# Phase 1003: Coherence Aggregation Layer
+# =============================================================================
+
+
+class CoherenceAggregator:
+    """Collects coherence metrics from all quantum blocks for QULS integration.
+
+    Phase 1003: This class provides automatic coherence collection from registered
+    quantum blocks. It aggregates coherence values and provides a unified interface
+    for QULS coherence_preservation_loss().
+
+    Thread-safe for concurrent access from multiple blocks.
+
+    Attributes:
+        _sources: Registered coherence source functions.
+        _cached_values: Last collected coherence values.
+
+    Example:
+        >>> aggregator = get_coherence_aggregator()
+        >>> aggregator.register("qhd_block_0", lambda: block.get_coherence())
+        >>> coherence = aggregator.get_global_coherence()
+    """
+
+    def __init__(self):
+        """Initialize CoherenceAggregator."""
+        self._sources: dict[str, callable] = {}
+        self._cached_values: dict[str, tf.Tensor] = {}
+        self._lock = threading.RLock()
+
+    def register(self, name: str, source_fn: callable) -> None:
+        """Register a coherence source.
+
+        Args:
+            name: Unique name for this coherence source.
+            source_fn: Callable returning a scalar coherence tensor [0, 1].
+        """
+        with self._lock:
+            self._sources[name] = source_fn
+            logger.debug(f"[CoherenceAggregator] Registered source: {name}")
+
+    def unregister(self, name: str) -> None:
+        """Unregister a coherence source.
+
+        Args:
+            name: Name of source to unregister.
+        """
+        with self._lock:
+            if name in self._sources:
+                del self._sources[name]
+                logger.debug(f"[CoherenceAggregator] Unregistered source: {name}")
+
+    def collect(self) -> dict[str, tf.Tensor]:
+        """Collect coherence values from all registered sources.
+
+        Returns:
+            Dictionary mapping source name to coherence tensor.
+        """
+        with self._lock:
+            values = {}
+            for name, fn in self._sources.items():
+                try:
+                    value = fn()
+                    if tf.is_tensor(value):
+                        values[name] = value
+                    else:
+                        values[name] = tf.constant(float(value), dtype=tf.float32)
+                except Exception as e:
+                    logger.warning(f"[CoherenceAggregator] Error collecting {name}: {e}")
+                    values[name] = tf.constant(1.0, dtype=tf.float32)
+            self._cached_values = values
+            return values
+
+    def get_global_coherence(self) -> tf.Tensor:
+        """Get mean coherence across all registered sources.
+
+        Returns:
+            Mean coherence tensor (scalar) in [0, 1].
+        """
+        values = self.collect()
+        if not values:
+            return tf.constant(1.0, dtype=tf.float32)
+
+        stacked = tf.stack(list(values.values()))
+        return tf.reduce_mean(stacked)
+
+    def get_min_coherence(self) -> tf.Tensor:
+        """Get minimum coherence across all sources.
+
+        Useful for detecting decoherence in any single block.
+
+        Returns:
+            Minimum coherence tensor (scalar).
+        """
+        values = self.collect()
+        if not values:
+            return tf.constant(1.0, dtype=tf.float32)
+
+        stacked = tf.stack(list(values.values()))
+        return tf.reduce_min(stacked)
+
+    def get_statistics(self) -> dict:
+        """Get coherence statistics.
+
+        Returns:
+            Dictionary with source count, global/min coherence, source names.
+        """
+        values = self.collect()
+        return {
+            "num_sources": len(self._sources),
+            "source_names": list(self._sources.keys()),
+            "global_coherence": float(self.get_global_coherence().numpy()) if values else 1.0,
+            "values": {k: float(v.numpy()) for k, v in values.items()},
+        }
+
+    def clear(self) -> None:
+        """Clear all registered sources."""
+        with self._lock:
+            self._sources.clear()
+            self._cached_values.clear()
+
+
+# Global CoherenceAggregator instance (singleton)
+_GLOBAL_COHERENCE_AGGREGATOR: CoherenceAggregator | None = None
+
+
+def get_coherence_aggregator() -> CoherenceAggregator:
+    """Get or create the global CoherenceAggregator instance.
+
+    Returns:
+        Global CoherenceAggregator instance.
+    """
+    global _GLOBAL_COHERENCE_AGGREGATOR
+    if _GLOBAL_COHERENCE_AGGREGATOR is None:
+        _GLOBAL_COHERENCE_AGGREGATOR = CoherenceAggregator()
+    return _GLOBAL_COHERENCE_AGGREGATOR
+
+
+def clear_coherence_aggregator() -> None:
+    """Clear all sources from the global CoherenceAggregator."""
+    global _GLOBAL_COHERENCE_AGGREGATOR
+    if _GLOBAL_COHERENCE_AGGREGATOR is not None:
+        _GLOBAL_COHERENCE_AGGREGATOR.clear()
+
+
+# =============================================================================
+# Cached Eigenvalue Computation (DEPRECATED: Use SpectralCache instead)
 # =============================================================================
 
 
 class EigenvalueCache:
     """Cache for eigenvalue computations to avoid duplicate work.
+
+    .. deprecated:: Phase 1000
+        Use :func:`get_spectral_cache` instead for unified caching across
+        all spectral computations (QULS, HD compression, MPS bond entropy).
 
     Consolidation from QULS V2: spectral_entropy and spectral_flatness previously
     computed eigenvalues independently. This cache ensures single computation per
@@ -189,7 +363,8 @@ class EigenvalueCache:
         for _ in range(k):
             # Random initialization
             v = tf.random.normal([dim, 1], dtype=tf.float32)
-            v = v / tf.norm(v)
+            # GRADIENT FIX: Add epsilon to prevent NaN/Inf gradients when norm → 0
+            v = v / (tf.norm(v) + 1e-8)
 
             # Power iteration
             for _ in range(power_iter_steps):
@@ -444,8 +619,14 @@ def quantum_fidelity_loss(
     pred_probs = tf.nn.softmax(predictions / temperature, axis=-1)
 
     # Create target distribution (one-hot)
+    # Handle both integer and float targets (float targets are cast to int)
     vocab_size = tf.shape(predictions)[-1]
-    target_probs = tf.one_hot(targets, depth=vocab_size, dtype=tf.float32)
+    if targets.dtype in (tf.float32, tf.float64, tf.float16):
+        # For regression-style targets, cast to int (assumes indices)
+        targets_int = tf.cast(targets, tf.int64)
+    else:
+        targets_int = targets
+    target_probs = tf.one_hot(targets_int, depth=vocab_size, dtype=tf.float32)
 
     # Handle sequence dimension if present
     if len(predictions.shape) == 3:
@@ -532,6 +713,9 @@ def spectral_entropy(
     Phase 300+: When USE_HD_SPECTRAL_ENTROPY=True and native ops are available,
     uses O(d log d) FFT-based spectral analysis instead of O(d²) power iteration.
 
+    Phase 1000: Uses unified SpectralCache for shared eigenvalue computation
+    across QULS, HD compression, and MPS bond entropy.
+
     Mathematical formulation:
         Σ = (1/N) Σᵢ (hᵢ - μ)(hᵢ - μ)ᵀ   (covariance)
         H = -Σⱼ λⱼ log(λⱼ)                 (spectral entropy)
@@ -555,9 +739,19 @@ def spectral_entropy(
             return hd_spectral_entropy_native(hidden_states, epsilon)
         except Exception as e:
             logger.warning(f"HD spectral entropy failed, using fallback: {e}")
-            # Fall through to power iteration
+            # Fall through to SpectralCache
 
-    # Fallback: Power iteration eigenvalue computation (O(d²))
+    # Phase 1000: Use unified SpectralCache for shared eigenvalue computation
+    if _SPECTRAL_CACHE_AVAILABLE:
+        cache = get_spectral_cache()
+        return cache.get_spectral_entropy(
+            hidden_states,
+            num_eigenvalues=num_eigenvalues,
+            power_iter_steps=power_iter_steps,
+            epsilon=epsilon,
+        )
+
+    # Legacy fallback: Direct power iteration (without caching)
     h = tf.cast(hidden_states, tf.float32)
 
     # Handle different input shapes
@@ -583,7 +777,8 @@ def spectral_entropy(
 
     # Initialize random vector
     v = tf.random.normal([dim, 1], dtype=tf.float32)
-    v = v / tf.norm(v)
+    # GRADIENT FIX: Add epsilon to prevent NaN/Inf gradients when norm → 0
+    v = v / (tf.norm(v) + 1e-8)
 
     # Deflation-based power iteration for multiple eigenvalues
     A = cov
@@ -604,7 +799,8 @@ def spectral_entropy(
 
         # Reinitialize v for next eigenvalue
         v = tf.random.normal([dim, 1], dtype=tf.float32)
-        v = v / tf.norm(v)
+        # GRADIENT FIX: Add epsilon to prevent NaN/Inf gradients when norm → 0
+        v = v / (tf.norm(v) + 1e-8)
 
     # Stack eigenvalues and normalize to probability
     eigenvalues = tf.stack(eigenvalues)
@@ -672,6 +868,8 @@ def spectral_flatness_loss(
     Phase 300+: When USE_HD_SPECTRAL_ENTROPY=True and native ops are available,
     uses O(d log d) FFT-based spectral flatness computation.
 
+    Phase 1000: Uses unified SpectralCache for shared eigenvalue computation.
+
     Values:
     - SF → 1: Flat spectrum (all eigenvalues equal)
     - SF → 0: Peaked spectrum (few dominant eigenvalues)
@@ -694,9 +892,21 @@ def spectral_flatness_loss(
             return tf.reduce_mean(loss)  # Average over batch
         except Exception as e:
             logger.warning(f"HD spectral flatness failed, using fallback: {e}")
-            # Fall through to power iteration
+            # Fall through to SpectralCache
 
-    # Fallback: Power iteration eigenvalue computation (O(d²))
+    # Phase 1000: Use unified SpectralCache for shared eigenvalue computation
+    if _SPECTRAL_CACHE_AVAILABLE:
+        cache = get_spectral_cache()
+        flatness = cache.get_spectral_flatness(
+            hidden_states,
+            num_eigenvalues=num_eigenvalues,
+            power_iter_steps=power_iter_steps,
+            epsilon=epsilon,
+        )
+        loss = tf.square(flatness - target_flatness)
+        return loss
+
+    # Legacy fallback: Direct power iteration (without caching)
     h = tf.cast(hidden_states, tf.float32)
 
     # Flatten to [N, dim]
@@ -717,7 +927,8 @@ def spectral_flatness_loss(
     eigenvalues = []
 
     v = tf.random.normal([dim, 1], dtype=tf.float32)
-    v = v / tf.norm(v)
+    # GRADIENT FIX: Add epsilon to prevent NaN/Inf gradients when norm → 0
+    v = v / (tf.norm(v) + 1e-8)
     A = cov
 
     for _ in range(k):
@@ -732,7 +943,8 @@ def spectral_flatness_loss(
 
         A = A - eigenvalue * tf.matmul(v, v, transpose_b=True)
         v = tf.random.normal([dim, 1], dtype=tf.float32)
-        v = v / tf.norm(v)
+        # GRADIENT FIX: Add epsilon to prevent NaN/Inf gradients when norm → 0
+        v = v / (tf.norm(v) + 1e-8)
 
     eigenvalues = tf.stack(eigenvalues)
     eigenvalues = tf.maximum(eigenvalues, epsilon)
@@ -1132,7 +1344,13 @@ class QuantumUnifiedLoss:
                 # With label smoothing, need to convert to one-hot first
                 def loss_fn(labels, predictions):
                     vocab_size = tf.shape(predictions)[-1]
-                    one_hot = tf.one_hot(labels, depth=vocab_size)
+                    # Cast float labels to int if needed
+                    labels_int = (
+                        tf.cast(labels, tf.int64)
+                        if labels.dtype in (tf.float32, tf.float64, tf.float16)
+                        else labels
+                    )
+                    one_hot = tf.one_hot(labels_int, depth=vocab_size)
                     # Apply label smoothing
                     smoothed = one_hot * (1 - label_smoothing) + label_smoothing / tf.cast(
                         vocab_size, tf.float32

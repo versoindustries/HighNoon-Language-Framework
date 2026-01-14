@@ -1,0 +1,74 @@
+{
+  "transformer_layer": {
+    "component": "Transformer Layer",
+    "d_model": 512,
+    "n_heads": 8,
+    "d_ff": 2048,
+    "attention_params": {
+      "q_projection": 262656,
+      "k_projection": 262656,
+      "v_projection": 262656,
+      "o_projection": 262656,
+      "total": 1050624
+    },
+    "ffn_params": {
+      "up_projection": 1050624,
+      "down_projection": 1049088,
+      "total": 2099712
+    },
+    "layer_norm_params": 2048,
+    "total_params": 3152384,
+    "dominant_term": "12 \u00d7 d\u00b2 = 3,145,728"
+  },
+  "hnn_layer": {
+    "component": "TimeCrystalBlock",
+    "state_dim": 128,
+    "hidden_dim": 512,
+    "input_dim": 512,
+    "hnn_params": {
+      "w1": 393728,
+      "w2": 262656,
+      "w3_scalar_output": 513,
+      "total": 656897
+    },
+    "output_projection": 131584,
+    "vqc_params": 24,
+    "control_vars_non_trainable": 4,
+    "total_trainable_params": 788505,
+    "key_insight": "W3 outputs SCALAR Hamiltonian - dynamics from derivatives"
+  },
+  "efficiency_comparison": {
+    "comparison_settings": {
+      "d_model": 512,
+      "state_dim": 128,
+      "hidden_dim": 512,
+      "n_layers": 6
+    },
+    "per_layer": {
+      "transformer_params": 3152384,
+      "hnn_params": 788505,
+      "ratio": 3.997925187538443
+    },
+    "total_model_excluding_embeddings": {
+      "transformer_params": 18914304,
+      "hnn_params": 4731030,
+      "hnn_effective_params": 9462060,
+      "raw_ratio": 3.997925187538443,
+      "effective_ratio": 1.9989625937692215
+    },
+    "explanation": "HNN outputs SCALAR Hamiltonian, not full embeddings. Dynamics emerge from energy derivatives, exploiting physics structure. Raw ratio: 4.0\u00d7 fewer params per layer."
+  },
+  "flops_comparison": {
+    "sequence_length": 2048,
+    "d_model": 512,
+    "transformer_flops_per_token": 10485760,
+    "hnn_flops_per_token": 5510656,
+    "ratio": 1.9028152002229861,
+    "transformer_complexity": "O(seq\u00b2 \u00d7 d) = O(2048\u00b2 \u00d7 512)",
+    "hnn_complexity": "O(seq \u00d7 d) = O(2048 \u00d7 512)",
+    "key_insight": "HNN avoids O(n\u00b2) attention complexity"
+  },
+  "actual_model": {
+    "error": "Could not import model: cannot import name 'build_hsmn_model' from 'benchmarks.model_builder' (/home/mike/Documents/Github/HighNoon-Language-Framework/benchmarks/model_builder.py)"
+  }
+}

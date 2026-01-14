@@ -856,7 +856,8 @@ def evaluate_quality_metrics(
 
 def build_hsmn_model(
     config: dict[str, Any],
-    vocab_size: int,
+    active_vocab_size: int,
+    total_vocab_size: int = 300000,
     hidden_dim_override: int | None = None,
     # Phase 1010: Per-layer HD dimensions (fallback to hd_dim for backward compat)
     hd_dim: int | None = None,
@@ -906,7 +907,7 @@ def build_hsmn_model(
             num_moe_experts=moe_num_experts,
             embedding_dim=hidden_dim,
             max_seq_length=config.get("context_window", 4096),
-            vocab_size=vocab_size,
+            vocab_size=active_vocab_size,
         )
 
         # Validate model configuration (raises LimitExceededError if exceeded)
@@ -915,7 +916,7 @@ def build_hsmn_model(
 
         logger.info(
             f"[HPO] Lite edition validation passed: blocks={num_reasoning_blocks}, "
-            f"experts={moe_num_experts}, dim={hidden_dim}, vocab={vocab_size}"
+            f"experts={moe_num_experts}, dim={hidden_dim}, active_vocab={active_vocab_size}"
         )
 
     # FFN dimension computed from hidden_dim and expansion factor
@@ -1065,9 +1066,9 @@ def build_hsmn_model(
                 ctqw_steps = config.get("hqe_ctqw_steps") or getattr(hn_config, "HQE_CTQW_STEPS", 3)
 
                 x = DualPathEmbedding(
-                    vocab_size=vocab_size,
+                    vocab_size=total_vocab_size,
                     model_dim=hidden_dim,
-                    active_vocab_size=min(active_vocab_size, vocab_size),
+                    active_vocab_size=active_vocab_size,
                     hd_dim=embed_hd_dim,
                     use_ctqw=True,
                     ctqw_steps=ctqw_steps,  # QAHPO-tunable
@@ -1075,7 +1076,7 @@ def build_hsmn_model(
                     name="dual_path_embedding",
                 )(input_layer)
                 logger.info(
-                    f"[HPO] Using DualPathEmbedding: vocab={vocab_size}, active={min(active_vocab_size, vocab_size)}, "
+                    f"[HPO] Using DualPathEmbedding: total_vocab={total_vocab_size}, active={active_vocab_size}, "
                     f"hd_dim={embed_hd_dim}, ctqw={ctqw_steps}, max_seq={max_seq_len}"
                 )
             else:
@@ -1090,7 +1091,7 @@ def build_hsmn_model(
                     else ((effective_hd_dim // hidden_dim) + 1) * hidden_dim
                 )
                 x = HyperdimensionalEmbedding(
-                    vocab_size=vocab_size,
+                    vocab_size=total_vocab_size,
                     model_dim=hidden_dim,
                     hd_dim=embed_hd_dim,
                     use_ctqw=True,
@@ -1099,21 +1100,21 @@ def build_hsmn_model(
                     name="hde_embedding",
                 )(input_layer)
                 logger.info(
-                    f"[HPO] Using HyperdimensionalEmbedding: vocab={vocab_size}, hd_dim={embed_hd_dim}, max_seq={max_seq_len}"
+                    f"[HPO] Using HyperdimensionalEmbedding: vocab={total_vocab_size}, hd_dim={embed_hd_dim}, max_seq={max_seq_len}"
                 )
         except (ImportError, Exception) as e:
             logger.warning(
                 f"[HPO] HyperdimensionalEmbedding failed ({e}), falling back to standard"
             )
             x = tf.keras.layers.Embedding(
-                input_dim=vocab_size,
+                input_dim=total_vocab_size,
                 output_dim=hidden_dim,
                 name="token_embedding",
             )(input_layer)
     else:
         # Fallback: standard embedding layer
         x = tf.keras.layers.Embedding(
-            input_dim=vocab_size,
+            input_dim=total_vocab_size,
             output_dim=hidden_dim,
             name="token_embedding",
         )(input_layer)
@@ -1365,22 +1366,26 @@ def build_hsmn_model(
             from highnoon.models.reasoning.block_factory import QuantumLMHead
 
             output_layer = QuantumLMHead(
-                vocab_size=vocab_size,
+                active_vocab_size=active_vocab_size,
                 hidden_dim=hidden_dim,
                 vqc_layers=2,
                 vqc_qubits=8,
                 name="quantum_lm_head",
             )(x)
-            logger.info(f"[HPO] Using QuantumLMHead: vocab={vocab_size}, vqc_qubits=8")
+            logger.info(
+                f"[HPO] Using QuantumLMHead: active_vocab={active_vocab_size}, vqc_qubits=8"
+            )
         except (ImportError, Exception) as e:
             logger.warning(f"[HPO] QuantumLMHead failed ({e}), falling back to Dense")
-            output_layer = tf.keras.layers.Dense(vocab_size, name="lm_head")(x)
+            output_layer = tf.keras.layers.Dense(active_vocab_size, name="lm_head")(x)
     else:
-        output_layer = tf.keras.layers.Dense(vocab_size, name="lm_head")(x)
+        output_layer = tf.keras.layers.Dense(active_vocab_size, name="lm_head")(x)
 
     model = tf.keras.Model(inputs=input_layer, outputs=output_layer, name="HSMN_LM")
 
-    logger.info(f"[HPO] Built HSMN_LM model: vocab_size={vocab_size}, hidden_dim={hidden_dim}")
+    logger.info(
+        f"[HPO] Built HSMN_LM model: active_vocab={active_vocab_size}, hidden_dim={hidden_dim}"
+    )
     return model
 
 
@@ -1759,7 +1764,11 @@ def train_trial(
     # Phase 900.1: Default reduced to 4K for HPO exploration (128K was causing 25GB+ memory)
     # Users should explicitly set context_window in sweep config for larger contexts
     context_window = trial_config.get("context_window") or trial_config.get("sequence_length", 4096)
-    target_vocab_size = trial_config.get("target_vocab_size", 32000)
+    # Phase 1: active_vocab_size replaces target_vocab_size
+    active_vocab_target = trial_config.get("active_vocab_size") or trial_config.get(
+        "target_vocab_size", 32000
+    )
+    total_vocab_size = trial_config.get("total_vocab_size", hn_config.TOTAL_VOCAB_SIZE)
     hidden_dim = trial_config.get("hidden_dim") or 256  # Default if None or missing
 
     # =========================================================================
@@ -1866,7 +1875,7 @@ def train_trial(
             batch_size=batch_size,
             context_window=context_window,  # Phase 200: Unified naming
             streaming_mode=streaming_mode,  # Phase 200: Enterprise streaming
-            vocab_size=target_vocab_size,  # Phase 1: Pass target_vocab_size to tokenizer
+            vocab_size=active_vocab_target,  # Phase 1: Pass goal for active vocab
             hf_dataset_name=hf_dataset_name,
             prefetch_buffer_size=prefetch_buffer_size,
             use_adaptive_tokenizer=use_adaptive_tokenizer,
@@ -1883,14 +1892,14 @@ def train_trial(
         # vocab causes 95%+ dead embeddings and loss stuck at log(vocab_size).
         if hasattr(tokenizer, "ensure_trained_or_fallback"):
             # Use the new safety method that handles untrained tokenizers
-            vocab_size = tokenizer.ensure_trained_or_fallback(target_vocab_size)
+            vocab_size = tokenizer.ensure_trained_or_fallback(active_vocab_target)
         elif hasattr(tokenizer, "is_trained") and not tokenizer.is_trained:
             # Legacy fallback: tokenizer not trained, use target
             logger.warning(
-                f"[HPO] Tokenizer not trained! Using target_vocab_size={target_vocab_size} "
+                f"[HPO] Tokenizer not trained! Using active_vocab_target={active_vocab_target} "
                 "to prevent dead embeddings."
             )
-            vocab_size = target_vocab_size
+            vocab_size = active_vocab_target
         else:
             vocab_size = tokenizer.vocab_size
 
@@ -1900,17 +1909,19 @@ def train_trial(
                 f"[HPO] Tokenizer returned base vocab only ({vocab_size}). "
                 "This likely indicates tokenizer training failed. Using target."
             )
-            vocab_size = target_vocab_size
+            vocab_size = active_vocab_target
 
         # Hard cap at target to prevent oversized embeddings
         # (can happen if superword learning exceeds expectations)
-        vocab_size = min(vocab_size, target_vocab_size)
+        vocab_size = min(vocab_size, active_vocab_target)
 
         # Validation assertions for debugging gradient instability
         assert vocab_size >= 256, f"Vocab size {vocab_size} is too small for training"
         assert vocab_size <= 300000, f"Vocab size {vocab_size} exceeds maximum supported"
 
-        logger.info(f"[HPO] Vocabulary aligned: target={target_vocab_size}, actual={vocab_size}")
+        logger.info(
+            f"[HPO] Vocabulary aligned: goal={active_vocab_target}, active={vocab_size}, total={total_vocab_size}"
+        )
 
         if merger is not None:
             logger.info(f"[HPO] SuperwordMerger active: {merger.superword_count} superwords")
@@ -1924,8 +1935,9 @@ def train_trial(
 
     # Build model with per-layer HD dimensions
     model = build_hsmn_model(
-        trial_config,
-        vocab_size,
+        config=trial_config,
+        active_vocab_size=vocab_size,
+        total_vocab_size=total_vocab_size,
         hidden_dim_override=hidden_dim,
         hd_dim=hd_dim,  # Deprecated global fallback
         hd_dim_embedding=hd_dim_embedding,

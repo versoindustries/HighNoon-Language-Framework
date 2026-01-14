@@ -192,7 +192,12 @@ class HyperdimensionalEmbedding(tf.keras.layers.Layer):
 
         super().build(input_shape)
 
-    def call(self, token_ids: tf.Tensor, training: bool | None = None) -> tf.Tensor:
+    def call(
+        self,
+        token_ids: tf.Tensor,
+        training: bool | None = None,
+        position_ids: tf.Tensor | None = None,
+    ) -> tf.Tensor:
         """Forward pass computing holographic embeddings."""
         if len(token_ids.shape) == 3:
             token_ids = tf.squeeze(token_ids, axis=-1)
@@ -204,7 +209,10 @@ class HyperdimensionalEmbedding(tf.keras.layers.Layer):
 
         if self.streaming_pos is not None:
             # Generate positions based on absolute indices
-            positions = tf.range(seq_len)
+            if position_ids is None:
+                positions = tf.range(seq_len)
+            else:
+                positions = position_ids
             pos_keys = self.streaming_pos.get_position_vectors_batch(positions)
         else:
             pos_keys = self.position_keys[:seq_len]
@@ -397,7 +405,12 @@ class DualPathEmbedding(tf.keras.layers.Layer):
 
         super().build(input_shape)
 
-    def call(self, token_ids: tf.Tensor, training: bool | None = None) -> tf.Tensor:
+    def call(
+        self,
+        token_ids: tf.Tensor,
+        training: bool | None = None,
+        position_ids: tf.Tensor | None = None,
+    ) -> tf.Tensor:
         """Forward pass with holographic position binding in HD space.
 
         Phase 901: All tokens are processed through HD space and bound with
@@ -465,7 +478,11 @@ class DualPathEmbedding(tf.keras.layers.Layer):
         # Phase 901: Bind tokens with positions via FFT-based circular convolution
         # This is the core of Kanerva-style holographic computing:
         # bound = token ⊛ position (circular convolution in HD space)
-        positions = tf.range(seq_len)
+        if position_ids is None:
+            positions = tf.range(seq_len)
+        else:
+            positions = position_ids
+
         pos_vectors = self.streaming_pos.get_position_vectors_batch(positions)  # [L, hd_dim]
 
         # Phase 900.2: Use C++ in-place circular convolution (4× memory reduction)

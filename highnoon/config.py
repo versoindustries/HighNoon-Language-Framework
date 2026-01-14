@@ -216,6 +216,15 @@ QSG_PQ_NUM_CENTROIDS: int = 256  # Centroids per subvector (256 for uint8)
 QSG_USE_FACTORED_VOCAB: bool = True  # Enable factored vocabulary embeddings
 QSG_FACTORIZATION_RANK: int = 32  # Factorization rank r (QAHPO: 16-64)
 
+# Phase 33: Quantum LM Head Optimization (Output Bottleneck Fix)
+# These flags control the 240x compute reduction strategy for the output layer.
+USE_FACTORED_LM_HEAD: bool = True  # Replace dense output with low-rank factorization
+LM_HEAD_FACTORIZATION_RANK: int = 32  # Rank for output factorization (32-64 typical)
+USE_SAMPLED_SOFTMAX: bool = True  # Enable sampled softmax for training (30x speedup)
+SAMPLED_SOFTMAX_NUM_SAMPLED: int = 8192  # Negative samples for loss computation
+USE_CHUNKED_LOSS: bool = True  # Enable memory-efficient chunked loss computation
+LM_HEAD_CHUNK_SIZE: int = 1024  # Chunk size for loss computation (reduces OOM risk)
+
 # Phase 1.3: LSH Index (2x speedup for vocab > 256K)
 QSG_USE_LSH_INDEX: bool = False  # Enable LSH for very large vocabularies
 QSG_LSH_NUM_TABLES: int = 8  # LSH hash tables
@@ -283,7 +292,8 @@ SPARSE_ATTENTION_UPPER_BANDS = 64  # Upper bandwidth (tokens to look forward)
 # =============================================================================
 # MODEL ARCHITECTURE PARAMETERS
 # =============================================================================
-VOCAB_SIZE = 256000  # Vocabulary size (256k for frontier models)
+ACTIVE_VOCAB_SIZE = 32000  # Default active vocabulary size (frequently used tokens)
+TOTAL_VOCAB_SIZE = 300000  # Total vocabulary cap (including rare tokens via HD)
 CHUNK_SIZE = 128  # Chunk size for processing
 CHUNK_STRIDE = 64  # Stride between chunks
 EMBEDDING_DIM = 512  # Embedding dimension
@@ -2271,7 +2281,8 @@ class ModelConfig:
     """Configuration for HighNoon language models.
 
     Attributes:
-        vocab_size: Size of the vocabulary.
+        active_vocab_size: Size of the active vocabulary (frequently used tokens).
+        total_vocab_size: Total vocabulary size cap (including rare tokens).
         embedding_dim: Dimension of token embeddings.
         num_reasoning_blocks: Number of reasoning blocks in the model.
             Lite edition capped at 24.
@@ -2290,7 +2301,8 @@ class ModelConfig:
         use_residual_connections: Whether to use residual connections.
     """
 
-    vocab_size: int = 32000
+    active_vocab_size: int = 32000
+    total_vocab_size: int = 300000
     embedding_dim: int = 768
     num_reasoning_blocks: int = 4
     max_seq_length: int = 4096
@@ -2314,7 +2326,8 @@ class ModelConfig:
     def to_dict(self) -> dict[str, Any]:
         """Convert configuration to dictionary."""
         return {
-            "vocab_size": self.vocab_size,
+            "active_vocab_size": self.active_vocab_size,
+            "total_vocab_size": self.total_vocab_size,
             "embedding_dim": self.embedding_dim,
             "num_reasoning_blocks": self.num_reasoning_blocks,
             "max_seq_length": self.max_seq_length,
@@ -2607,7 +2620,7 @@ def get_tokenizer(
     the framework. The tokenizer can be customized via HPO or manual config.
 
     Args:
-        vocab_size: Vocabulary size. Defaults to VOCAB_SIZE from config.
+        vocab_size: Vocabulary size. Defaults to TOTAL_VOCAB_SIZE from config.
         max_length: Maximum sequence length. Defaults to MAX_CONTEXT_LEN.
         force_new: If True, create a new instance instead of using cached.
 
@@ -2623,7 +2636,7 @@ def get_tokenizer(
     global _TOKENIZER_INSTANCE
 
     # Use defaults from config if not specified
-    vocab_size = vocab_size or VOCAB_SIZE
+    vocab_size = vocab_size or TOTAL_VOCAB_SIZE
     max_length = max_length or MAX_CONTEXT_LEN
 
     # Return cached instance if available and not forcing new

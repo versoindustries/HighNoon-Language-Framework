@@ -446,6 +446,9 @@ class ReasoningModule(tf.keras.layers.Layer):
                 "  - Phase 48+: Standard Gradient Checkpointing enabled (reduces peak memory ~40-50%)"
             )
 
+        # QULS Integration: Diagnostic caching for loss computation
+        self._last_hidden_states = None
+
         logger.info(
             f"ReasoningModule: {len(self.reasoning_blocks)} blocks, dim={embedding_dim}, "
             f"pattern={block_pattern}, types={[type(b).__name__ for b in self.reasoning_blocks]}, "
@@ -687,8 +690,183 @@ class ReasoningModule(tf.keras.layers.Layer):
                     }
                 )
 
+        # Cache final hidden states for QULS entropy regularization
+        self._last_hidden_states = x
+
         # Return tensor directly (not dict) for Keras Functional API compatibility
         return x, stats
+
+    def get_hidden_states(self) -> tf.Tensor | None:
+        """Expose last computed hidden states for QULS diagnostic loss."""
+        return self._last_hidden_states
+
+    def get_vqc_outputs(self) -> list[tf.Tensor] | None:
+        """Collect amplitudes/probabilities from all quantum blocks in the stack."""
+        outputs = []
+        for block in self.reasoning_blocks:
+            # Check for QHDSpatialBlock (has amplitudes_real/imag)
+            if hasattr(block, "amplitudes_real") and hasattr(block, "amplitudes_imag"):
+                amp = tf.complex(block.amplitudes_real, block.amplitudes_imag)
+                outputs.append(amp)
+
+            # Check for QuantumEnhancedBlock (wrapped blocks)
+            elif hasattr(block, "inner_block"):
+                inner = block.inner_block
+                if hasattr(inner, "amplitudes_real") and hasattr(inner, "amplitudes_imag"):
+                    amp = tf.complex(inner.amplitudes_real, inner.amplitudes_imag)
+                    outputs.append(amp)
+
+        return outputs if outputs else None
+
+    def get_coherence_metrics(self) -> dict[str, tf.Tensor] | None:
+        """Retrieve aggregated coherence from the global CoherenceBus."""
+        try:
+            from highnoon.quantum.coherence_bus import coherence_bus
+
+            global_coh = coherence_bus.get_global_coherence()
+            return {"global": global_coh}
+        except (ImportError, AttributeError):
+            return None
+
+    def get_hamiltonian_energies(self) -> tuple[tf.Tensor, tf.Tensor] | None:
+        """Collect initial and final Hamiltonian energies from TimeCrystal blocks."""
+        h_inits = []
+        h_finals = []
+        for block in self.reasoning_blocks:
+            # Check for TimeCrystalSequenceBlock (we just added these cache attributes)
+            if hasattr(block, "_last_h_initial") and block._last_h_initial is not None:
+                h_inits.append(block._last_h_initial)
+                h_finals.append(block._last_h_final)
+
+            # Check for wrapped blocks
+            elif hasattr(block, "inner_block"):
+                inner = block.inner_block
+                if hasattr(inner, "_last_h_initial") and inner._last_h_initial is not None:
+                    h_inits.append(inner._last_h_initial)
+                    h_finals.append(inner._last_h_final)
+
+        if h_inits:
+            # Aggregate by averaging across layers (symplectic conservation at stack level)
+            return tf.add_n(h_inits) / len(h_inits), tf.add_n(h_finals) / len(h_finals)
+        return None
+
+    def get_bond_entropies(self) -> list[tf.Tensor] | None:
+        """Collect bond entropies from Matrix Product State (MPS) layers."""
+        entropies = []
+        for block in self.reasoning_blocks:
+            # Check for MPSLayer directly or inside custom blocks
+            if hasattr(block, "get_bond_entropies"):
+                e = block.get_bond_entropies()
+                if e is not None:
+                    entropies.append(e)
+
+            # Recurse into common wrappers if needed
+            elif hasattr(block, "inner_block"):
+                inner = block.inner_block
+                if hasattr(inner, "get_bond_entropies"):
+                    e = inner.get_bond_entropies()
+                    if e is not None:
+                        entropies.append(e)
+
+        return entropies if entropies else None
+
+    def step(self, x: tf.Tensor, states_list: list[Any]) -> tuple[tf.Tensor, list[Any]]:
+        """Perform a single O(1) inference step through the stack.
+
+        Args:
+            x: Input tensor [batch, embedding_dim].
+            states_list: List of state objects matching the block stack.
+
+        Returns:
+            output: [batch, embedding_dim]
+            new_states_list: List of new state objects.
+        """
+        new_states_list = []
+        state_idx = 0
+
+        # Note: Input x is already embedded.
+
+        # State Bus: Not supported in O(1) step yet (requires persistent slots ref refactoring)
+        # TODO: Add State Bus support if needed for inference.
+
+        for i, (block, norm, dropout) in enumerate(
+            zip(self.reasoning_blocks, self.layer_norms, self.dropout_layers)
+        ):
+            residual = x
+
+            # Phase 30: Use quantum norm or standard LayerNorm
+            if self.use_quantum_norm and _quantum_ops_loaded:
+                x_norm, _ = _unitary_norm_forward(x, self.qnorm_scales[i], self.qnorm_biases[i])
+                x = x_norm
+            else:
+                x = norm(x)
+
+            # Block Execution
+            # Check if block is stateful and we have a state for it
+            current_state = None
+
+            # Helper to check if block expects state
+            is_stateful = (
+                hasattr(block, "step")
+                or (hasattr(block, "fused_block_stateful") and block.fused_block_stateful)
+                or isinstance(block, tf.keras.layers.RNN)
+            )
+
+            if is_stateful:
+                if state_idx < len(states_list):
+                    current_state = states_list[state_idx]
+                else:
+                    # Initialize default state? Or raise error?
+                    # Ideally states_list should be fully populated by cache init.
+                    # For now, assume it is populated.
+                    pass
+
+            # Execute Block
+            if hasattr(block, "step"):
+                x, new_state = block.step(x, current_state)
+                new_states_list.append(new_state)
+                state_idx += 1
+            elif hasattr(block, "fused_block_stateful") and block.fused_block_stateful:
+                # ReasoningMamba2Block style: call((inputs, state)) returns (out, new_state)
+                # Ensure x is [B, 1, D] for call
+                x_3d = tf.expand_dims(x, 1)
+                out_3d, new_state = block.call((x_3d, current_state), training=False)
+                x = tf.squeeze(out_3d, 1)
+                new_states_list.append(new_state)
+                state_idx += 1
+            else:
+                # Stateless block (MoE, Dense, etc.)
+                # Ensure x matches expected rank (usually 3D [B, L, D] for these blocks?)
+                # Most Keras layers handle 2D. But attention-based blocks might need 3D.
+                # MoE is token-wise so 2D is fine usually.
+                # Let's try 2D first, if fail, expand.
+                # Actually, WLAMBlock (Attention) needs O(L log L), cannot do O(1) step easily without elaborate caching.
+                # If WLAMBlock is present, O(1) inference is impossible without KV cache implementation.
+                # For now, assume purely recurrent stack (Mamba/TimeCrystal).
+                x = block(x, training=False)
+                # No state update.
+
+            x = dropout(x, training=False)
+
+            # Phase 34: Unitary Residual
+            # Simplified for inference: just apply residual
+            use_unitary_residual = self.use_unitary_residual and _quantum_ops_loaded
+            if use_unitary_residual:
+                # Check for KalmanBlock exclusion (same as forward)
+                inner_block = getattr(block, "inner_block", None)
+                if inner_block is not None and inner_block.__class__.__name__ == "KalmanBlock":
+                    use_unitary_residual = False
+
+            if use_unitary_residual:
+                angle = self.blend_angles[i]
+                x = _unitary_residual_forward(residual, x, angle)
+            else:
+                x = residual + x
+
+            # Guard
+            x = tf.where(tf.math.is_finite(x), x, residual)
+
+        return x, new_states_list
 
     @staticmethod
     def _summarize_tensor(tensor: tf.Tensor) -> dict[str, Any]:

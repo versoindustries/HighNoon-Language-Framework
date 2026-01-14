@@ -196,8 +196,8 @@ def load_training_dataset(
     # TOKENIZER SETUP
     # =========================================================================
     if vocab_size is None:
-        vocab_size = config.VOCAB_SIZE
-        logger.info("[Data Loaders] Using config.VOCAB_SIZE=%d", vocab_size)
+        vocab_size = config.TOTAL_VOCAB_SIZE
+        logger.info("[Data Loaders] Using config.TOTAL_VOCAB_SIZE=%d", vocab_size)
 
     if tokenizer is None:
         if use_adaptive_tokenizer:

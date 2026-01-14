@@ -30,6 +30,7 @@ from typing import Any
 import tensorflow as tf
 
 from highnoon.config import (
+    ACTIVE_VOCAB_SIZE,
     CHUNKED_FORWARD_SIZE,
     COMPRESSED_DIM,
     EMBEDDING_DIM,
@@ -44,10 +45,10 @@ from highnoon.config import (
     REASONING_HEADS,
     REASONING_LAYERS,
     TOP_K,
+    TOTAL_VOCAB_SIZE,
     USE_CHUNKED_FORWARD,
     USE_HYPERDIMENSIONAL_EMBEDDING,
     USE_QUANTUM_LM_HEAD,
-    VOCAB_SIZE,
     WLAM_NUM_HEADS,
     WLAM_WAVELET_KERNEL_SIZE,
     get_tokenizer,
@@ -82,7 +83,8 @@ class HSMN(tf.keras.Model):
     instead of quadratic attention, enabling efficient long-context processing.
 
     Args:
-        vocab_size: Size of the vocabulary.
+        active_vocab_size: Size of the active (dense) vocabulary.
+        total_vocab_size: Total vocabulary size (system cap).
         embedding_dim: Dimension of token embeddings.
         max_seq_length: Maximum sequence length.
         num_reasoning_blocks: Number of reasoning blocks (max 24 for Lite).
@@ -98,7 +100,8 @@ class HSMN(tf.keras.Model):
 
     def __init__(
         self,
-        vocab_size: int = VOCAB_SIZE,
+        active_vocab_size: int = ACTIVE_VOCAB_SIZE,
+        total_vocab_size: int = TOTAL_VOCAB_SIZE,
         embedding_dim: int = EMBEDDING_DIM,
         max_seq_length: int = 4096,
         num_reasoning_blocks: int = REASONING_LAYERS,
@@ -163,7 +166,8 @@ class HSMN(tf.keras.Model):
 
         super().__init__(**kwargs)
 
-        self.vocab_size = vocab_size
+        self.active_vocab_size = active_vocab_size
+        self.total_vocab_size = total_vocab_size
         self.embedding_dim = embedding_dim
         self.max_seq_length = max_seq_length
         self.num_reasoning_blocks = num_reasoning_blocks
@@ -183,9 +187,9 @@ class HSMN(tf.keras.Model):
                 tie_word_embeddings = False
 
             self.token_embedding = DualPathEmbedding(
-                vocab_size=vocab_size,
+                vocab_size=total_vocab_size,
                 model_dim=embedding_dim,
-                active_vocab_size=HD_ACTIVE_VOCAB_SIZE,
+                active_vocab_size=active_vocab_size,
                 hd_dim=HD_EMBEDDING_DIM,
                 use_ctqw=True,
                 ctqw_steps=HQE_CTQW_STEPS,
@@ -198,7 +202,7 @@ class HSMN(tf.keras.Model):
             )
         else:
             self.token_embedding = tf.keras.layers.Embedding(
-                vocab_size, embedding_dim, name="token_embedding"
+                total_vocab_size, embedding_dim, name="token_embedding"
             )
 
         # Phase 901: Position encoding moved to DualPathEmbedding.streaming_pos
@@ -251,7 +255,7 @@ class HSMN(tf.keras.Model):
                 from highnoon.models.reasoning.block_factory import QuantumLMHead
 
                 self.lm_head = QuantumLMHead(
-                    vocab_size=vocab_size,
+                    active_vocab_size=active_vocab_size,
                     hidden_dim=embedding_dim,
                     vqc_layers=QUANTUM_LM_HEAD_LAYERS,
                     name="lm_head_quantum",
@@ -268,17 +272,19 @@ class HSMN(tf.keras.Model):
                     from highnoon.models.layers.tt_dense import TTDense
 
                     self.lm_head = TTDense(
-                        output_dim=vocab_size,
+                        output_dim=active_vocab_size,
                         tt_ranks=TT_LM_HEAD_RANKS,
                         use_bias=False,
                         name="lm_head_tt",
                     )
                     logger.info(
                         f"HSMN LM Head: Using TTDense with ranks {TT_LM_HEAD_RANKS} "
-                        f"(~{100 * (1 - sum(TT_LM_HEAD_RANKS) / (embedding_dim * vocab_size)):.1f}% compression)"
+                        f"(~{100 * (1 - sum(TT_LM_HEAD_RANKS) / (embedding_dim * active_vocab_size)):.1f}% compression)"
                     )
                 else:
-                    self.lm_head = tf.keras.layers.Dense(vocab_size, name="lm_head", use_bias=False)
+                    self.lm_head = tf.keras.layers.Dense(
+                        active_vocab_size, name="lm_head", use_bias=False
+                    )
         else:
             self.lm_head = None  # Use transposed embedding weights
 
@@ -290,7 +296,8 @@ class HSMN(tf.keras.Model):
         self._tokenizer = None
 
         logger.info(
-            f"Initialized HSMN: vocab={vocab_size}, dim={embedding_dim}, "
+            f"Initialized HSMN: active_vocab={active_vocab_size}, total_vocab={total_vocab_size}, "
+            f"dim={embedding_dim}, "
             f"blocks={num_reasoning_blocks}, pattern={block_pattern}, "
             f"tie_embeddings={tie_word_embeddings}"
         )
@@ -307,7 +314,7 @@ class HSMN(tf.keras.Model):
         """
         if self._tokenizer is None:
             self._tokenizer = get_tokenizer(
-                vocab_size=self.vocab_size,
+                vocab_size=self.total_vocab_size,
                 max_length=self.max_seq_length,
             )
         return self._tokenizer
@@ -352,6 +359,7 @@ class HSMN(tf.keras.Model):
         attention_mask: tf.Tensor | None = None,
         training: bool = False,
         return_hidden_states: bool = False,
+        targets: tf.Tensor | None = None,
     ) -> dict[str, tf.Tensor]:
         """Forward pass.
 
@@ -360,6 +368,7 @@ class HSMN(tf.keras.Model):
             attention_mask: Optional mask of shape [batch, seq_len].
             training: Whether in training mode.
             return_hidden_states: Whether to return intermediate hidden states.
+            targets: Optional targets for internal loss computation.
 
         Returns:
             Dictionary with 'logits' and optionally 'hidden_states'.
@@ -372,7 +381,9 @@ class HSMN(tf.keras.Model):
             return self._chunked_forward(input_ids, attention_mask, training, return_hidden_states)
 
         # Standard forward pass
-        return self._standard_forward(input_ids, attention_mask, training, return_hidden_states)
+        return self._standard_forward(
+            input_ids, attention_mask, training, return_hidden_states, targets
+        )
 
     def _standard_forward(
         self,
@@ -380,6 +391,7 @@ class HSMN(tf.keras.Model):
         attention_mask: tf.Tensor | None,
         training: bool,
         return_hidden_states: bool,
+        targets: tf.Tensor | None = None,
     ) -> dict[str, tf.Tensor]:
         """Standard (non-chunked) forward pass."""
         # Phase 901: Token embeddings with holographic position binding
@@ -408,6 +420,33 @@ class HSMN(tf.keras.Model):
 
         # Output norm and LM head
         hidden_states = self.output_norm(hidden_states)
+
+        # Optimization: Use internal sampled loss if available (30x speedup)
+        if (
+            training
+            and targets is not None
+            and hasattr(self.lm_head, "compute_chunked_loss")
+            and not self.tie_word_embeddings
+        ):
+            # Compute loss directly without materializing [B, L, V] logits
+            # compute_chunked_loss handles looping if sequence > chunk_size
+            # Align labels with hidden_states if targets is one token longer (standard shift)
+            labels = targets
+            if tf.shape(labels)[1] == tf.shape(hidden_states)[1] + 1:
+                labels = labels[:, 1:]
+
+            loss = self.lm_head.compute_chunked_loss(hidden_states, labels)
+            # Note: We slice targets[:, 1:] because targets usually includes start token,
+            # but model inputs are context. Training loop typically aligns them.
+            # Actually, standard conventions: input=[0..L-1], target=[1..L]
+            # hsmn.py input_ids is context. targets passed in call() should be aligned labels.
+            # Let's assume targets passed to call() are exact labels for input_ids.
+            # However, training_loop sets labels = target_tokens[:, 1:], context = target_tokens[:, :-1]
+
+            outputs = {"loss": loss, "logits": None}  # None logits to save memory
+            if return_hidden_states:
+                outputs["hidden_states"] = hidden_states
+            return outputs
 
         # Compute logits
         if self.tie_word_embeddings:
@@ -527,3 +566,37 @@ class HSMN(tf.keras.Model):
     def from_config(cls, config: dict[str, Any]) -> "HSMN":
         """Create model from configuration."""
         return cls(**config)
+
+    # =========================================================================
+    # QULS Integration Hooks
+    # =========================================================================
+
+    def get_hidden_states(self) -> tf.Tensor | None:
+        """Retrieve last hidden states from the reasoning module stack."""
+        if hasattr(self, "reasoning_module"):
+            return self.reasoning_module.get_hidden_states()
+        return None
+
+    def get_vqc_outputs(self) -> list[tf.Tensor] | None:
+        """Collect VQC amplitudes from the reasoning stack."""
+        if hasattr(self, "reasoning_module"):
+            return self.reasoning_module.get_vqc_outputs()
+        return None
+
+    def get_coherence_metrics(self) -> dict[str, tf.Tensor] | None:
+        """Collect coherence metrics from the reasoning stack."""
+        if hasattr(self, "reasoning_module"):
+            return self.reasoning_module.get_coherence_metrics()
+        return None
+
+    def get_hamiltonian_energies(self) -> tuple[tf.Tensor, tf.Tensor] | None:
+        """Collect Hamiltonian energy metrics for symplectic conservation."""
+        if hasattr(self, "reasoning_module"):
+            return self.reasoning_module.get_hamiltonian_energies()
+        return None
+
+    def get_bond_entropies(self) -> list[tf.Tensor] | None:
+        """Collect bond entropies for entanglement regularization."""
+        if hasattr(self, "reasoning_module"):
+            return self.reasoning_module.get_bond_entropies()
+        return None

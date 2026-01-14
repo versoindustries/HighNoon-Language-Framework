@@ -87,6 +87,9 @@ class MPSLayer(ControlVarMixin, tf.keras.layers.Layer):
         # Metrics
         self._avg_entanglement_metric = None
 
+        # QULS Integration: Cache for entanglement regularization
+        self._last_entropies = None
+
     def build(self, input_shape):
         """
         Build MPS core tensors.
@@ -160,7 +163,15 @@ class MPSLayer(ControlVarMixin, tf.keras.layers.Layer):
             avg_entropy = tf.reduce_mean(entropies)
             self._avg_entanglement_metric.update_state(avg_entropy)
 
+        # Cache for QULS
+        if compute_entropy:
+            self._last_entropies = entropies
+
         return state, entropies
+
+    def get_bond_entropies(self) -> tf.Tensor | None:
+        """Expose last computed bond entropies for QULS diagnostic loss."""
+        return self._last_entropies
 
     def contract(self, compute_entropy: bool = True) -> tuple[tf.Tensor, tf.Tensor]:
         """

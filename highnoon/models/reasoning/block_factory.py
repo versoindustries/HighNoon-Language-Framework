@@ -19,6 +19,7 @@ from typing import Any
 import tensorflow as tf
 
 from highnoon import config
+from highnoon.layers.factored_vocab_embedding import FactoredVocabEmbedding
 from highnoon.models.utils.control_vars import ControlVarMixin
 
 # MODIFIED: Delay imports to avoid circular dependency
@@ -664,7 +665,112 @@ class QHDSpatialBlock(ControlVarMixin, tf.keras.layers.Layer):
         """Return last computed coherence for quantum bus integration."""
         if tf.is_tensor(self._last_coherence):
             return float(self._last_coherence.numpy()) if tf.executing_eagerly() else 0.5
-        return self._last_coherence
+
+    def step(self, x: tf.Tensor, states: tf.Tensor) -> tuple[tf.Tensor, tf.Tensor]:
+        """Perform a single O(1) inference step (Python-based recurrence).
+
+        Replicates the C++ QHDSpatialBlockForward logic for streaming inference.
+
+        Args:
+            x: Input tensor [batch, input_dim].
+            states: Previous state [batch, num_paths, hd_dim, state_dim].
+
+        Returns:
+            output: [batch, input_dim]
+            new_states: [batch, num_paths, hd_dim, state_dim]
+        """
+        # Ensure input is 2D
+        if len(x.shape) > 2:
+            x = tf.squeeze(x, axis=1)
+
+        batch_size = tf.shape(x)[0]
+
+        # 1. Input Projection
+        # x: [B, D_in] -> hd_in: [B, hd_dim]
+        if self._needs_projection:
+            hd_in = tf.matmul(x, self.input_proj)
+        else:
+            hd_in = x
+
+        # 2. SSM Parameters Discretization & Recurrence
+        # Note: We compute path-specific A_bar and B_bar for frequency stratification
+        A = -tf.exp(self.a_log)  # [state_dim]
+        dt = tf.nn.softplus(self.dt_proj)  # [hd_dim]
+
+        # Expand dims: A [1, s], dt [h, 1] -> dt_A [h, s]
+        dt_A = tf.expand_dims(dt, -1) * tf.expand_dims(A, 0)
+
+        # Calculate frequency scaling per path (Frequency Stratification)
+        k_indices = tf.range(self.num_paths, dtype=tf.float32)
+        scale = 1.0 + 0.1 * (k_indices - self.num_paths / 2.0) / self.num_paths
+        scale = tf.reshape(scale, [1, self.num_paths, 1, 1])
+
+        # A_bar_k: [1, K, h, s]
+        dt_A_k = tf.expand_dims(tf.expand_dims(dt_A, 0), 0) * scale
+        A_bar_k = tf.exp(dt_A_k)
+
+        # B_bar_k calculation: B * (A_bar - 1) / A
+        inv_A = tf.math.reciprocal(A)  # [s]
+        # B_val_k: [1, K, h, s]
+        # b_proj: [h, s] -> expand to [1, 1, h, s]
+        B_expanded = tf.reshape(self.b_proj, [1, 1, self.hd_dim, self.state_dim])
+        inv_A_expanded = tf.reshape(inv_A, [1, 1, 1, self.state_dim])
+
+        B_val_k = B_expanded * (A_bar_k - 1.0) * inv_A_expanded
+
+        # 3. State Update
+        # h_new = h * A_bar + u * B_bar
+        # hd_in: [B, h] -> u_term: [B, 1, h, 1]
+        u_term = tf.reshape(hd_in, [batch_size, 1, self.hd_dim, 1])
+
+        # Update: [B, K, h, s]
+        h_new = states * A_bar_k + u_term * B_val_k
+
+        # 4. Mixing (Quantum Entanglement)
+        # Apply Walk Hamiltonian if enabled
+        if self.walk_hamiltonian is not None:
+            # Permute to [B, h, s, K] for matmul over paths
+            h_perm = tf.transpose(h_new, [0, 2, 3, 1])
+            # Mix: [..., K] @ [K, K]
+            h_mixed = tf.matmul(h_perm, self.walk_hamiltonian)
+            # Permute back to [B, K, h, s]
+            h_new_mixed = tf.transpose(h_mixed, [0, 3, 1, 2])
+
+            # Apply mixing with strength
+            h_new = h_new + self.entanglement_strength * h_new_mixed
+
+        # 5. Output Computation
+        # y_k = sum(h_new * C, axis=-1) -> [B, K, h]
+        # c_proj: [h, s] -> [1, 1, h, s]
+        C_expanded = tf.reshape(self.c_proj, [1, 1, self.hd_dim, self.state_dim])
+        y_k = tf.reduce_sum(h_new * C_expanded, axis=-1)
+
+        # Born Rule Collapse
+        # probs = |amp|^2
+        probs = self.amplitudes_real**2 + self.amplitudes_imag**2
+        probs = probs / (tf.reduce_sum(probs) + 1e-10)  # [K]
+
+        # y_out = sum(y_k * probs)
+        probs_expanded = tf.reshape(probs, [1, self.num_paths, 1])
+        y_out = tf.reduce_sum(y_k * probs_expanded, axis=1)  # [B, h]
+
+        # 6. Skip Connection & Output Projection
+        if self.skip_connection_type == "diagonal":
+            y_out = y_out * self.skip_proj + hd_in
+        elif self.skip_connection_type == "dense":
+            y_out = tf.matmul(y_out, self.skip_proj) + hd_in
+        elif self.skip_connection_type == "learned_scalar":
+            y_out = y_out * self.skip_proj + hd_in
+        else:
+            # Identity or None - add residual if shapes match (they do, both are hd_in)
+            y_out = y_out + hd_in
+
+        if self._needs_projection:
+            out = tf.matmul(y_out, self.output_proj)
+        else:
+            out = y_out
+
+        return out, h_new
 
 
 # =============================================================================
@@ -1256,6 +1362,57 @@ class QuantumEnhancedBlock(tf.keras.layers.Layer):
             )
             self.add_loss(loss)
 
+    def step(self, x: tf.Tensor, states: Any) -> tuple[tf.Tensor, Any]:
+        """Perform O(1) inference step with quantum enhancements.
+
+        Propagates state to inner block and applies PH dynamics/QSVT per token.
+        """
+        # Ensure x is float32 for enhancements
+        x = tf.cast(x, tf.float32)
+
+        # 1. Inner Block Step
+        # NOTE: ReasoningMamba2Block supports fused_block_stateful but doesn't implement explicit step().
+        # It relies on call((x, state)) signature.
+        if hasattr(self.inner_block, "step"):
+            out, new_state = self.inner_block.step(x, states)
+        else:
+            # Handle stateless or Mamba2-style call
+            if (
+                hasattr(self.inner_block, "fused_block_stateful")
+                and self.inner_block.fused_block_stateful
+            ):
+                # Mamba2 style: call((inputs, states))
+                # Ensure x is [B, L=1, D] for call? Usually strict about rank.
+                # ReasoningMamba2Block.call expects `inputs` as tuple.
+                # Assuming x is [B, D], expand to [B, 1, D]
+                x_3d = tf.expand_dims(x, 1)
+                inner_out, new_state = self.inner_block.call((x_3d, states), training=False)
+                out = tf.squeeze(inner_out, 1)
+            else:
+                # Stateless fallback
+                x_3d = tf.expand_dims(x, 1)
+                inner_out = self.inner_block(x_3d, training=False)
+                out = tf.squeeze(inner_out, 1)
+                new_state = states
+
+        # 2. Enhancements
+        # Apply to output if needed.
+        if not self._skip_enhancements:
+            if self.use_port_hamiltonian:
+                # PH applied to original input (x)
+                x_3d = tf.expand_dims(x, 1)
+                # _apply_port_hamiltonian expects [B, L, D] and returns [B, L, D] (expanded)
+                ph_out_3d = self._apply_port_hamiltonian(x_3d)
+                ph_enhancement = ph_out_3d - x_3d
+                ph_enhancement_flat = tf.squeeze(ph_enhancement, 1)
+                # Add enhancement to inner output (residual)
+                out = out + ph_enhancement_flat
+
+            if self.use_qsvt_activations:
+                out = self._apply_qsvt_activation(out)
+
+        return out, new_state
+
     def get_weights_for_fused_op(self):
         """Get weights for fused C++ op compatibility."""
         if hasattr(self.inner_block, "get_weights_for_fused_op"):
@@ -1819,7 +1976,7 @@ class QuantumLMHead(tf.keras.layers.Layer):
     Phase 33 Enhancement: Born-rule output distribution.
 
     Attributes:
-        vocab_size: Total vocabulary size.
+        active_vocab_size: Active vocabulary size for output dense projection.
         hidden_dim: Input hidden dimension.
         vqc_layers: Number of VQC circuit layers.
         vqc_qubits: Virtual qubits for VQC.
@@ -1827,7 +1984,7 @@ class QuantumLMHead(tf.keras.layers.Layer):
 
     def __init__(
         self,
-        vocab_size: int,
+        active_vocab_size: int,
         hidden_dim: int,
         vqc_layers: int = 2,
         vqc_qubits: int = 8,
@@ -1837,7 +1994,7 @@ class QuantumLMHead(tf.keras.layers.Layer):
         """Initialize QuantumLMHead.
 
         Args:
-            vocab_size: Total vocabulary size for output.
+            active_vocab_size: Active vocabulary size for output.
             hidden_dim: Input hidden dimension from model.
             vqc_layers: Number of VQC rotation layers.
             vqc_qubits: Number of virtual qubits.
@@ -1846,7 +2003,7 @@ class QuantumLMHead(tf.keras.layers.Layer):
         """
         super().__init__(**kwargs)
 
-        self.vocab_size = vocab_size
+        self.active_vocab_size = active_vocab_size
         self.hidden_dim = hidden_dim
         self.vqc_layers = vqc_layers
         self.vqc_qubits = vqc_qubits
@@ -1855,13 +2012,29 @@ class QuantumLMHead(tf.keras.layers.Layer):
         # VQC intermediate dimension
         self._vqc_dim = 2**vqc_qubits  # 256 for 8 qubits
 
-        logger.info(
-            "[QuantumLMHead] Initializing: vocab=%d, hidden=%d, vqc_layers=%d, vqc_qubits=%d",
-            vocab_size,
-            hidden_dim,
-            vqc_layers,
-            vqc_qubits,
+        # Phase 1: Factored Output & Sampled Softmax
+        self.use_factored_output = kwargs.get(
+            "use_factored_output", getattr(config, "USE_FACTORED_LM_HEAD", True)
         )
+        self.factored_rank = kwargs.get(
+            "factored_rank", getattr(config, "LM_HEAD_FACTORIZATION_RANK", 32)
+        )
+        self.use_sampled_loss = kwargs.get(
+            "use_sampled_loss", getattr(config, "USE_SAMPLED_SOFTMAX", True)
+        )
+        self.num_sampled = kwargs.get(
+            "num_sampled", getattr(config, "SAMPLED_SOFTMAX_NUM_SAMPLED", 8192)
+        )
+
+        # Ensure num_sampled < active_vocab_size
+        if self.num_sampled >= self.active_vocab_size:
+            self.num_sampled = self.active_vocab_size - 1
+
+        # Phase 2: Chunked Loss (Memory Optimization)
+        self.use_chunked_loss = kwargs.get(
+            "use_chunked_loss", getattr(config, "USE_CHUNKED_LOSS", True)
+        )
+        self.chunk_size = kwargs.get("chunk_size", getattr(config, "LM_HEAD_CHUNK_SIZE", 1024))
 
     def build(self, input_shape: tf.TensorShape) -> None:
         """Build layer weights."""
@@ -1889,16 +2062,31 @@ class QuantumLMHead(tf.keras.layers.Layer):
         )
 
         # Output projection from VQC amplitudes to vocab logits
-        self.output_proj = tf.keras.layers.Dense(
-            self.vocab_size,
-            use_bias=True,
-            name="output_proj",
-        )
+        if self.use_factored_output:
+            logger.info(
+                f"[QuantumLMHead] Using Factored Output Head (rank={self.factored_rank}). "
+                f"Memory efficient O(1) training enabled."
+            )
+            self.output_proj = FactoredVocabEmbedding(
+                vocab_size=self.active_vocab_size,
+                dim=self._vqc_dim,
+                rank=self.factored_rank,
+                name="output_proj_factored",
+            )
+            # Explicitly build to create U and V weights needed for compute_logits
+            self.output_proj.build((None, self._vqc_dim))
+        else:
+            logger.info("[QuantumLMHead] Using Standard Dense Output Head.")
+            self.output_proj = tf.keras.layers.Dense(
+                self.active_vocab_size,
+                use_bias=True,
+                name="output_proj",
+            )
 
         # Optional dense fallback for stability
         if self.use_dense_fallback:
             self.dense_fallback = tf.keras.layers.Dense(
-                self.vocab_size,
+                self.active_vocab_size,
                 use_bias=True,
                 name="dense_fallback",
             )
@@ -1940,7 +2128,13 @@ class QuantumLMHead(tf.keras.layers.Layer):
         probs = probs / (tf.reduce_sum(probs, axis=-1, keepdims=True) + 1e-10)
 
         # Project to vocab size
-        logits = self.output_proj(probs)  # [batch, seq, vocab_size]
+        if self.use_factored_output:
+            # Factored output requires special projection method (reverse of embedding)
+            # Ensure dtype compliance (VQC might output float64)
+            probs = tf.cast(probs, self.output_proj.dtype)
+            logits = self.output_proj.compute_logits(probs)
+        else:
+            logits = self.output_proj(probs)  # [batch, seq, vocab_size]
 
         # Blend with dense fallback for gradient stability
         if self.use_dense_fallback:
@@ -1966,6 +2160,129 @@ class QuantumLMHead(tf.keras.layers.Layer):
         logits = logits + vqc_passthrough + entangle_passthrough
 
         return logits
+
+    def compute_sampled_loss(
+        self,
+        hidden_states: tf.Tensor,
+        labels: tf.Tensor,
+        num_sampled: int | None = None,
+    ) -> tf.Tensor:
+        """Compute training loss using sampled softmax (approximate).
+
+        Avoids O(V) logit computation by sampling negative classes.
+        Reduces compute from 300k calculations per token to ~8k.
+
+        Args:
+            hidden_states: Input features [batch, seq, D].
+            labels: Target token IDs [batch, seq].
+            num_sampled: Number of negative samples (defaults to config).
+
+        Returns:
+            Scalar loss tensor.
+        """
+        # Ensure layer is built if called directly via method (bypassing __call__)
+        if not self.built:
+            self.build(hidden_states.shape)
+            self.built = True
+
+        # Phase 1.5: Project to VQC dimension first (always happens)
+        x = self.input_proj(hidden_states)
+        amplitudes = self._apply_vqc_circuit(x)
+        probs = tf.square(tf.abs(amplitudes))
+        probs = probs / (tf.reduce_sum(probs, axis=-1, keepdims=True) + 1e-10)
+
+        # Flatten for sampled_softmax_loss compatibility
+        # [batch*seq, vqc_dim]
+        inputs_flat = tf.reshape(probs, [-1, self._vqc_dim])
+        # Ensure dtype match (VQC output is usually double, weights are float)
+        inputs_flat = tf.cast(inputs_flat, self.output_proj.dtype)
+        labels_flat = tf.reshape(labels, [-1, 1])
+
+        num_sampled = num_sampled or self.num_sampled
+
+        if self.use_factored_output:
+            # Factored Case: logits = (inputs @ V) @ U^T
+            # 1. Project inputs to rank space: inputs' = inputs @ V [vqc, rank]
+            # output_proj is FactoredVocabEmbedding
+            # V is [rank, vqc_dim], but layer stores V as [rank, dim]
+            # FactoredVocabEmbedding stores V as [rank, dim], we need V^T [dim, rank]
+            # Actually, standard layer: embeddings = U[ids] @ V
+            # So "weights" matrix W approx U @ V.
+            # Logits = inputs @ W^T = inputs @ (U @ V)^T = inputs @ V^T @ U^T
+            # So inputs' = inputs @ V^T
+
+            # The layer's V is [rank, dim]. transpose_b=True gives [dim, rank]
+            # inputs: [N, dim]. inputs @ V^T -> [N, rank]
+            inputs_rank = tf.matmul(inputs_flat, self.output_proj.V, transpose_b=True)
+
+            # 2. Use U as the weights for sampled softmax
+            # U is [vocab_size, rank]. sampled_softmax expects weights [vocab, dim]
+            # Here "dim" is "rank".
+            loss = tf.nn.sampled_softmax_loss(
+                weights=self.output_proj.U,
+                biases=tf.zeros([self.active_vocab_size]),  # Factored layer has no bias usually
+                labels=labels_flat,
+                inputs=inputs_rank,
+                num_sampled=num_sampled,
+                num_classes=self.active_vocab_size,
+            )
+        else:
+            # Dense Case: Standard sampled softmax
+            output_weights = tf.transpose(self.output_proj.kernel)  # [vocab, vqc_dim]
+            output_biases = self.output_proj.bias
+
+            loss = tf.nn.sampled_softmax_loss(
+                weights=output_weights,
+                biases=output_biases,
+                labels=labels_flat,
+                inputs=inputs_flat,
+                num_sampled=num_sampled,
+                num_classes=self.active_vocab_size,
+            )
+
+        return tf.reduce_mean(loss)
+
+    def compute_chunked_loss(self, hidden_states: tf.Tensor, labels: tf.Tensor) -> tf.Tensor:
+        """Compute loss in chunks along sequence dimension to save memory.
+
+        Args:
+            hidden_states: [batch, seq_len, dim]
+            labels: [batch, seq_len]
+
+        Returns:
+            Scalar loss (averaged over tokens)
+        """
+        # If disabled or short sequence, use standard path
+        seq_len = tf.shape(hidden_states)[1]
+
+        # Optimization: for short sequences, avoid loop overhead
+        # If use_chunked_loss is false, fallback to full sequence sampled loss
+        if not self.use_chunked_loss:
+            return self.compute_sampled_loss(hidden_states, labels)
+
+        # Use tf.while_loop for memory efficiency
+        def body(i, acc_loss, acc_tokens):
+            end = tf.minimum(i + self.chunk_size, seq_len)
+            h_chunk = hidden_states[:, i:end, :]
+            l_chunk = labels[:, i:end]
+
+            # Compute loss for this chunk (returns mean over chunk)
+            reduce_mean_loss = self.compute_sampled_loss(h_chunk, l_chunk)
+
+            chunk_len = tf.cast(end - i, tf.float32)
+            batch_size = tf.cast(tf.shape(hidden_states)[0], tf.float32)
+            num_tokens = chunk_len * batch_size
+
+            # Recover sum from mean to accumulate correctly
+            chunk_sum_loss = reduce_mean_loss * num_tokens
+
+            return i + self.chunk_size, acc_loss + chunk_sum_loss, acc_tokens + num_tokens
+
+        _, total_loss_sum, total_tokens_count = tf.while_loop(
+            cond=lambda i, *_: i < seq_len, body=body, loop_vars=(0, 0.0, 0.0)
+        )
+
+        return total_loss_sum / (total_tokens_count + 1e-10)
 
     def _apply_vqc_circuit(self, x: tf.Tensor) -> tf.Tensor:
         """Apply variational quantum circuit simulation.
@@ -2036,7 +2353,7 @@ class QuantumLMHead(tf.keras.layers.Layer):
         config = super().get_config()
         config.update(
             {
-                "vocab_size": self.vocab_size,
+                "active_vocab_size": self.active_vocab_size,
                 "hidden_dim": self.hidden_dim,
                 "vqc_layers": self.vqc_layers,
                 "vqc_qubits": self.vqc_qubits,

@@ -112,7 +112,7 @@ class HolographicActivationEncoder:
             np.random.seed(self.config.seed + feature_idx)
             self._base_vectors[feature_idx] = np.random.randn(self.config.hd_dim).astype(
                 np.float32
-            ) / np.sqrt(self.config.hd_dim)
+            ) / np.sqrt(self.config.hd_dim).astype(np.float32)
         return self._base_vectors[feature_idx]
 
     def _get_position_phase(self, position: int) -> np.ndarray:

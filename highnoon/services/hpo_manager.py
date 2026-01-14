@@ -451,7 +451,7 @@ def estimate_model_params(config: dict[str, Any]) -> int:
 
     Args:
         config: Architecture configuration containing:
-            - vocab_size: Vocabulary size (default 32000)
+            - active_vocab_size: Active vocabulary size (default 32000)
             - embedding_dim: Embedding dimension (default 512)
             - hd_dim: HD space dimension (default embedding_dim * 8)
             - max_seq_len: Maximum sequence length (default 4096)
@@ -478,24 +478,16 @@ def estimate_model_params(config: dict[str, Any]) -> int:
     )
     hd_dim = config.get("hd_dim") or getattr(hn_config, "HD_EMBEDDING_DIM", embedding_dim * 8)
     max_seq_len = config.get("max_seq_len") or config.get("context_window") or 4096
-    param_budget = config.get("param_budget")
 
-    # Budget-aware vocab_size default
-    vocab_size = config.get("vocab_size") or config.get("target_vocab_size")
-    if vocab_size is None:
-        if param_budget is not None:
-            vocab_size = compute_max_vocab_for_budget(
-                param_budget=param_budget,
-                embedding_dim=embedding_dim,
-                use_hqe=True,
-                hd_dim=hd_dim,
-                model_overhead_fraction=0.5,
-            )
-            logger.debug(
-                f"[HPO] Budget-aware vocab default: {vocab_size} (budget={param_budget / 1e6:.0f}M)"
-            )
-        else:
-            vocab_size = 32000
+    # Phase 1 Tokenizer Fix: active_vocab_size is the primary tunable for model size.
+    # It replaces the old 'vocab_size' or 'target_vocab_size' in most contexts.
+    # The total system vocab (300k) is managed separately but doesn't affect param count.
+    active_vocab_size = (
+        config.get("active_vocab_size")
+        or config.get("target_vocab_size")
+        or config.get("vocab_size")
+        or getattr(hn_config, "ACTIVE_VOCAB_SIZE", 32000)
+    )
 
     num_blocks = config.get("num_reasoning_blocks") or 8
     num_experts = config.get("num_moe_experts") or 8
@@ -523,9 +515,8 @@ def estimate_model_params(config: dict[str, Any]) -> int:
         hn_config, "SUPERPOSITION_DIM", 4
     )
     hd_dim_moe = config.get("hd_dim_moe") or getattr(hn_config, "HD_DIM_MOE", embedding_dim)
-    active_vocab_size = config.get("hd_active_vocab_size") or getattr(
-        hn_config, "HD_ACTIVE_VOCAB_SIZE", 10000
-    )
+    # Legacy mapping protection
+    hd_active_vocab = config.get("hd_active_vocab_size") or active_vocab_size
 
     # ==========================================================================
     # TT DECOMPOSITION FLAGS (for accurate parameter estimation)
@@ -578,7 +569,7 @@ def estimate_model_params(config: dict[str, Any]) -> int:
     # DELEGATE TO CACHED IMPLEMENTATION (Phase 950: 10-50x speedup)
     # ==========================================================================
     return _estimate_model_params_cached(
-        vocab_size=vocab_size,
+        vocab_size=active_vocab_size,
         embedding_dim=embedding_dim,
         hd_dim=hd_dim,
         max_seq_len=max_seq_len,
@@ -598,7 +589,7 @@ def estimate_model_params(config: dict[str, Any]) -> int:
         entanglement_topology=entanglement_topology,
         superposition_dim=superposition_dim,
         hd_dim_moe=hd_dim_moe,
-        active_vocab_size=active_vocab_size,
+        active_vocab_size=hd_active_vocab,
         # TT decomposition flags
         use_tt_embeddings=use_tt_embeddings,
         use_tt_attention=use_tt_attention,
@@ -852,7 +843,7 @@ class HPOSearchSpace:
     """Defines the search space for hyperparameter optimization.
 
     Lite Edition Limits (enforced by C++ binaries):
-    - vocab_size: max 65536
+    - active_vocab_size: max 65536
     - context_window: max 5000000
     - embedding_dim: max 4096
     - num_reasoning_blocks: max 24
@@ -950,13 +941,10 @@ class HPOSearchSpace:
     # hd_dim is defined in PHASE 200+ section as list[int] for HPO sampling
     # For budget estimation, use hd_dim from config or calculate from embedding_dim * 8
     #
-    # Phase 1 Tokenizer Fix: target_vocab_size replaces vocab_size
-    # This is the TARGET size for the tokenizer to learn. The actual model vocab_size
-    # is derived from tokenizer.vocab_size after learning, ensuring zero dead embeddings.
-    target_vocab_size: list[int] = field(
+    # Phase 1 Tokenizer Fix: active_vocab_size replaces target_vocab_size
+    # This is the TARGET size for the output head. The total_vocab_size remains 300k.
+    active_vocab_size: list[int] = field(
         default_factory=lambda: [
-            1000,
-            2000,
             4000,
             8000,
             12000,
@@ -967,9 +955,6 @@ class HPOSearchSpace:
             64000,
             96000,
             128000,
-            192000,
-            256000,
-            300000,
         ]
     )
     context_window: int | None = None

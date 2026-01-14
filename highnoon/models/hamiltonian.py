@@ -521,6 +521,10 @@ class TimeCrystalSequenceBlock(FusedReasoningBlockMixin, ControlVarMixin, layers
         self.conv_dim = 2
         self._sequence_evolution_metric = None
 
+        # QULS Integration: Cache for symplectic conservation loss
+        self._last_h_initial = None
+        self._last_h_final = None
+
     def build(self, input_shape):
         self.cell.build(input_shape)
         # The projection layer's input will be the output of the HNN evolution,
@@ -752,10 +756,24 @@ class TimeCrystalSequenceBlock(FusedReasoningBlockMixin, ControlVarMixin, layers
             energy_drift_local = tf.reduce_mean(
                 tf.abs(h_final_seq_local - h_initial_seq_local), name="energy_drift_calc"
             )
-            return seq_output, final_h_padded_local, energy_drift_local
+            return (
+                seq_output,
+                final_h_padded_local,
+                energy_drift_local,
+                h_initial_seq_local,
+                h_final_seq_local,
+            )
 
-        candidate_output, candidate_h_padded, candidate_drift = _integrate_sequence(safe_time)
-        fallback_output, fallback_h_padded, fallback_drift = _integrate_sequence(previous_time)
+        (
+            candidate_output,
+            candidate_h_padded,
+            candidate_drift,
+            candidate_h_init,
+            candidate_h_final,
+        ) = _integrate_sequence(safe_time)
+        fallback_output, fallback_h_padded, fallback_drift, fallback_h_init, fallback_h_final = (
+            _integrate_sequence(previous_time)
+        )
 
         finite_candidate = tf.reduce_all(tf.math.is_finite(candidate_output))
         finite_candidate = tf.logical_and(
@@ -790,6 +808,11 @@ class TimeCrystalSequenceBlock(FusedReasoningBlockMixin, ControlVarMixin, layers
         self.cell.last_stable_evolution_time.assign(selected_time)
 
         final_state = (final_h_padded, aux_padded)
+
+        # Cache energies for QULS symplectic conservation
+        self._last_h_initial = tf.where(finite_candidate, candidate_h_init, fallback_h_init)
+        self._last_h_final = tf.where(finite_candidate, candidate_h_final, fallback_h_final)
+
         aux_metrics = {}
         if return_aux_metrics:
             aux_metrics["energy_drift"] = selected_drift
@@ -821,6 +844,50 @@ class TimeCrystalSequenceBlock(FusedReasoningBlockMixin, ControlVarMixin, layers
 
         # --- END: DEFINITIVE FIX ---
         return output_sequence, final_state, aux_metrics
+
+    def step(
+        self, x: tf.Tensor, states: tuple[tf.Tensor, tf.Tensor]
+    ) -> tuple[tf.Tensor, tuple[tf.Tensor, tf.Tensor]]:
+        """Perform O(1) inference step by delegating to the single-step cell.
+
+        Replicates the logic of the sequence call (output projection + Lorentzian)
+        on a per-token basis.
+
+        Args:
+            x: Input tensor [batch, input_dim].
+            states: Previous state tuple (h_padded, aux_padded).
+
+        Returns:
+            output: [batch, embedding_dim]
+            new_states: (h_padded, aux_padded)
+        """
+        # 1. Cell step
+        # Note: cell.call handles reshaping internally if x is [B, D]
+        # It calls fused_hnn_step op.
+        # call() returns output [B, 1, D_in] and new_states
+        output, new_states = self.cell.call(x, states, training=False)
+
+        # 2. Output Projection
+        # SequenceBlock.call (line 769) applies this after sequence op.
+        # We must apply it here after step op.
+        # cell.call returns [batch, 1, input_dim].
+        output = tf.squeeze(output, axis=1)  # [B, D_in]
+        output = self.output_projection(output)  # [B, D_embed]
+
+        # 3. Lorentzian Logic
+        if self.use_lorentzian:
+            # Expand to [B, 1, D] for consistency with sequence logic
+            output_expanded = tf.expand_dims(output, axis=1)
+
+            hyp_features = tf.einsum("bsd,dh->bsh", output_expanded, self.lorentzian_proj_in)
+            hyp_transformed = lorentzian_feature_transform(
+                hyp_features, self.lorentzian_boost, self.lorentzian_rotation
+            )
+            output_expanded = tf.einsum("bsh,hd->bsd", hyp_transformed, self.lorentzian_proj_out)
+
+            output = tf.squeeze(output_expanded, axis=1)
+
+        return output, new_states
 
     def get_config(self) -> dict:
         base_config = super().get_config()

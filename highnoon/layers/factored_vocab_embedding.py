@@ -147,6 +147,25 @@ class FactoredVocabEmbedding(layers.Layer):
 
         return embeddings
 
+    def compute_logits(self, inputs: tf.Tensor) -> tf.Tensor:
+        """Compute logits from hidden states (Reverse projection).
+
+        Args:
+            inputs: Hidden states [batch, seq_len, dim]
+
+        Returns:
+            Logits [batch, seq_len, vocab_size] computed as inputs @ V^T @ U^T
+        """
+        # 1. Project to rank space: inputs @ V^T -> [..., rank]
+        # self.V is [rank, dim], so V^T is [dim, rank]
+        rank_projected = tf.matmul(inputs, self.V, transpose_b=True)
+
+        # 2. Project to vocab space: rank_projected @ U^T -> [..., vocab]
+        # self.U is [vocab, rank], so U^T is [rank, vocab]
+        logits = tf.matmul(rank_projected, self.U, transpose_b=True)
+
+        return logits
+
     def project_context(self, context: tf.Tensor) -> tf.Tensor:
         """Project context embeddings to low-rank space for fast oracle scoring.
 
